@@ -1,0 +1,8 @@
+{
+  "name": "Remix ResearchMate AI - SLR \u0026 Screening ",
+  "description": "Comprehensive Systematic Literature Review (SLR) platform with PRISMA 2020 flow diagram, PICOC scoping, DOI \u0026 Crossref lookup, side-by-side screening with page-level citations, 13-point critical appraisal, and NotebookLM-style synthesis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

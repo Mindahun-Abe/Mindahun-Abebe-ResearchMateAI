@@ -10,15 +10,18 @@ import {
 } from '../utils/slrDetectionEngine';
 import {
   ArrowDown,
+  Building2,
   Check,
   CheckCircle,
   Code2,
   Database,
   Download,
+  ExternalLink,
   FileCheck2,
   FileSpreadsheet,
   Filter,
   GitFork,
+  Lock,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -34,7 +37,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
   const [copiedText, setCopiedText] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [selectedDiagnosticFilter, setSelectedDiagnosticFilter] = useState<
-    'all' | 'flagged' | 'clean' | PrismaDiagnosticCode
+    'all' | 'flagged' | 'clean' | 'duplicates' | PrismaDiagnosticCode
   >('all');
   const [selectedNotPrimarySubFilter, setSelectedNotPrimarySubFilter] = useState<
     'all' | NotPrimarySubType
@@ -62,6 +65,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
     const dbCounts: Record<string, number> = {};
     const includedDbCounts: Record<string, number> = {};
     let duplicates = 0;
+    const duplicateOverlapPairs: Record<string, number> = {};
     let titleAbstractExcluded = 0;
     let fullTextAssessed = 0;
     let fullTextExcluded = 0;
@@ -97,6 +101,15 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
     let anyFlaggedCount = 0;
     let cleanPassCount = 0;
 
+    // PRISMA 2020 Retrieval & Accessibility tracking
+    let retrievalDownloadable = 0;
+    let retrievalNeedsInstitution = 0;
+    let retrievalInstitutionConfirmed = 0;
+    let retrievalNotAccessible = 0;
+    let retrievalAbstractOnly = 0;
+
+    const articleById = new Map(project.articles.map((a) => [a.id, a]));
+
     for (const art of project.articles) {
       const analysis = analysisMap.get(art.id)!;
       const sourceDb = analysis.sourceProvenance.database || 'Other';
@@ -108,6 +121,13 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
 
       if (art.isDuplicate) {
         duplicates++;
+        const matchedDbs =
+          Array.isArray(art.duplicateMatchedDatabases) && art.duplicateMatchedDatabases.length >= 2
+            ? [...art.duplicateMatchedDatabases].sort().join(' ↔ ')
+            : art.duplicateOfId && articleById.get(art.duplicateOfId)
+            ? [articleById.get(art.duplicateOfId)!.sourceDatabase || 'Other', sourceDb].sort().join(' ↔ ')
+            : `${sourceDb} (Duplicate)`;
+        duplicateOverlapPairs[matchedDbs] = (duplicateOverlapPairs[matchedDbs] || 0) + 1;
       } else {
         if (paperType === 'Review') screenedReviews++;
         else screenedOriginal++;
@@ -125,6 +145,31 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
           }
         } else {
           cleanPassCount++;
+        }
+
+        const isNotAccFlagged = diag.detectedCodes.includes('not_accessible');
+        const isAbsOnlyFlagged = diag.detectedCodes.includes('abstract_only');
+        if (art.institutionConfirmed) {
+          retrievalInstitutionConfirmed++;
+          retrievalDownloadable++;
+        } else if (art.accessStatus === 'not_accessible' || isNotAccFlagged) {
+          if (art.accessStatus === 'needs_institution_confirmation') {
+            retrievalNeedsInstitution++;
+          } else {
+            retrievalNotAccessible++;
+          }
+        } else if (art.accessStatus === 'needs_institution_confirmation') {
+          retrievalNeedsInstitution++;
+        } else if (art.accessStatus === 'abstract_only' || isAbsOnlyFlagged) {
+          retrievalAbstractOnly++;
+        } else if (
+          art.accessStatus === 'downloadable' ||
+          Boolean(art.fullText && art.fullText.trim().length > 150) ||
+          Boolean(art.pdfUrl || art.openAccessUrl)
+        ) {
+          retrievalDownloadable++;
+        } else {
+          retrievalNeedsInstitution++;
         }
 
         if (art.decision === 'exclude') {
@@ -154,6 +199,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
       dbCounts,
       includedDbCounts,
       duplicates,
+      duplicateOverlapPairs,
       uniqueScreened,
       titleAbstractExcluded,
       fullTextAssessed,
@@ -170,12 +216,24 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
       notPrimarySubCounts,
       anyFlaggedCount,
       cleanPassCount,
+      retrievalCounts: {
+        downloadable: retrievalDownloadable,
+        needsInstitution: retrievalNeedsInstitution,
+        institutionConfirmed: retrievalInstitutionConfirmed,
+        notAccessible: retrievalNotAccessible,
+        abstractOnly: retrievalAbstractOnly,
+      },
     };
   }, [project.articles, analysisMap]);
 
   const filteredAuditArticles = useMemo(() => {
     return project.articles.filter((art) => {
-      if (art.isDuplicate) return false;
+      if (selectedDiagnosticFilter === 'duplicates') {
+        if (!art.isDuplicate) return false;
+      } else if (art.isDuplicate) {
+        return false;
+      }
+
       const analysis = analysisMap.get(art.id)!;
       const diag = analysis.prismaDiagnostics;
 
@@ -184,7 +242,8 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateA
       if (
         selectedDiagnosticFilter !== 'all' &&
         selectedDiagnosticFilter !== 'flagged' &&
-        selectedDiagnosticFilter !== 'clean'
+        selectedDiagnosticFilter !== 'clean' &&
+        selectedDiagnosticFilter !== 'duplicates'
       ) {
         if (!diag.detectedCodes.includes(selectedDiagnosticFilter)) return false;
         if (
@@ -246,8 +305,11 @@ ${Object.entries(liveCounts.dbCounts)
   .map(([db, count]) => `  - ${db}: n = ${count}`)
   .join('\n')}
 
-2. DUPLICATE REMOVAL
+2. DUPLICATE REMOVAL (CROSS-DATABASE OVERLAP)
 Duplicates removed prior to screening: n = ${liveCounts.duplicates}
+${Object.entries(liveCounts.duplicateOverlapPairs)
+  .map(([pair, cnt]) => `  - ${pair}: n = ${cnt}`)
+  .join('\n') || '  - None recorded'}
 
 3. TITLE & ABSTRACT SCREENING + 8-POINT PROTOCOL DIAGNOSTICS
 Records screened: n = ${liveCounts.uniqueScreened} (Original Research: n = ${liveCounts.screenedOriginal}, Reviews: n = ${liveCounts.screenedReviews})
@@ -265,8 +327,12 @@ ${PRISMA_DIAGNOSTIC_CATEGORIES.map((cat) => {
 }).join('\n')}
 Records passing all 8 protocol checks: n = ${liveCounts.cleanPassCount}
 
-4. FULL-TEXT ELIGIBILITY ASSESSMENT
+4. FULL-TEXT RETRIEVAL & ELIGIBILITY ASSESSMENT
 Reports sought for retrieval: n = ${liveCounts.fullTextAssessed}
+  - Downloadable / Retrieved Full Text: n = ${liveCounts.retrievalCounts.downloadable} (Institution Confirmed: n = ${liveCounts.retrievalCounts.institutionConfirmed})
+  - Needs Institutional Confirmation: n = ${liveCounts.retrievalCounts.needsInstitution}
+  - Reports Not Retrieved / Not Accessible: n = ${liveCounts.retrievalCounts.notAccessible}
+  - Abstract-Only Records: n = ${liveCounts.retrievalCounts.abstractOnly}
 Reports assessed for eligibility: n = ${liveCounts.fullTextAssessed}
 Full-text exclusions with explicit reasons (n = ${liveCounts.fullTextExcluded}):
 ${Object.entries(liveCounts.exclusionReasonBreakdown)
@@ -301,6 +367,8 @@ Total included studies: n = ${liveCounts.includedCount}
       'Database Found',
       'Screening Stage',
       'Decision',
+      'Retrieval / Access Status',
+      'Institution Confirmed',
       'Protocol Alignment (%)',
       'Not Relevant to Topic',
       'Not Primary Research',
@@ -322,6 +390,9 @@ Total included studies: n = ${liveCounts.includedCount}
         const analysis = analysisMap.get(art.id)!;
         const diag = analysis.prismaDiagnostics;
         const flagMap = Object.fromEntries(diag.flags.map((f) => [f.code, f.detected ? 'YES' : 'No']));
+        const derivedAccessStatus = art.institutionConfirmed
+          ? 'downloadable (institution_confirmed)'
+          : art.accessStatus || (flagMap.not_accessible === 'YES' ? 'not_accessible' : flagMap.abstract_only === 'YES' ? 'abstract_only' : art.pdfUrl || art.openAccessUrl || art.fullText ? 'downloadable' : 'needs_institution_confirmation');
         return [
           csvCell(art.id),
           csvCell(art.title),
@@ -332,6 +403,8 @@ Total included studies: n = ${liveCounts.includedCount}
           csvCell(analysis.sourceProvenance.database),
           csvCell(art.screeningStage),
           csvCell(art.decision),
+          csvCell(derivedAccessStatus),
+          csvCell(art.institutionConfirmed ? 'YES' : 'No'),
           csvCell(analysis.codeDetailAnalysis.protocolAlignmentScore),
           csvCell(flagMap.not_relevant_topic),
           csvCell(flagMap.not_primary_research),
@@ -463,16 +536,41 @@ Total included studies: n = ${liveCounts.includedCount}
                 </p>
               </div>
 
-              <div className="md:col-span-4 bg-amber-950/30 border border-amber-800/60 rounded-xl p-4 text-xs">
-                <span className="font-bold text-amber-300 uppercase tracking-wider text-[11px] block mb-1">
-                  Duplicates Removed
-                </span>
+              <div className="md:col-span-4 bg-amber-950/30 border border-amber-800/60 rounded-xl p-4 text-xs space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-amber-300 uppercase tracking-wider text-[11px]">
+                    Duplicates Removed
+                  </span>
+                  {liveCounts.duplicates > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedDiagnosticFilter('duplicates');
+                        setSelectedNotPrimarySubFilter('all');
+                      }}
+                      className="text-[10px] font-semibold text-amber-200 underline hover:text-white cursor-pointer"
+                    >
+                      Inspect Cases
+                    </button>
+                  )}
+                </div>
                 <p className="text-sm font-bold text-amber-400 font-mono">
                   n = {liveCounts.duplicates}
                 </p>
-                <p className="text-[11px] text-amber-200/70 mt-1">
-                  Cross-database duplicate records eliminated.
-                </p>
+                {Object.keys(liveCounts.duplicateOverlapPairs).length > 0 ? (
+                  <div className="space-y-0.5 pt-1 border-t border-amber-900/40 text-[10px] text-amber-200/85">
+                    {Object.entries(liveCounts.duplicateOverlapPairs).map(([pair, cnt]) => (
+                      <div key={pair} className="flex justify-between gap-1">
+                        <span className="truncate">{pair}</span>
+                        <span className="font-mono font-bold shrink-0">n = {cnt}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-amber-200/70 mt-1">
+                    Cross-database duplicate records automatically tracked &amp; reported.
+                  </p>
+                )}
               </div>
             </div>
 
@@ -484,9 +582,9 @@ Total included studies: n = ${liveCounts.includedCount}
           {/* STAGE 3: TITLE AND ABSTRACT SCREENING + 8-POINT DIAGNOSTIC BREAKDOWN */}
           <div className="relative">
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs space-y-2">
+              <div className="md:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 text-xs space-y-2.5">
                 <span className="font-bold text-white uppercase tracking-wider text-[11px] block">
-                  Reports Sought for Full-Text Retrieval
+                  Reports Sought for Full-Text Retrieval (PRISMA 2020)
                 </span>
                 <p className="text-sm font-bold text-indigo-400 font-mono">
                   n = {liveCounts.fullTextAssessed}
@@ -497,6 +595,24 @@ Total included studies: n = ${liveCounts.includedCount}
                     Clean on all 8 checks: n = {liveCounts.cleanPassCount}
                   </span>
                 </p>
+                <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px] font-mono">
+                  <div className="px-2 py-1 rounded bg-emerald-950/40 border border-emerald-800/50 text-emerald-300 flex justify-between">
+                    <span>Downloadable PDF:</span>
+                    <strong>n = {liveCounts.retrievalCounts.downloadable}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded bg-amber-950/40 border border-amber-800/50 text-amber-300 flex justify-between">
+                    <span>Needs Inst. Confirm:</span>
+                    <strong>n = {liveCounts.retrievalCounts.needsInstitution}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded bg-rose-950/40 border border-rose-800/50 text-rose-300 flex justify-between">
+                    <span>Not Accessible:</span>
+                    <strong>n = {liveCounts.retrievalCounts.notAccessible}</strong>
+                  </div>
+                  <div className="px-2 py-1 rounded bg-slate-950 border border-slate-800 text-slate-300 flex justify-between">
+                    <span>Abstract Only:</span>
+                    <strong>n = {liveCounts.retrievalCounts.abstractOnly}</strong>
+                  </div>
+                </div>
               </div>
 
               <div className="md:col-span-5 bg-rose-950/30 border border-rose-800/60 rounded-xl p-4 text-xs space-y-1.5">
@@ -697,6 +813,19 @@ Total included studies: n = ${liveCounts.includedCount}
             >
               Clean Pass ({liveCounts.cleanPassCount})
             </button>
+            <button
+              onClick={() => {
+                setSelectedDiagnosticFilter('duplicates');
+                setSelectedNotPrimarySubFilter('all');
+              }}
+              className={`px-3 py-1.5 rounded-lg font-semibold border transition cursor-pointer ${
+                selectedDiagnosticFilter === 'duplicates'
+                  ? 'bg-amber-600 text-white border-amber-500'
+                  : 'bg-slate-950 text-amber-300 border-slate-800 hover:border-amber-500/50'
+              }`}
+            >
+              Duplicates ({liveCounts.duplicates})
+            </button>
           </div>
         </div>
 
@@ -794,6 +923,7 @@ Total included studies: n = ${liveCounts.includedCount}
                   <th className="py-3 px-3">Study / Year</th>
                   <th className="py-3 px-3">Type &amp; Database</th>
                   <th className="py-3 px-3">Decision / Stage</th>
+                  <th className="py-3 px-3">PRISMA Retrieval / Access</th>
                   <th className="py-3 px-3">Detected PRISMA 8-Point Flags</th>
                   <th className="py-3 px-3">Protocol Fit</th>
                   <th className="py-3 px-3 text-right">Detail &amp; Code</th>
@@ -802,7 +932,7 @@ Total included studies: n = ${liveCounts.includedCount}
               <tbody className="divide-y divide-slate-800/80 bg-slate-950/40">
                 {filteredAuditArticles.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-xs text-slate-400">
+                    <td colSpan={7} className="py-8 text-center text-xs text-slate-400">
                       No records match the active PRISMA diagnostic filter.
                     </td>
                   </tr>
@@ -811,6 +941,16 @@ Total included studies: n = ${liveCounts.includedCount}
                     const analysis = analysisMap.get(art.id)!;
                     const diag = analysis.prismaDiagnostics;
                     const detectedFlags = diag.flags.filter((f) => f.detected);
+                    const effectiveAccess = art.institutionConfirmed
+                      ? 'downloadable'
+                      : art.accessStatus ||
+                        (diag.detectedCodes.includes('not_accessible')
+                          ? 'not_accessible'
+                          : diag.detectedCodes.includes('abstract_only')
+                          ? 'abstract_only'
+                          : art.pdfUrl || art.openAccessUrl || art.fullText
+                          ? 'downloadable'
+                          : 'needs_institution_confirmation');
 
                     return (
                       <tr key={art.id} className="hover:bg-slate-950/80 transition">
@@ -856,6 +996,76 @@ Total included studies: n = ${liveCounts.includedCount}
                           <span className="block text-[10px] text-slate-500 mt-0.5 font-mono">
                             {art.screeningStage}
                           </span>
+                        </td>
+
+                        <td className="py-3 px-3 whitespace-nowrap">
+                          <div className="space-y-1">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${
+                                effectiveAccess === 'downloadable'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : effectiveAccess === 'needs_institution_confirmation'
+                                  ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                  : effectiveAccess === 'not_accessible'
+                                  ? 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                                  : 'bg-slate-800 text-slate-300 border border-slate-700'
+                              }`}
+                            >
+                              {effectiveAccess === 'downloadable' && <FileCheck2 className="w-3 h-3" />}
+                              {effectiveAccess === 'needs_institution_confirmation' && (
+                                <Building2 className="w-3 h-3" />
+                              )}
+                              {effectiveAccess === 'not_accessible' && <Lock className="w-3 h-3" />}
+                              <span>
+                                {art.institutionConfirmed
+                                  ? 'Inst. Confirmed'
+                                  : effectiveAccess === 'downloadable'
+                                  ? 'Downloadable PDF'
+                                  : effectiveAccess === 'needs_institution_confirmation'
+                                  ? 'Needs Inst. Confirm'
+                                  : effectiveAccess === 'not_accessible'
+                                  ? 'Not Accessible'
+                                  : 'Abstract Only'}
+                              </span>
+                            </span>
+                            {onUpdateArticle && (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const nextConfirmed = !art.institutionConfirmed;
+                                    onUpdateArticle({
+                                      ...art,
+                                      institutionConfirmed: nextConfirmed,
+                                      accessStatus: nextConfirmed
+                                        ? 'downloadable'
+                                        : 'needs_institution_confirmation',
+                                    });
+                                    showToast(
+                                      nextConfirmed
+                                        ? `Confirmed institutional access for "${art.title.slice(0, 35)}..."`
+                                        : `Reset institutional confirmation for "${art.title.slice(0, 35)}..."`
+                                    );
+                                  }}
+                                  className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-[10px] text-amber-300 border border-slate-800 cursor-pointer"
+                                  title="Toggle institutional access confirmation for PRISMA 2020"
+                                >
+                                  {art.institutionConfirmed ? 'Undo Inst.' : 'Confirm Inst.'}
+                                </button>
+                                {(art.pdfUrl || art.openAccessUrl) && (
+                                  <a
+                                    href={art.pdfUrl || art.openAccessUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 text-[10px] text-emerald-300 border border-slate-800 inline-flex items-center gap-0.5"
+                                    title="Open PDF / Open-Access source"
+                                  >
+                                    <ExternalLink className="w-2.5 h-2.5" /> PDF
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                          </div>
                         </td>
 
                         <td className="py-3 px-3 max-w-[300px]">

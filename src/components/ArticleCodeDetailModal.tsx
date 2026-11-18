@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Article, ReviewProject } from '../types';
+import { Article, PaperAccessStatus, ReviewProject } from '../types';
 import {
   ArticleMatrixAnalysis,
   DATABASE_PROVENANCE_OPTIONS,
@@ -13,10 +13,12 @@ import {
 import {
   AlertTriangle,
   BookOpen,
+  Building2,
   CheckCircle2,
   Code2,
   Cpu,
   Database,
+  Download,
   ExternalLink,
   FileCheck2,
   Layers,
@@ -24,6 +26,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
+import { apiService } from '../services/apiService';
 
 interface ArticleCodeDetailModalProps {
   project: ReviewProject;
@@ -325,17 +328,75 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                   </button>
                 </div>
               )}
-              {article.doi && (
-                <a
-                  href={article.url || `https://doi.org/${article.doi}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-[11px] text-indigo-400 hover:underline inline-flex items-center gap-1 font-mono"
-                >
-                  <span>DOI: {article.doi}</span>
-                  <ExternalLink className="w-3 h-3" />
-                </a>
-              )}
+              <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-amber-400" />
+                    PRISMA Retrieval / PDF Accessibility Status
+                  </span>
+                  <select
+                    value={article.accessStatus || (article.pdfUrl || article.openAccessUrl || article.fullText ? 'downloadable' : 'needs_institution_confirmation')}
+                    onChange={(e) => {
+                      const nextStatus = e.target.value as PaperAccessStatus;
+                      onUpdateArticle({
+                        ...article,
+                        accessStatus: nextStatus,
+                        institutionConfirmed: nextStatus === 'downloadable' ? article.institutionConfirmed : false,
+                      });
+                    }}
+                    className="bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-[11px] text-white cursor-pointer"
+                  >
+                    <option value="downloadable">Downloadable / Retrieved PDF</option>
+                    <option value="needs_institution_confirmation">Needs Institutional Confirmation</option>
+                    <option value="not_accessible">Not Accessible (Report Not Retrieved)</option>
+                    <option value="abstract_only">Abstract Only</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="inline-flex items-center gap-1.5 text-[11px] text-amber-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(article.institutionConfirmed)}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        onUpdateArticle({
+                          ...article,
+                          institutionConfirmed: checked,
+                          accessStatus: checked ? 'downloadable' : 'needs_institution_confirmation',
+                        });
+                      }}
+                      className="rounded accent-amber-500 cursor-pointer"
+                    />
+                    <span>Institutional access confirmed (PRISMA full text retrieved)</span>
+                  </label>
+
+                  <div className="flex items-center gap-2">
+                    {(article.pdfUrl || article.openAccessUrl) && (
+                      <a
+                        href={apiService.getProxyPdfDownloadUrl(article.pdfUrl || article.openAccessUrl || '', article.title)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] px-2 py-0.5 rounded bg-emerald-600/90 hover:bg-emerald-500 text-white inline-flex items-center gap-1 font-semibold"
+                      >
+                        <Download className="w-3 h-3" />
+                        <span>Download PDF</span>
+                      </a>
+                    )}
+                    {article.doi && (
+                      <a
+                        href={article.url || `https://doi.org/${article.doi}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[11px] text-indigo-400 hover:underline inline-flex items-center gap-1 font-mono"
+                      >
+                        <span>DOI: {article.doi}</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 

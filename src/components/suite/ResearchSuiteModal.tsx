@@ -23,9 +23,10 @@ interface ResearchSuiteModalProps {
   isOpen: boolean;
   onClose: () => void;
   project: ReviewProject;
+  initialTab?: SuiteTabId;
 }
 
-type SuiteTabId =
+export type SuiteTabId =
   | 'cloud'
   | 'gemini_chat_search'
   | 'audio_voice'
@@ -48,8 +49,15 @@ export const ResearchSuiteModal: React.FC<ResearchSuiteModalProps> = ({
   isOpen,
   onClose,
   project,
+  initialTab = 'cloud',
 }) => {
-  const [activeTab, setActiveTab] = useState<SuiteTabId>('cloud');
+  const [activeTab, setActiveTab] = useState<SuiteTabId>(initialTab);
+
+  React.useEffect(() => {
+    if (isOpen && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
 

@@ -2,21 +2,61 @@ import { and, desc, eq } from 'drizzle-orm';
 import { db } from './index.ts';
 import { researchNotes, researchSnapshots, users } from './schema.ts';
 
-export async function getOrCreateUser(uid: string, email: string, displayName?: string) {
+const BOOTSTRAP_ADMIN_EMAIL = 'mindahun77@gmail.com';
+
+export async function getOrCreateUser(
+  uid: string,
+  email: string,
+  displayName?: string,
+  options?: { emailVerified?: boolean; touchLogin?: boolean }
+) {
   try {
+    const cleanEmail = (email || '').trim().toLowerCase();
+    const isBootstrapAdmin =
+      cleanEmail === BOOTSTRAP_ADMIN_EMAIL && Boolean(options?.emailVerified);
+
+    const existingRows = await db.select().from(users).where(eq(users.uid, uid));
+    const existing = existingRows[0];
+
+    if (existing) {
+      const updateSet: Record<string, unknown> = {
+        email: email || existing.email,
+        updatedAt: new Date(),
+      };
+      if (displayName) updateSet.displayName = displayName.slice(0, 120);
+      if (options?.emailVerified !== undefined) {
+        updateSet.emailVerified = options.emailVerified;
+      }
+      if (options?.touchLogin) {
+        updateSet.lastLoginAt = new Date();
+      }
+      if (isBootstrapAdmin && existing.role !== 'admin') {
+        updateSet.role = 'admin';
+      }
+
+      const updated = await db
+        .update(users)
+        .set(updateSet)
+        .where(eq(users.uid, uid))
+        .returning();
+      return updated[0];
+    }
+
     const result = await db
       .insert(users)
       .values({
         uid,
-        email,
-        displayName: displayName || email.split('@')[0] || 'Researcher',
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email,
-          ...(displayName ? { displayName } : {}),
-        },
+        email: email || `${uid}@researcher.local`,
+        displayName: (displayName || email.split('@')[0] || 'Researcher').slice(0, 120),
+        role: isBootstrapAdmin ? 'admin' : 'researcher',
+        status: 'active',
+        planCode: 'free',
+        aiCreditsBalance: 50,
+        aiCreditsUsed: 0,
+        storageUsedBytes: 0,
+        emailVerified: Boolean(options?.emailVerified),
+        lastLoginAt: new Date(),
+        updatedAt: new Date(),
       })
       .returning();
 

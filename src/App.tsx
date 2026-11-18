@@ -20,9 +20,51 @@ import { AddArticleModal } from './components/AddArticleModal';
 import { CreateReviewModal } from './components/CreateReviewModal';
 import { SavedReviewFolders } from './components/SavedReviewFolders';
 import { ResearchSuiteModal } from './components/suite/ResearchSuiteModal';
+import { LandingWebsite } from './components/commercial/LandingWebsite';
+import { AccountBillingPortal } from './components/commercial/AccountBillingPortal';
+import { AdminDashboard } from './components/commercial/AdminDashboard';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { useAuth } from './contexts/AuthContext';
+import {
+  OfflineSyncOperation,
+  SyncStatus,
+  cacheProjectsOffline,
+  enqueueOfflineSyncOp,
+  flushOfflineSyncQueue,
+  loadCachedOfflineProjects,
+  loadOfflineQueue,
+  syncProjectToCloudBackend,
+} from './utils/syncEngine';
 import { apiService, evaluateArticleClient } from './services/apiService';
 
+type SurfaceView = 'workbench' | 'website' | 'billing' | 'admin';
+
+function parseHashSurface(): { view: SurfaceView; section: 'overview' | 'pricing' | 'support' | 'legal' } {
+  const hash = (window.location.hash || '').toLowerCase();
+  if (hash.startsWith('#pricing')) return { view: 'website', section: 'pricing' };
+  if (hash.startsWith('#website') || hash.startsWith('#home')) return { view: 'website', section: 'overview' };
+  if (hash.startsWith('#support')) return { view: 'website', section: 'support' };
+  if (hash.startsWith('#legal')) return { view: 'website', section: 'legal' };
+  if (hash.startsWith('#billing')) return { view: 'billing', section: 'overview' };
+  if (hash.startsWith('#admin')) return { view: 'admin', section: 'overview' };
+  return { view: 'workbench', section: 'overview' };
+}
+
 export default function App() {
+  const { user, idToken, refreshAccountOverview } = useAuth();
+  const initialHash = parseHashSurface();
+  const [surfaceView, setSurfaceView] = useState<SurfaceView>(initialHash.view);
+  const [websiteSection, setWebsiteSection] = useState<'overview' | 'pricing' | 'support' | 'legal'>(
+    initialHash.section
+  );
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(
+    typeof navigator !== 'undefined' && !navigator.onLine ? 'Offline' : 'Synced'
+  );
+  const [pendingOps, setPendingOps] = useState<OfflineSyncOperation[]>(() => loadOfflineQueue());
+  const [activeAnnouncements, setActiveAnnouncements] = useState<
+    { id: number; title: string; message: string; severity: string }[]
+  >([]);
+
   const [projects, setProjects] = useState<ReviewProject[]>([]);
   const [isLoadingProjects, setIsLoadingProjects] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string>('');
@@ -36,14 +78,78 @@ export default function App() {
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
   const [isCreateReviewOpen, setIsCreateReviewOpen] = useState<boolean>(false);
   const [isResearchSuiteOpen, setIsResearchSuiteOpen] = useState<boolean>(false);
+  const [suiteInitialTab, setSuiteInitialTab] = useState<'cloud' | 'gemini_chat_search'>('cloud');
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
   const [addModalInitialTab, setAddModalInitialTab] = useState<'manual' | 'bulk_local' | 'online'>('manual');
+
+  const navigateSurface = (
+    nextView: SurfaceView,
+    section: 'overview' | 'pricing' | 'support' | 'legal' = 'overview'
+  ) => {
+    setSurfaceView(nextView);
+    setWebsiteSection(section);
+    window.location.hash = nextView === 'workbench' ? '#workbench' : `#${nextView}`;
+  };
 
   useEffect(() => {
     const handleQuotaExceeded = () => setMapsQuotaExceeded(true);
     window.addEventListener('gmp-quota-exceeded', handleQuotaExceeded);
     return () => window.removeEventListener('gmp-quota-exceeded', handleQuotaExceeded);
   }, []);
+
+  useEffect(() => {
+    fetch('/api/announcements')
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.announcements)) setActiveAnnouncements(d.announcements);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Verify Chapa callback tx_ref if redirected back to #billing?tx_ref=...
+  useEffect(() => {
+    const hash = window.location.hash || '';
+    const match = hash.match(/tx_ref=([^&]+)/);
+    if (match && idToken) {
+      const txRef = decodeURIComponent(match[1]);
+      fetch(`/api/billing/chapa/verify/${encodeURIComponent(txRef)}`, {
+        headers: { Authorization: `Bearer ${idToken}` },
+      })
+        .then((r) => {
+          if (r.ok) {
+            void refreshAccountOverview();
+            window.location.hash = '#billing';
+          }
+        })
+        .catch(() => {});
+    }
+  }, [idToken, refreshAccountOverview]);
+
+  // Online / Offline connectivity listeners & automatic queue flush
+  useEffect(() => {
+    const handleOnline = async () => {
+      if (idToken && projects.length > 0) {
+        setSyncStatus('Synchronizing');
+        const result = await flushOfflineSyncQueue({
+          token: idToken,
+          uid: user?.uid,
+          emailVerified: user?.emailVerified,
+          projects,
+        });
+        setPendingOps(result.remaining);
+        setSyncStatus(result.remaining.length === 0 ? 'Synced' : 'Sync Failed');
+      } else {
+        setSyncStatus('Synced');
+      }
+    };
+    const handleOffline = () => setSyncStatus('Offline');
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [idToken, user?.uid, user?.emailVerified, projects]);
 
   // Active Project (strictly partitioned so only articles belonging to currentProject.id appear in single-review analysis)
   const rawCurrentProject = projects.find((p) => p.id === currentProjectId) || projects[0] || null;
@@ -129,6 +235,7 @@ export default function App() {
             .map((a) => ({ ...a, projectId: proj.id })),
         }));
         setProjects(sanitized);
+        cacheProjectsOffline(sanitized);
         if (sanitized.length > 0) {
           const resolvedActive =
             sanitized.find((p) => p.id === currentProjectId) || sanitized[0];
@@ -141,8 +248,16 @@ export default function App() {
       })
       .catch((err) => {
         if (!active) return;
-        console.warn('Could not load review folders:', err?.message);
-        setLoadError(err?.message || 'Could not reach database server.');
+        const offlineCached = loadCachedOfflineProjects();
+        if (offlineCached.length > 0) {
+          setProjects(offlineCached);
+          setCurrentProjectId(offlineCached[0].id);
+          setSelectedArticleId(offlineCached[0].articles?.[0]?.id || '');
+          setSyncStatus('Offline');
+        } else {
+          console.warn('Could not load review folders:', err?.message);
+          setLoadError(err?.message || 'Could not reach database server.');
+        }
       })
       .finally(() => {
         if (active) setIsLoadingProjects(false);
@@ -152,13 +267,75 @@ export default function App() {
     };
   }, []);
 
+  const triggerCloudBackgroundSync = async (
+    targetProject: ReviewProject,
+    opType: OfflineSyncOperation['opType'],
+    summary: string
+  ) => {
+    const queued = enqueueOfflineSyncOp(targetProject.id, opType, summary, 'web');
+    setPendingOps(queued);
+
+    if (!navigator.onLine) {
+      setSyncStatus('Offline');
+      return;
+    }
+    if (!idToken) return;
+
+    try {
+      setSyncStatus('Synchronizing');
+      const result = await flushOfflineSyncQueue({
+        token: idToken,
+        uid: user?.uid,
+        emailVerified: user?.emailVerified,
+        projects: projects.map((p) => (p.id === targetProject.id ? targetProject : p)),
+      });
+      setPendingOps(result.remaining);
+      setSyncStatus(result.remaining.length === 0 ? 'Synced' : 'Sync Failed');
+    } catch {
+      setSyncStatus('Sync Failed');
+    }
+  };
+
+  const handleManualSyncAll = async () => {
+    if (!idToken) return;
+    if (!navigator.onLine) {
+      setSyncStatus('Offline');
+      return;
+    }
+    setSyncStatus('Synchronizing');
+    try {
+      const flushed = await flushOfflineSyncQueue({
+        token: idToken,
+        uid: user?.uid,
+        emailVerified: user?.emailVerified,
+        projects,
+      });
+      setPendingOps(flushed.remaining);
+      for (const proj of projects) {
+        await syncProjectToCloudBackend({
+          token: idToken,
+          uid: user?.uid,
+          emailVerified: user?.emailVerified,
+          project: proj,
+        });
+      }
+      setSyncStatus('Synced');
+    } catch {
+      setSyncStatus('Sync Failed');
+    }
+  };
+
   // Handlers for updating project cleanly with functional updates & backend folder sync
   const handleUpdateProject = (updated: ReviewProject) => {
     const isolatedUpdated: ReviewProject = {
       ...updated,
       articles: (updated.articles || []).map((a) => ({ ...a, projectId: updated.id })),
     };
-    setProjects((prev) => prev.map((p) => (p.id === updated.id ? isolatedUpdated : p)));
+    setProjects((prev) => {
+      const next = prev.map((p) => (p.id === updated.id ? isolatedUpdated : p));
+      cacheProjectsOffline(next);
+      return next;
+    });
     apiService.updateProjectFolder(isolatedUpdated).then((saved) => {
       if (saved?.databaseFolderPath) {
         setProjects((prev) =>
@@ -174,6 +351,7 @@ export default function App() {
         );
       }
     }).catch((err) => console.warn('Folder sync warning:', err?.message));
+    void triggerCloudBackgroundSync(isolatedUpdated, 'update_project', `Updated ${isolatedUpdated.title}`);
   };
 
   const handleUpdateArticles = (newArticles: Article[]) => {
@@ -182,12 +360,16 @@ export default function App() {
     const isolated = newArticles
       .filter((a) => !a.projectId || a.projectId === targetId)
       .map((a) => ({ ...a, projectId: targetId }));
-    setProjects((prev) =>
-      prev.map((p) => (p.id === targetId ? { ...p, articles: isolated } : p))
-    );
+    const updatedProj = { ...isolatedCurrentProject, articles: isolated };
+    setProjects((prev) => {
+      const next = prev.map((p) => (p.id === targetId ? { ...p, articles: isolated } : p));
+      cacheProjectsOffline(next);
+      return next;
+    });
     apiService.syncProjectArticles(targetId, isolated).catch((err) =>
       console.warn('Sub-library articles sync warning:', err?.message)
     );
+    void triggerCloudBackgroundSync(updatedProj, 'screen_decision', `Updated ${isolated.length} articles`);
   };
 
   // Permanently remove articles in bulk from a specific review sub-library folder & persist to disk
@@ -265,29 +447,47 @@ export default function App() {
     if (!isolatedCurrentProject) return;
     const targetId = isolatedCurrentProject.id;
     const isolatedArt = { ...updatedArt, projectId: targetId };
-    setProjects((prev) =>
-      prev.map((p) => {
+    let updatedProjForSync: ReviewProject | null = null;
+    setProjects((prev) => {
+      const next = prev.map((p) => {
         if (p.id !== targetId) return p;
         const nextArticles = p.articles.map((a) => (a.id === isolatedArt.id ? isolatedArt : a));
         apiService.syncProjectArticles(targetId, nextArticles).catch(() => {});
-        return { ...p, articles: nextArticles };
-      })
-    );
+        updatedProjForSync = { ...p, articles: nextArticles };
+        return updatedProjForSync;
+      });
+      cacheProjectsOffline(next);
+      return next;
+    });
+    if (updatedProjForSync) {
+      void triggerCloudBackgroundSync(
+        updatedProjForSync,
+        'screen_decision',
+        `Screened "${isolatedArt.title.slice(0, 48)}" -> ${isolatedArt.decision}`
+      );
+    }
   };
 
   const handleToggleStarArticle = (artId: string) => {
     if (!isolatedCurrentProject) return;
     const targetId = isolatedCurrentProject.id;
-    setProjects((prev) =>
-      prev.map((p) => {
+    let updatedProjForSync: ReviewProject | null = null;
+    setProjects((prev) => {
+      const next = prev.map((p) => {
         if (p.id !== targetId) return p;
         const nextArticles = p.articles.map((a) =>
           a.id === artId ? { ...a, isStarred: !a.isStarred } : a
         );
         apiService.syncProjectArticles(targetId, nextArticles).catch(() => {});
-        return { ...p, articles: nextArticles };
-      })
-    );
+        updatedProjForSync = { ...p, articles: nextArticles };
+        return updatedProjForSync;
+      });
+      cacheProjectsOffline(next);
+      return next;
+    });
+    if (updatedProjForSync) {
+      void triggerCloudBackgroundSync(updatedProjForSync, 'update_project', `Toggled star on ${artId}`);
+    }
   };
 
   const handleAddArticle = (newArt: Article, targetProjectId?: string) => {
@@ -308,6 +508,7 @@ export default function App() {
   };
 
   // Supports continuous streaming chunks during large bulk imports locked to a specific review partition
+  // Automatically detects & records cross-database duplicates for PRISMA 2020 reporting
   const handleAddMultipleArticles = (
     newArts: Article[],
     options?: { keepOpen?: boolean; targetProjectId?: string }
@@ -318,35 +519,124 @@ export default function App() {
     if (!targetId) return;
     const isolatedBatch = newArts.map((a) => ({ ...a, projectId: targetId }));
 
+    const targetProj = projects.find((p) => p.id === targetId);
+    const existingArticles = [...(targetProj?.articles || [])];
+
+    const normDoi = (d?: string) => (d ? d.toLowerCase().trim() : '');
+    const normTitle = (t?: string) => (t ? t.toLowerCase().replace(/[^a-z0-9]/g, '') : '');
+
+    const canonByDoi = new Map<string, Article>();
+    const canonByTitle = new Map<string, Article>();
+    const seenSameDb = new Set<string>();
+    const existingIds = new Set<string>();
+
+    for (const ex of existingArticles) {
+      existingIds.add(ex.id);
+      const dk = normDoi(ex.doi);
+      const tk = normTitle(ex.title);
+      const db = (ex.sourceDatabase || 'Other').toLowerCase().trim();
+      if (dk) seenSameDb.add(`${db}::doi:${dk}`);
+      if (tk.length > 12) seenSameDb.add(`${db}::title:${tk}`);
+      if (!ex.isDuplicate) {
+        if (dk && !canonByDoi.has(dk)) canonByDoi.set(dk, ex);
+        if (tk.length > 12 && !canonByTitle.has(tk)) canonByTitle.set(tk, ex);
+      }
+    }
+
+    const canonicalUpdates = new Map<string, Partial<Article>>();
+    const newRecordsToInsert: Article[] = [];
+
+    for (const art of isolatedBatch) {
+      if (existingIds.has(art.id)) continue;
+      const dk = normDoi(art.doi);
+      const tk = normTitle(art.title);
+      const incomingDb = (art.sourceDatabase || 'Other').trim();
+      const incomingDbLower = incomingDb.toLowerCase();
+
+      // Prevent accidental double-click re-import of the exact same paper from the exact same database
+      if (
+        (dk && seenSameDb.has(`${incomingDbLower}::doi:${dk}`)) ||
+        (tk.length > 12 && seenSameDb.has(`${incomingDbLower}::title:${tk}`))
+      ) {
+        continue;
+      }
+
+      if (dk) seenSameDb.add(`${incomingDbLower}::doi:${dk}`);
+      if (tk.length > 12) seenSameDb.add(`${incomingDbLower}::title:${tk}`);
+
+      const canonical = (dk && canonByDoi.get(dk)) || (tk.length > 12 ? canonByTitle.get(tk) : undefined);
+
+      if (canonical && (canonical.sourceDatabase || 'Other').toLowerCase().trim() !== incomingDbLower) {
+        // Cross-database duplicate: KEEP the identified database record AND flag as duplicate for PRISMA!
+        const prevMatched =
+          canonicalUpdates.get(canonical.id)?.duplicateMatchedDatabases ||
+          canonical.duplicateMatchedDatabases ||
+          [canonical.sourceDatabase];
+        const mergedDatabases = Array.from(new Set([...prevMatched, canonical.sourceDatabase, incomingDb]));
+
+        const canonicalPatch: Partial<Article> = {
+          ...(canonicalUpdates.get(canonical.id) || {}),
+          duplicateMatchedDatabases: mergedDatabases,
+        };
+        if (!canonical.pdfUrl && art.pdfUrl) {
+          canonicalPatch.pdfUrl = art.pdfUrl;
+          canonicalPatch.openAccessUrl = art.openAccessUrl || art.pdfUrl;
+          canonicalPatch.accessStatus = 'downloadable';
+        }
+        canonicalUpdates.set(canonical.id, canonicalPatch);
+
+        newRecordsToInsert.push({
+          ...art,
+          isDuplicate: true,
+          duplicateOfId: canonical.id,
+          duplicateMatchedDatabases: mergedDatabases,
+          duplicateNote: `Published in multiple databases (${mergedDatabases.join(' & ')})`,
+          screeningStage: 'excluded',
+          decision: 'exclude',
+          decisionReason: `Cross-database duplicate (also indexed in ${canonical.sourceDatabase})`,
+        });
+      } else {
+        if (dk && !canonByDoi.has(dk)) canonByDoi.set(dk, art);
+        if (tk.length > 12 && !canonByTitle.has(tk)) canonByTitle.set(tk, art);
+        newRecordsToInsert.push(art);
+      }
+    }
+
     setProjects((prev) =>
       prev.map((p) => {
         if (p.id !== targetId) return p;
-        const existingIds = new Set(p.articles.map((a) => a.id));
-        const uniqueNew = isolatedBatch.filter((a) => !existingIds.has(a.id));
-        return { ...p, articles: [...uniqueNew, ...p.articles] };
+        const currIds = new Set(p.articles.map((a) => a.id));
+        const uniqueNew = newRecordsToInsert.filter((a) => !currIds.has(a.id));
+        const updatedExisting = p.articles.map((ex) => {
+          const patch = canonicalUpdates.get(ex.id);
+          return patch ? { ...ex, ...patch } : ex;
+        });
+        return { ...p, articles: [...uniqueNew, ...updatedExisting] };
       })
     );
 
-    if (!options?.keepOpen && isolatedBatch.length > 0 && targetId === currentProjectId) {
-      setSelectedArticleId(isolatedBatch[0].id);
+    if (!options?.keepOpen && newRecordsToInsert.length > 0 && targetId === currentProjectId) {
+      setSelectedArticleId(newRecordsToInsert[0].id);
     }
 
-    apiService
-      .uploadArticlesChunk(
-        targetId,
-        isolatedBatch,
-        isolatedBatch.map((a) => a.sourceFileName).filter(Boolean) as string[]
-      )
-      .then((res) => {
-        if (res?.databaseFolderPath) {
-          setProjects((prev) =>
-            prev.map((p) =>
-              p.id === targetId ? { ...p, databaseFolderPath: res.databaseFolderPath } : p
-            )
-          );
-        }
-      })
-      .catch((err) => console.warn('Chunk persistence warning:', err?.message));
+    if (newRecordsToInsert.length > 0) {
+      apiService
+        .uploadArticlesChunk(
+          targetId,
+          newRecordsToInsert,
+          newRecordsToInsert.map((a) => a.sourceFileName).filter(Boolean) as string[]
+        )
+        .then((res) => {
+          if (res?.databaseFolderPath) {
+            setProjects((prev) =>
+              prev.map((p) =>
+                p.id === targetId ? { ...p, databaseFolderPath: res.databaseFolderPath } : p
+              )
+            );
+          }
+        })
+        .catch((err) => console.warn('Chunk persistence warning:', err?.message));
+    }
   };
 
   const handleSelectArticleForScreening = (artId: string) => {
@@ -540,8 +830,25 @@ export default function App() {
     (a) => a.decision === 'unscreened' && !a.isDuplicate
   ).length;
 
+  if (surfaceView === 'website') {
+    return (
+      <LandingWebsite
+        initialSection={websiteSection}
+        onEnterWorkbench={() => navigateSurface('workbench')}
+        onOpenBilling={() => navigateSurface('billing')}
+        onOpenAdmin={() => navigateSurface('admin')}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased selection:bg-indigo-600/30 selection:text-indigo-200">
+      {activeAnnouncements.length > 0 && (
+        <div className="bg-indigo-950/80 border-b border-indigo-500/30 text-indigo-100 px-4 py-2 text-xs text-center">
+          <span className="font-bold">{activeAnnouncements[0].title}: </span>
+          <span>{activeAnnouncements[0].message}</span>
+        </div>
+      )}
       {mapsQuotaExceeded && (
         <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
           <span>
@@ -561,7 +868,10 @@ export default function App() {
       {/* Top Universal Navbar */}
       <Navbar
         currentTab={currentTab}
-        onTabChange={setCurrentTab}
+        onTabChange={(tab) => {
+          setSurfaceView('workbench');
+          setCurrentTab(tab);
+        }}
         projects={projects}
         currentProjectId={currentProjectId}
         onSwitchProject={handleSwitchProject}
@@ -577,10 +887,31 @@ export default function App() {
         onOpenAddModal={() => handleOpenAddModal('bulk_local')}
         onCreateNewReview={() => setIsCreateReviewOpen(true)}
         onOpenManualPaperModal={() => handleOpenAddModal('manual')}
+        onOpenCloudWorkspace={() => {
+          setSuiteInitialTab('cloud');
+          setIsResearchSuiteOpen(true);
+        }}
+        syncStatus={syncStatus}
+        pendingOpsCount={pendingOps.length}
+        onOpenWebsite={() => navigateSurface('website', 'overview')}
+        onOpenBilling={() => navigateSurface('billing')}
+        onOpenAdmin={() => navigateSurface('admin')}
       />
 
-      {/* Main Workspace: Empty Database State, Wide Desktop, or Simulated Android Mobile */}
-      <main className="flex-1 flex flex-col">
+      {surfaceView === 'billing' ? (
+        <AccountBillingPortal
+          projects={projects}
+          currentProject={isolatedCurrentProject}
+          syncStatus={syncStatus}
+          pendingOps={pendingOps}
+          onManualSyncAll={handleManualSyncAll}
+          onBackToWorkbench={() => navigateSurface('workbench')}
+        />
+      ) : surfaceView === 'admin' ? (
+        <AdminDashboard onBackToWorkbench={() => navigateSurface('workbench')} />
+      ) : (
+        /* Main Workspace: Empty Database State, Wide Desktop, or Simulated Android Mobile */
+        <main className="flex-1 flex flex-col">
         {!isolatedCurrentProject ? (
           <div className="flex-1 flex items-center justify-center p-6">
             <div className="max-w-lg w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 text-center space-y-4 shadow-xl">
@@ -682,6 +1013,7 @@ export default function App() {
                       onOpenCrossrefModal={() => setIsCrossrefOpen(true)}
                       onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                       onOpenManualPaperModal={() => handleOpenAddModal('manual')}
+                      onAddMultipleArticles={handleAddMultipleArticles}
                     />
                   )}
                   {currentTab === 'picoc' && (
@@ -705,6 +1037,7 @@ export default function App() {
                       onOpenCrossrefModal={() => setIsCrossrefOpen(true)}
                       onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                       onOpenManualPaperModal={() => handleOpenAddModal('manual')}
+                      onAddMultipleArticles={handleAddMultipleArticles}
                     />
                   )}
                   {currentTab === 'duplicates' && (
@@ -846,6 +1179,7 @@ export default function App() {
                   onOpenCrossrefModal={() => setIsCrossrefOpen(true)}
                   onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
+                  onAddMultipleArticles={handleAddMultipleArticles}
                 />
               )}
 
@@ -871,6 +1205,7 @@ export default function App() {
                   onOpenCrossrefModal={() => setIsCrossrefOpen(true)}
                   onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
+                  onAddMultipleArticles={handleAddMultipleArticles}
                 />
               )}
 
@@ -960,7 +1295,8 @@ export default function App() {
             </div>
           </div>
         )}
-      </main>
+        </main>
+      )}
 
       {/* Universal Modals */}
       <CreateReviewModal
@@ -1005,8 +1341,10 @@ export default function App() {
           isOpen={isResearchSuiteOpen}
           onClose={() => setIsResearchSuiteOpen(false)}
           project={isolatedCurrentProject}
+          initialTab={suiteInitialTab}
         />
       )}
+      <OfflineIndicator pendingCount={pendingOps.length} />
     </div>
   );
 }

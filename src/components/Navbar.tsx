@@ -1,6 +1,7 @@
 import React from 'react';
 import { ReviewProject } from '../types';
 import { getFrameworkDefinition, getReviewTypeDefinition } from '../utils/protocolFrameworks';
+import { useAuth } from '../contexts/AuthContext';
 import {
   Compass,
   BookOpen,
@@ -23,7 +24,17 @@ import {
   Radio,
   Plus,
   FolderOpen,
+  LogIn,
+  UserCheck,
+  Globe,
+  CreditCard,
+  Shield,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from 'lucide-react';
+import { SyncStatus } from '../utils/syncEngine';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface NavbarProps {
   currentTab: string;
@@ -41,6 +52,12 @@ interface NavbarProps {
   onOpenAddModal?: () => void;
   onCreateNewReview?: () => void;
   onOpenManualPaperModal?: () => void;
+  onOpenCloudWorkspace?: () => void;
+  syncStatus?: SyncStatus;
+  pendingOpsCount?: number;
+  onOpenWebsite?: () => void;
+  onOpenBilling?: () => void;
+  onOpenAdmin?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -59,7 +76,15 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAddModal,
   onCreateNewReview,
   onOpenManualPaperModal,
+  onOpenCloudWorkspace,
+  syncStatus = 'Synced',
+  pendingOpsCount = 0,
+  onOpenWebsite,
+  onOpenBilling,
+  onOpenAdmin,
 }) => {
+  const { user, accountOverview, signInWithGoogle } = useAuth();
+  const isAdmin = accountOverview?.user.role === 'admin';
   const currentProject = projects.find((p) => p.id === currentProjectId) || projects[0];
   const activeFramework = getFrameworkDefinition(currentProject?.frameworkType);
   const activeReviewType = getReviewTypeDefinition(currentProject?.reviewType);
@@ -269,6 +294,98 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Bulk Import</span>
+              </button>
+            )}
+
+            <PWAInstallButton />
+
+            {/* Sync Status Indicator */}
+            <button
+              type="button"
+              onClick={onOpenBilling}
+              title={`Cloud Synchronization Status: ${syncStatus}${
+                pendingOpsCount > 0 ? ` (${pendingOpsCount} pending)` : ''
+              }`}
+              className={`px-2 py-1.5 rounded-xl text-[11px] font-semibold border inline-flex items-center gap-1 cursor-pointer shrink-0 ${
+                syncStatus === 'Offline'
+                  ? 'bg-amber-950/60 border-amber-500/40 text-amber-300'
+                  : syncStatus === 'Sync Failed'
+                  ? 'bg-rose-950/60 border-rose-500/40 text-rose-300'
+                  : syncStatus === 'Synchronizing'
+                  ? 'bg-indigo-950/60 border-indigo-500/40 text-indigo-300'
+                  : 'bg-slate-900 border-slate-800 text-emerald-400'
+              }`}
+            >
+              {syncStatus === 'Offline' ? (
+                <WifiOff className="w-3.5 h-3.5" />
+              ) : syncStatus === 'Synchronizing' ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Wifi className="w-3.5 h-3.5" />
+              )}
+              <span className="hidden xl:inline">{syncStatus}</span>
+            </button>
+
+            {onOpenWebsite && (
+              <button
+                type="button"
+                onClick={onOpenWebsite}
+                className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                title="Open ResearchMate AI Commercial Website & Pricing"
+              >
+                <Globe className="w-3.5 h-3.5 text-teal-400" />
+                <span className="hidden xl:inline">Website</span>
+              </button>
+            )}
+
+            {onOpenBilling && (
+              <button
+                type="button"
+                onClick={onOpenBilling}
+                className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                title="Subscription Plans, Billing & Cloud Sync"
+              >
+                <CreditCard className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden xl:inline">Plans</span>
+              </button>
+            )}
+
+            {isAdmin && onOpenAdmin && (
+              <button
+                type="button"
+                onClick={onOpenAdmin}
+                className="px-2.5 py-1.5 bg-amber-950/50 hover:bg-amber-900/50 text-amber-300 border border-amber-500/30 text-xs font-semibold rounded-xl transition inline-flex items-center gap-1 cursor-pointer shrink-0"
+                title="Administrator Governance Dashboard"
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span className="hidden xl:inline">Admin</span>
+              </button>
+            )}
+
+            {/* Google Account / Cloud Workspace Trigger */}
+            {user ? (
+              <button
+                type="button"
+                onClick={onOpenCloudWorkspace}
+                className="px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-500/30 text-xs font-semibold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                title={`Signed in as ${user.email || user.displayName || 'Researcher'} — Open Cloud Sync`}
+              >
+                <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden lg:inline max-w-[96px] truncate">
+                  {user.displayName?.split(' ')[0] || 'Account'}
+                </span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  void signInWithGoogle();
+                }}
+                className="px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                title="Sign in with Google for Cloud Sync & SQL Persistence"
+              >
+                <LogIn className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="hidden md:inline">Sign In</span>
               </button>
             )}
           </div>

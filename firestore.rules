@@ -31,6 +31,13 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'mindahun77@gmail.com'
+        || exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
     function isValidUserPublic(data, userId) {
       return data.keys().hasAll(['uid', 'displayName', 'updatedAt'])
         && data.keys().hasOnly(['uid', 'displayName', 'photoURL', 'updatedAt'])
@@ -81,6 +88,47 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidCloudProject(data, userId, projectId) {
+      return data.keys().hasAll(['id', 'userId', 'title', 'discipline', 'frameworkType', 'articleCount', 'includedCount', 'version', 'lastSyncedDevice', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'title', 'discipline', 'frameworkType', 'articleCount', 'includedCount', 'version', 'lastSyncedDevice', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id == projectId
+        && data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId == userId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 240
+        && data.discipline is string && data.discipline.size() >= 1 && data.discipline.size() <= 120
+        && data.frameworkType is string && data.frameworkType.size() >= 1 && data.frameworkType.size() <= 32
+        && data.articleCount is int && data.articleCount >= 0 && data.articleCount <= 1000000
+        && data.includedCount is int && data.includedCount >= 0 && data.includedCount <= 1000000
+        && data.version is int && data.version >= 1 && data.version <= 1000000000
+        && data.lastSyncedDevice is string && data.lastSyncedDevice in ['web', 'android']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOfflineSyncOp(data, userId, opId) {
+      return data.keys().hasAll(['id', 'userId', 'projectId', 'opType', 'device', 'status', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'userId', 'projectId', 'opType', 'device', 'status', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id == opId
+        && data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId == userId
+        && data.projectId is string && data.projectId.size() >= 1 && data.projectId.size() <= 128
+        && data.opType is string && data.opType in ['screen_decision', 'update_project', 'update_extraction']
+        && data.device is string && data.device in ['web', 'android']
+        && data.status is string && data.status in ['queued', 'applied']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidAnnouncement(data, announcementId) {
+      return data.keys().hasAll(['id', 'title', 'message', 'severity', 'isActive', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'title', 'message', 'severity', 'isActive', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.id == announcementId
+        && data.title is string && data.title.size() >= 1 && data.title.size() <= 160
+        && data.message is string && data.message.size() >= 1 && data.message.size() <= 1000
+        && data.severity is string && data.severity in ['info', 'warning', 'release']
+        && data.isActive is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // 1. Public Profile (Non-PII)
     match /users/{userId}/public/profile {
       allow get: if isValidId(userId) && isSignedIn();
@@ -91,17 +139,19 @@ service cloud.firestore {
         && incoming().updatedAt == request.time;
       allow update: if isValidId(userId)
         && isVerifiedUser()
-        && isOwner(userId)
-        && isValidUserPublic(incoming(), userId)
-        && incoming().uid == existing().uid
-        && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt']);
-      allow delete: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
+        && (isAdmin() || (
+          isOwner(userId)
+          && isValidUserPublic(incoming(), userId)
+          && incoming().uid == existing().uid
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoURL', 'updatedAt'])
+        ));
+      allow delete: if isValidId(userId) && isVerifiedUser() && (isOwner(userId) || isAdmin());
     }
 
     // 2. Isolated Private PII Info
     match /users/{userId}/private/info {
-      allow get: if isValidId(userId) && isOwner(userId);
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow create: if isValidId(userId)
         && isVerifiedUser()
         && isOwner(userId)
@@ -116,13 +166,13 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
-      allow delete: if isValidId(userId) && isVerifiedUser() && isOwner(userId);
+      allow delete: if isValidId(userId) && isVerifiedUser() && (isOwner(userId) || isAdmin());
     }
 
     // 3. Research Notes Subcollection
     match /users/{userId}/research_notes/{noteId} {
-      allow get: if isValidId(userId) && isValidId(noteId) && isOwner(userId);
-      allow list: if isValidId(userId) && isOwner(userId) && resource.data.userId == request.auth.uid;
+      allow get: if isValidId(userId) && isValidId(noteId) && (isOwner(userId) || isAdmin());
+      allow list: if isValidId(userId) && (isOwner(userId) || isAdmin()) && resource.data.userId == userId;
       allow create: if isValidId(userId) && isValidId(noteId)
         && isVerifiedUser()
         && isOwner(userId)
@@ -131,8 +181,6 @@ service cloud.firestore {
         && incoming().updatedAt == request.time;
       allow update: if isValidId(userId) && isValidId(noteId)
         && isVerifiedUser()
-        && isOwner(userId)
-        && existing().status != 'archived'
         && isValidResearchNote(incoming(), userId, noteId)
         && incoming().id == existing().id
         && incoming().userId == existing().userId
@@ -140,19 +188,23 @@ service cloud.firestore {
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          // Action 1: Edit note content/tags
-          incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'tags', 'updatedAt'])
-          ||
-          // Action 2: Archive note (terminal status lock)
-          (incoming().status == 'archived' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          isAdmin()
+          || (
+            isOwner(userId)
+            && existing().status != 'archived'
+            && (
+              incoming().diff(existing()).affectedKeys().hasOnly(['title', 'content', 'tags', 'updatedAt'])
+              || (incoming().status == 'archived' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+            )
+          )
         );
-      allow delete: if isValidId(userId) && isValidId(noteId) && isVerifiedUser() && isOwner(userId);
+      allow delete: if isValidId(userId) && isValidId(noteId) && isVerifiedUser() && (isOwner(userId) || isAdmin());
     }
 
     // 4. Cloud Snapshots Subcollection
     match /users/{userId}/cloud_snapshots/{snapshotId} {
-      allow get: if isValidId(userId) && isValidId(snapshotId) && isOwner(userId);
-      allow list: if isValidId(userId) && isOwner(userId) && resource.data.userId == request.auth.uid;
+      allow get: if isValidId(userId) && isValidId(snapshotId) && (isOwner(userId) || isAdmin());
+      allow list: if isValidId(userId) && (isOwner(userId) || isAdmin()) && resource.data.userId == userId;
       allow create: if isValidId(userId) && isValidId(snapshotId)
         && isVerifiedUser()
         && isOwner(userId)
@@ -161,15 +213,85 @@ service cloud.firestore {
         && incoming().updatedAt == request.time;
       allow update: if isValidId(userId) && isValidId(snapshotId)
         && isVerifiedUser()
-        && isOwner(userId)
         && isValidCloudSnapshot(incoming(), userId, snapshotId)
         && incoming().id == existing().id
         && incoming().userId == existing().userId
         && incoming().projectId == existing().projectId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().diff(existing()).affectedKeys().hasOnly(['projectTitle', 'includedCount', 'totalCount', 'summary', 'updatedAt']);
-      allow delete: if isValidId(userId) && isValidId(snapshotId) && isVerifiedUser() && isOwner(userId);
+        && (
+          isAdmin()
+          || (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['projectTitle', 'includedCount', 'totalCount', 'summary', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isValidId(snapshotId) && isVerifiedUser() && (isOwner(userId) || isAdmin());
+    }
+
+    // 5. Cloud Projects Subcollection (Web & Android Sync)
+    match /users/{userId}/cloud_projects/{projectId} {
+      allow get: if isValidId(userId) && isValidId(projectId) && (isOwner(userId) || isAdmin());
+      allow list: if isValidId(userId) && (isOwner(userId) || isAdmin()) && resource.data.userId == userId;
+      allow create: if isValidId(userId) && isValidId(projectId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidCloudProject(incoming(), userId, projectId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(projectId)
+        && isVerifiedUser()
+        && isValidCloudProject(incoming(), userId, projectId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isOwner(userId) && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'discipline', 'frameworkType', 'articleCount', 'includedCount', 'version', 'lastSyncedDevice', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isValidId(projectId) && isVerifiedUser() && (isOwner(userId) || isAdmin());
+    }
+
+    // 6. Offline Sync Operations Queue
+    match /users/{userId}/sync_ops/{opId} {
+      allow get: if isValidId(userId) && isValidId(opId) && (isOwner(userId) || isAdmin());
+      allow list: if isValidId(userId) && (isOwner(userId) || isAdmin()) && resource.data.userId == userId;
+      allow create: if isValidId(userId) && isValidId(opId)
+        && isVerifiedUser()
+        && isOwner(userId)
+        && isValidOfflineSyncOp(incoming(), userId, opId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isValidId(opId)
+        && isVerifiedUser()
+        && isValidOfflineSyncOp(incoming(), userId, opId)
+        && incoming().id == existing().id
+        && incoming().userId == existing().userId
+        && incoming().projectId == existing().projectId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin()
+          || (isOwner(userId) && existing().status != 'applied' && incoming().status == 'applied' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isValidId(opId) && isVerifiedUser() && (isOwner(userId) || isAdmin());
+    }
+
+    // 7. Administrator Announcements
+    match /announcements/{announcementId} {
+      allow get: if isValidId(announcementId) && isSignedIn() && (resource.data.isActive == true || isAdmin());
+      allow list: if isSignedIn() && (resource.data.isActive == true || isAdmin());
+      allow create: if isValidId(announcementId)
+        && isAdmin()
+        && isValidAnnouncement(incoming(), announcementId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(announcementId)
+        && isAdmin()
+        && isValidAnnouncement(incoming(), announcementId)
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'message', 'severity', 'isActive', 'updatedAt']);
+      allow delete: if isValidId(announcementId) && isAdmin();
     }
   }
 }

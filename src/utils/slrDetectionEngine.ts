@@ -1036,26 +1036,44 @@ export function detectPrismaExclusionDiagnostics(
     explicitWrongArea ? 95 : conflictStudyArea ? 85 : 88
   );
 
-  // --- 5. Not accessible papers ---
-  const explicitInaccessible = /\b(not\s+accessible|inaccessible|paywall|behind\s+paywall|subscription\s+required|no\s+access|access\s+denied|unable\s+to\s+retrieve|full[- ]text\s+unavailable|cannot\s+retrieve|broken\s+link|not\s+retrievable|404\s+not\s+found)\b/i.test(`${reasonNotesLower} ${abstractLower}`);
+  // --- 5. Not accessible papers (PRISMA 2020 Reports Sought vs Not Retrieved / Institution Confirmation) ---
+  const explicitInaccessible = /\b(not\s+accessible|inaccessible|paywall|behind\s+paywall|subscription\s+required|no\s+access|access\s+denied|unable\s+to\s+retrieve|full[- ]text\s+unavailable|cannot\s+retrieve|broken\s+link|not\s+retrievable|404\s+not\s+found)\b/i.test(`${reasonNotesLower} ${abstractLower} ${(article.accessNotes || '').toLowerCase()}`);
+  const statusNotAccessible = article.accessStatus === 'not_accessible';
+  const statusNeedsInstUnconfirmed =
+    article.accessStatus === 'needs_institution_confirmation' &&
+    !article.institutionConfirmed &&
+    !article.fullText?.trim() &&
+    (!article.pages || article.pages.length === 0);
   const zeroContentAndLinks =
     !article.fullText?.trim() &&
     (!article.pages || article.pages.length === 0) &&
     !article.abstract?.trim() &&
     !article.url &&
     !article.openAccessUrl &&
+    !article.pdfUrl &&
     !article.doi;
-  const notAccessibleDetected = explicitInaccessible || zeroContentAndLinks;
+  const notAccessibleDetected =
+    statusNotAccessible || statusNeedsInstUnconfirmed || explicitInaccessible || zeroContentAndLinks;
   const notAccRes = applyOverride(
     'not_accessible',
     notAccessibleDetected,
-    explicitInaccessible
+    statusNotAccessible
+      ? 'Recorded as Not Accessible / Reports Not Retrieved (PRISMA 2020 retrieval failure)'
+      : statusNeedsInstUnconfirmed
+      ? 'Requires institutional subscription confirmation to download full text (PRISMA 2020)'
+      : explicitInaccessible
       ? 'Full-text manuscript marked inaccessible / behind paywall / unretrievable'
       : zeroContentAndLinks
       ? 'No full text, abstract, DOI, or URL available to access paper'
+      : article.institutionConfirmed
+      ? 'Accessible (Institutional access confirmed)'
+      : article.accessStatus === 'downloadable' || article.pdfUrl || article.openAccessUrl
+      ? 'Downloadable open-access PDF / link verified'
       : 'Accessible (metadata / DOI / text available)',
-    explicitInaccessible ? (article.decisionReason || article.screeningNotes || '') : '',
-    explicitInaccessible ? 95 : zeroContentAndLinks ? 82 : 90
+    article.accessNotes ||
+      (explicitInaccessible ? (article.decisionReason || article.screeningNotes || '') : '') ||
+      (article.pdfUrl || article.openAccessUrl || ''),
+    statusNotAccessible ? 98 : statusNeedsInstUnconfirmed ? 92 : explicitInaccessible ? 95 : zeroContentAndLinks ? 82 : 90
   );
 
   // --- 6. Outside publication year ---
@@ -1095,22 +1113,26 @@ export function detectPrismaExclusionDiagnostics(
   );
 
   // --- 7. Abstract-only paper ---
-  const explicitAbstractOnly = /\b(abstract[- ]only|only\s+abstract\s+available|no\s+full[- ]?text|conference\s+abstract\s+only|short\s+abstract|meeting\s+abstract)\b/i.test(`${textSample} ${reasonNotesLower}`);
+  const explicitAbstractOnly =
+    article.accessStatus === 'abstract_only' ||
+    /\b(abstract[- ]only|only\s+abstract\s+available|no\s+full[- ]?text|conference\s+abstract\s+only|short\s+abstract|meeting\s+abstract)\b/i.test(`${textSample} ${reasonNotesLower}`);
   const structuralAbstractOnly =
     Boolean(article.abstract && article.abstract.trim().length > 25) &&
     !article.fullText?.trim() &&
     (!article.pages || article.pages.length === 0) &&
+    !article.pdfUrl &&
+    !article.openAccessUrl &&
     article.decision !== 'include';
   const abstractOnlyDetected = explicitAbstractOnly || structuralAbstractOnly;
   const absOnlyRes = applyOverride(
     'abstract_only',
     abstractOnlyDetected,
     explicitAbstractOnly
-      ? 'Explicitly identified as an abstract-only record (no full paper)'
+      ? 'Identified as an abstract-only record (no downloadable full paper)'
       : structuralAbstractOnly
-      ? 'Only abstract text present (no full-text body or pages attached)'
-      : 'Full-text / page evidence present',
-    explicitAbstractOnly ? (article.decisionReason || article.journal || '') : structuralAbstractOnly ? 'Abstract present without fullText or pages' : '',
+      ? 'Only abstract text present (no full-text body, pages, or downloadable PDF attached)'
+      : 'Full-text / downloadable PDF or page evidence present',
+    explicitAbstractOnly ? (article.accessNotes || article.decisionReason || article.journal || '') : structuralAbstractOnly ? 'Abstract present without fullText, pages, or OA PDF' : '',
     explicitAbstractOnly ? 96 : structuralAbstractOnly ? 78 : 92
   );
 

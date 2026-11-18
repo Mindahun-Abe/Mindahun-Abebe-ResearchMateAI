@@ -477,14 +477,116 @@ export const apiService = {
     return data.items || [];
   },
 
-  // Search across online scientific databases (Crossref, PubMed, OpenAlex, arXiv)
-  async searchOnlineDatabases(query: string, database: string = 'all', rows: number = 15): Promise<any[]> {
-    const res = await fetch(`/api/online/search?query=${encodeURIComponent(query)}&database=${encodeURIComponent(database)}&rows=${rows}`);
+  // Search across online scientific databases (OpenAlex, Crossref, PubMed, Europe PMC, Semantic Scholar, arXiv)
+  async searchOnlineDatabases(
+    query: string,
+    database: string = 'all',
+    rows: number = 15,
+    searchBy: string = 'all_fields'
+  ): Promise<any[]> {
+    const res = await fetch(
+      `/api/online/search?query=${encodeURIComponent(query)}&database=${encodeURIComponent(
+        database
+      )}&searchBy=${encodeURIComponent(searchBy)}&rows=${rows}`
+    );
     if (!res.ok) {
       throw new Error(`Online database search failed (${res.status})`);
     }
     const data = await res.json();
     return data.items || [];
+  },
+
+  async searchOnlineDatabasesRich(params: {
+    query: string;
+    database?: string;
+    customDatabase?: string;
+    searchBy?: string;
+    rows?: number;
+    offset?: number;
+    fetchAll?: boolean;
+    broadWebSearch?: boolean;
+    includeRelated?: boolean;
+    preserveCrossDbDuplicates?: boolean;
+  }): Promise<{
+    items: any[];
+    total: number;
+    totalAvailable?: number;
+    uniqueCount?: number;
+    crossDbDuplicateCount?: number;
+    offset?: number;
+    hasMore?: boolean;
+    nextOffset?: number;
+    sourceStats: Record<string, number>;
+    totalHitsBySource?: Record<string, number>;
+    elapsedMs?: number;
+    cached?: boolean;
+  }> {
+    const {
+      query,
+      database = 'all',
+      customDatabase = '',
+      searchBy = 'all_fields',
+      rows = 500,
+      offset = 0,
+      fetchAll = false,
+      broadWebSearch = false,
+      includeRelated = false,
+      preserveCrossDbDuplicates = true,
+    } = params;
+    const customParam = customDatabase.trim()
+      ? `&customDatabase=${encodeURIComponent(customDatabase.trim())}`
+      : '';
+    const res = await fetch(
+      `/api/online/search?query=${encodeURIComponent(query)}&database=${encodeURIComponent(
+        database
+      )}&searchBy=${encodeURIComponent(searchBy)}&rows=${rows}&offset=${offset}&fetchAll=${fetchAll}&broadWebSearch=${broadWebSearch}&includeRelated=${includeRelated}&preserveCrossDbDuplicates=${preserveCrossDbDuplicates}${customParam}`
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Online database search failed (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async verifyAndFetchPaperFullText(params: {
+    pdfUrl?: string;
+    openAccessUrl?: string;
+    url?: string;
+    doi?: string;
+    title?: string;
+  }): Promise<{
+    accessible: boolean;
+    accessStatus: 'downloadable' | 'needs_institution_confirmation' | 'not_accessible' | 'abstract_only';
+    resolvedPdfUrl?: string;
+    byteSize?: number;
+    extractedFullText?: string;
+    pages?: { pageNumber: number; content: string }[];
+    reason?: string;
+  }> {
+    const res = await fetch('/api/online/fetch-fulltext', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      return {
+        accessible: false,
+        accessStatus: 'not_accessible',
+        reason: `Verification request failed (${res.status})`,
+      };
+    }
+    return res.json();
+  },
+
+  getProxyPdfDownloadUrl(pdfUrl: string, title?: string): string {
+    const safeName = (title || 'research-paper')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_|_$/g, '')
+      .slice(0, 60);
+    return `/api/online/proxy-pdf?url=${encodeURIComponent(pdfUrl)}&filename=${encodeURIComponent(
+      safeName || 'research_paper'
+    )}.pdf`;
   },
 
   // Auto-sync & enrich article metadata from DOI, Title, or File Name (with bounded timeout so bulk imports never stall)

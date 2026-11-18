@@ -9,12 +9,10 @@ import {
   AlertCircle,
   X,
   FileCheck2,
-  Search,
   RefreshCw,
   Plus,
   BookOpen,
   CheckCircle2,
-  ExternalLink,
   ArrowRight,
   ListPlus,
   Layers,
@@ -30,6 +28,7 @@ import {
   DATABASE_PROVENANCE_OPTIONS,
   detectArticleSourceDatabase,
 } from '../utils/slrDetectionEngine';
+import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 
 interface UploadedFileRecord {
   id: string;
@@ -187,15 +186,8 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
     );
   }, [targetProject?.articles]);
 
-  // Online Multi-Search State
-  const [onlineQuery, setOnlineQuery] = useState('');
-  const [onlineDb, setOnlineDb] = useState<'all' | 'crossref' | 'pubmed' | 'openalex' | 'arxiv'>('all');
-  const [isSearchingOnline, setIsSearchingOnline] = useState(false);
-  const [onlineResults, setOnlineResults] = useState<any[]>([]);
-  const [selectedOnlineItems, setSelectedOnlineItems] = useState<Set<string>>(new Set());
-  const [onlineError, setOnlineError] = useState('');
-
   const [bulkSourceDatabase, setBulkSourceDatabase] = useState<string>('auto');
+  const [bulkCustomDatabase, setBulkCustomDatabase] = useState('');
   const [manualCustomDatabase, setManualCustomDatabase] = useState('');
 
   // Manual Paper Insertion State: ALL fields start completely empty with clear placeholders (NOT auto-filled)
@@ -225,7 +217,9 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
     const activeProj = projOverride || targetProject;
     const pType = classifyPaperType(art);
     const resolvedDb =
-      bulkSourceDatabase !== 'auto'
+      bulkSourceDatabase === 'Other'
+        ? bulkCustomDatabase.trim() || 'Other'
+        : bulkSourceDatabase !== 'auto'
         ? bulkSourceDatabase
         : detectArticleSourceDatabase(art).database;
 
@@ -885,66 +879,6 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
     return results;
   };
 
-  // 3. Online Multi-Search
-  const handleOnlineSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!onlineQuery.trim()) return;
-
-    setIsSearchingOnline(true);
-    setOnlineError('');
-    setOnlineResults([]);
-    setSelectedOnlineItems(new Set());
-
-    try {
-      const items = await apiService.searchOnlineDatabases(onlineQuery.trim(), onlineDb, 20);
-      setOnlineResults(items);
-      if (items.length === 0) {
-        setOnlineError('No records found online for this query. Try broader keywords.');
-      } else {
-        // Start with 0 selected — user must explicitly select external records to upload (no auto-inclusion)
-        setSelectedOnlineItems(new Set());
-      }
-    } catch (err: any) {
-      setOnlineError(err.message || 'Failed to search online databases.');
-    } finally {
-      setIsSearchingOnline(false);
-    }
-  };
-
-  const handleImportSelectedOnline = () => {
-    const toImport = onlineResults.filter((it) => selectedOnlineItems.has(it.id));
-    if (toImport.length === 0) return;
-    const lockedProject = targetProject;
-    const lockedProjectId = lockedProject?.id;
-
-    const converted: Article[] = toImport.map((it) => ({
-      id: makeUniqueId('art-online'),
-      projectId: lockedProjectId,
-      title: it.title,
-      authors: it.authors && it.authors.length > 0 ? it.authors : ['Unknown Author'],
-      year: it.year || new Date().getFullYear(),
-      journal: it.journal || 'Academic Publication',
-      doi: it.doi || undefined,
-      abstract: it.abstract || 'Abstract retrieved from online bibliographic index.',
-      sourceDatabase: it.sourceDatabase || 'Crossref',
-      url: it.url,
-      openAccessUrl: it.openAccessUrl,
-      citationsCount: it.citationsCount,
-      screeningStage: 'title_abstract',
-      decision: 'unscreened',
-      evidenceCitations: [],
-    }));
-
-    const screened = converted.map((a) => applyAutoScreening(a, lockedProject));
-
-    if (onAddMultipleArticles) {
-      onAddMultipleArticles(screened, { targetProjectId: lockedProjectId });
-    } else {
-      screened.forEach((a) => onAddArticle(a, lockedProjectId));
-    }
-    onClose();
-  };
-
   // 4. Commit resolved articles from Bulk Local
   const handleImportResolvedBulk = () => {
     if (resolvedArticles.length === 0) return;
@@ -1100,7 +1034,7 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
             }`}
           >
             <Globe className="w-3.5 h-3.5 text-purple-400" />
-            <span>Online Multi-Search (Crossref / PubMed / OpenAlex)</span>
+            <span>Online Multi-Search (6+ DBs · PDF &amp; Related)</span>
           </button>
         </div>
 
@@ -1208,22 +1142,33 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
                 </span>
               </label>
 
-              <div className="sm:col-span-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
-                <span className="text-slate-400">
-                  <strong className="text-slate-200">Where Articles Were Found (Optional):</strong> Assign database source or auto-detect from DOI/URL/file
-                </span>
-                <select
-                  value={bulkSourceDatabase}
-                  onChange={(e) => setBulkSourceDatabase(e.target.value)}
-                  className="bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-[11px] text-white focus:outline-none focus:border-indigo-500 cursor-pointer"
-                >
-                  <option value="auto">Auto-Detect (URL / DOI / File)</option>
-                  {DATABASE_PROVENANCE_OPTIONS.map((db) => (
-                    <option key={db} value={db}>
-                      {db}
-                    </option>
-                  ))}
-                </select>
+              <div className="sm:col-span-3 flex flex-col gap-2 pt-2 border-t border-slate-800/80">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <span className="text-slate-400">
+                    <strong className="text-slate-200">Where Articles Were Found (Optional):</strong> Assign database source (incl. Google Scholar or custom) or auto-detect
+                  </span>
+                  <select
+                    value={bulkSourceDatabase}
+                    onChange={(e) => setBulkSourceDatabase(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-xl px-3 py-1.5 text-[11px] text-white focus:outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="auto">Auto-Detect (URL / DOI / File)</option>
+                    {DATABASE_PROVENANCE_OPTIONS.map((db) => (
+                      <option key={db} value={db}>
+                        {db === 'Other' ? 'Other (Write Custom Database Name)...' : db}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {bulkSourceDatabase === 'Other' && (
+                  <input
+                    type="text"
+                    placeholder="Write custom database name (e.g. ResearchGate, AGRIS, CORE, Institutional Repo)..."
+                    value={bulkCustomDatabase}
+                    onChange={(e) => setBulkCustomDatabase(e.target.value)}
+                    className="w-full bg-slate-900 border border-indigo-600/60 rounded-xl px-3 py-1.5 text-[11px] text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-400"
+                  />
+                )}
               </div>
             </div>
 
@@ -1619,152 +1564,26 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
           </div>
         )}
 
-        {/* TAB 2: ONLINE MULTI-SEARCH (NO MANUAL FORM NEEDED) */}
+        {/* TAB 2: FAST ONLINE MULTI-SEARCH, DOWNLOAD & PRISMA RETRIEVAL RECORDER */}
         {activeTab === 'online' && (
-          <div className="p-6 overflow-y-auto space-y-4 flex-1 text-xs">
-            <form onSubmit={handleOnlineSearch} className="space-y-3">
-              <div className="flex flex-col sm:flex-row gap-2">
-                <div className="relative flex-1">
-                  <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5 pointer-events-none" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="Search online sources by keywords (e.g. 'UAV crop water stress' or 'gully erosion ML')..."
-                    value={onlineQuery}
-                    onChange={(e) => setOnlineQuery(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-white focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-                <select
-                  value={onlineDb}
-                  onChange={(e) => setOnlineDb(e.target.value as any)}
-                  className="bg-slate-950 border border-slate-800 text-slate-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-indigo-500 cursor-pointer shrink-0"
-                >
-                  <option value="all">All Sources (Crossref + OpenAlex + PubMed)</option>
-                  <option value="crossref">Crossref Global</option>
-                  <option value="openalex">OpenAlex (PubMed/Scopus/WoS indexed)</option>
-                  <option value="pubmed">PubMed / BioMed</option>
-                  <option value="arxiv">arXiv Preprints</option>
-                </select>
-                <button
-                  type="submit"
-                  disabled={isSearchingOnline}
-                  className="px-4 py-2 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 disabled:opacity-50 text-white font-bold rounded-xl transition inline-flex items-center gap-1.5 shrink-0 cursor-pointer text-xs shadow-md"
-                >
-                  <Search className={`w-3.5 h-3.5 ${isSearchingOnline ? 'animate-spin' : ''}`} />
-                  <span>{isSearchingOnline ? 'Searching...' : 'Search Online Sources'}</span>
-                </button>
-              </div>
-            </form>
-
-            {onlineError && (
-              <div className="p-3 bg-rose-950/40 border border-rose-900 rounded-xl text-rose-300 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{onlineError}</span>
-              </div>
-            )}
-
-            {onlineResults.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs pt-1">
-                  <span className="font-bold text-slate-300 flex items-center gap-1.5">
-                    <Globe className="w-4 h-4 text-teal-400" />
-                    <span>Found {onlineResults.length} Online Studies</span>
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setSelectedOnlineItems(new Set(onlineResults.map((it) => it.id)))}
-                      className="text-indigo-400 hover:text-indigo-300 text-[11px] hover:underline cursor-pointer"
-                    >
-                      Select All
-                    </button>
-                    <span>•</span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedOnlineItems(new Set())}
-                      className="text-slate-400 hover:text-slate-300 text-[11px] hover:underline cursor-pointer"
-                    >
-                      Deselect All
-                    </button>
-                  </div>
-                </div>
-
-                <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
-                  {onlineResults.map((item) => {
-                    const isSelected = selectedOnlineItems.has(item.id);
-                    return (
-                      <div
-                        key={item.id}
-                        onClick={() => {
-                          const updated = new Set(selectedOnlineItems);
-                          if (updated.has(item.id)) updated.delete(item.id);
-                          else updated.add(item.id);
-                          setSelectedOnlineItems(updated);
-                        }}
-                        className={`p-3 rounded-xl border transition cursor-pointer flex items-start gap-3 ${
-                          isSelected
-                            ? 'bg-indigo-950/30 border-indigo-500/60 ring-1 ring-indigo-500/40'
-                            : 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => {}}
-                          className="mt-1 rounded accent-indigo-600 cursor-pointer"
-                        />
-                        <div className="flex-1 min-w-0 space-y-1">
-                          <p className="font-bold text-white text-xs leading-snug">{item.title}</p>
-                          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400">
-                            <span className="text-slate-300">{(item.authors || []).slice(0, 3).join(', ')}</span>
-                            <span>•</span>
-                            <span className="font-mono text-emerald-400">{item.year}</span>
-                            <span>•</span>
-                            <span className="text-slate-300 italic truncate max-w-[180px]">{item.journal}</span>
-                            <span className="px-1.5 py-0.2 rounded bg-slate-900 border border-slate-800 text-[9px] font-mono text-indigo-300">
-                              {item.sourceDatabase}
-                            </span>
-                            {item.doi && (
-                              <span className="text-[10px] text-slate-500 font-mono truncate max-w-[160px]">
-                                DOI: {item.doi}
-                              </span>
-                            )}
-                          </div>
-                          {item.abstract && (
-                            <p className="text-[11px] text-slate-400 line-clamp-2 pt-0.5">{item.abstract}</p>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="flex items-center justify-between pt-3 border-t border-slate-800">
-              <span className="text-xs text-slate-400">
-                {selectedOnlineItems.size} of {onlineResults.length} selected for 1-click import
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium cursor-pointer text-xs"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleImportSelectedOnline}
-                  disabled={selectedOnlineItems.size === 0}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 disabled:opacity-40 text-white font-bold shadow-md transition inline-flex items-center gap-1.5 cursor-pointer text-xs"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>Import {selectedOnlineItems.size} Selected Articles</span>
-                </button>
-              </div>
-            </div>
+          <div className="p-4 sm:p-5 overflow-y-auto flex-1 text-xs">
+            <FastOnlineSearchPanel
+              project={targetProject}
+              targetProjectId={targetProject?.id}
+              onAddArticles={(articles, options) => {
+                const lockedProjectId = options?.targetProjectId || targetProject?.id;
+                if (onAddMultipleArticles) {
+                  onAddMultipleArticles(articles, {
+                    keepOpen: options?.keepOpen ?? true,
+                    targetProjectId: lockedProjectId,
+                  });
+                } else {
+                  articles.forEach((a) => onAddArticle(a, lockedProjectId));
+                }
+              }}
+              onClose={onClose}
+              compact
+            />
           </div>
         )}
 

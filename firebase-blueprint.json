@@ -63,47 +63,15 @@
       "description": "Cloud-synced systematic review memo or synthesis note owned by a user",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "userId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "projectId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "title": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "content": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 8000
-        },
-        "tags": {
-          "type": "array",
-          "description": "Bounded tag list up to 10 tags"
-        },
-        "status": {
-          "type": "string",
-          "enum": ["active", "archived"]
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "content": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "tags": { "type": "array", "description": "Bounded tag list up to 10 tags" },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "projectId", "title", "content", "status", "createdAt", "updatedAt"]
     },
@@ -112,46 +80,67 @@
       "description": "Cloud-synced SLR progress snapshot summary per review folder",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "userId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "projectId": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        "projectTitle": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 240
-        },
-        "includedCount": {
-          "type": "integer"
-        },
-        "totalCount": {
-          "type": "integer"
-        },
-        "summary": {
-          "type": "string",
-          "maxLength": 2000
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "projectTitle": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "includedCount": { "type": "integer" },
+        "totalCount": { "type": "integer" },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "projectId", "projectTitle", "includedCount", "totalCount", "createdAt", "updatedAt"]
+    },
+    "CloudProject": {
+      "title": "CloudProject",
+      "description": "Synchronized SLR project header and screening metrics for Web and Android",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "discipline": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "frameworkType": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "articleCount": { "type": "integer" },
+        "includedCount": { "type": "integer" },
+        "version": { "type": "integer" },
+        "lastSyncedDevice": { "type": "string", "enum": ["web", "android"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "title", "discipline", "frameworkType", "articleCount", "includedCount", "version", "lastSyncedDevice", "createdAt", "updatedAt"]
+    },
+    "OfflineSyncOp": {
+      "title": "OfflineSyncOp",
+      "description": "Idempotent offline screening or project mutation queued across devices",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "userId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "opType": { "type": "string", "enum": ["screen_decision", "update_project", "update_extraction"] },
+        "device": { "type": "string", "enum": ["web", "android"] },
+        "status": { "type": "string", "enum": ["queued", "applied"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "projectId", "opType", "device", "status", "createdAt", "updatedAt"]
+    },
+    "Announcement": {
+      "title": "Announcement",
+      "description": "Platform-wide release and maintenance announcement managed by administrators",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "severity": { "type": "string", "enum": ["info", "warning", "release"] },
+        "isActive": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "message", "severity", "isActive", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -170,6 +159,18 @@
     "/users/{userId}/cloud_snapshots/{snapshotId}": {
       "schema": { "$ref": "#/entities/CloudSnapshot" },
       "description": "User-owned SLR review progress snapshots"
+    },
+    "/users/{userId}/cloud_projects/{projectId}": {
+      "schema": { "$ref": "#/entities/CloudProject" },
+      "description": "User-owned synchronized SLR project headers for Web and Android"
+    },
+    "/users/{userId}/sync_ops/{opId}": {
+      "schema": { "$ref": "#/entities/OfflineSyncOp" },
+      "description": "Idempotent cross-device offline sync operations"
+    },
+    "/announcements/{announcementId}": {
+      "schema": { "$ref": "#/entities/Announcement" },
+      "description": "Active administrator announcements"
     }
   }
 }

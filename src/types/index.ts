@@ -54,6 +54,8 @@ export type DatabaseProvenance =
   | 'Manual'
   | 'Crossref'
   | 'PubMed'
+  | 'Europe PMC'
+  | 'DOAJ'
   | 'arXiv'
   | 'OpenAlex'
   | 'Semantic Scholar'
@@ -63,6 +65,12 @@ export type DatabaseProvenance =
   | 'Wiley'
   | 'Other'
   | string;
+
+export type PaperAccessStatus =
+  | 'downloadable'
+  | 'needs_institution_confirmation'
+  | 'not_accessible'
+  | 'abstract_only';
 
 export interface Article {
   id: string;
@@ -84,8 +92,17 @@ export interface Article {
   publisher?: string;
   citationsCount?: number;
   openAccessUrl?: string;
+  pdfUrl?: string;
+  accessStatus?: PaperAccessStatus;
+  accessNotes?: string;
+  institutionConfirmed?: boolean;
+  retrievedAt?: string;
   isDuplicate?: boolean;
   duplicateOfId?: string;
+  duplicateMatchedDatabases?: string[];
+  duplicateNote?: string;
+  searchBatchId?: string;
+  searchQueryUsed?: string;
   isStarred?: boolean;
   priority?: 'low' | 'medium' | 'high';
   screeningStage: 'title_abstract' | 'full_text' | 'final_included' | 'excluded';

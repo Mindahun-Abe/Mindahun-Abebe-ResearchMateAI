@@ -7,7 +7,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { AuthRequest, requireAuth } from './src/middleware/auth.ts';
+import { AuthRequest, optionalAuth, requireAuth } from './src/middleware/auth.ts';
 import {
   createUserNote,
   createUserSnapshot,
@@ -16,6 +16,8 @@ import {
   listUserNotes,
   listUserSnapshots,
 } from './src/db/users.ts';
+import { commercialRouter } from './src/server/commercialRoutes.ts';
+import { consumeAiCredits } from './src/db/commercial.ts';
 
 dotenv.config();
 
@@ -937,142 +939,1357 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
 });
 
 // -------------------------------------------------------------
-// Online Multi-Database Search API (Crossref + OpenAlex + PubMed)
+// Fast In-Memory Cache & Access Classifier for Online Academic Search
 // -------------------------------------------------------------
-app.get('/api/online/search', async (req: Request, res: Response) => {
-  try {
-    const query = req.query.query as string;
-    const db = (req.query.database as string) || 'all';
-    const rows = Number(req.query.rows) || 12;
+const onlineSearchCache = new Map<string, { expiresAt: number; payload: any }>();
 
-    if (!query) {
+const SUBSCRIPTION_PUBLISHERS = [
+  'elsevier',
+  'sciencedirect',
+  'springer',
+  'nature',
+  'wiley',
+  'ieee',
+  'taylor & francis',
+  'tandfonline',
+  'sage',
+  'oxford university press',
+  'cambridge university press',
+  'emerald',
+  'scopus',
+  'clarivate',
+];
+
+function classifyOnlineAccessStatus(item: {
+  pdfUrl?: string;
+  openAccessUrl?: string;
+  isOpenAccess?: boolean;
+  url?: string;
+  doi?: string;
+  journal?: string;
+  publisher?: string;
+  abstract?: string;
+}): {
+  accessStatus: 'downloadable' | 'needs_institution_confirmation' | 'not_accessible' | 'abstract_only';
+  accessNotes: string;
+} {
+  if (item.pdfUrl || (item.isOpenAccess && item.openAccessUrl)) {
+    return {
+      accessStatus: 'downloadable',
+      accessNotes: item.pdfUrl
+        ? 'Direct open-access PDF link available for download.'
+        : 'Open-access full-text landing link available.',
+    };
+  }
+  const venueHint = `${item.journal || ''} ${item.publisher || ''} ${item.url || ''} ${item.doi || ''}`.toLowerCase();
+  const isSubscriptionVenue =
+    SUBSCRIPTION_PUBLISHERS.some((p) => venueHint.includes(p)) ||
+    venueHint.includes('10.1016/') ||
+    venueHint.includes('10.1109/') ||
+    venueHint.includes('10.1007/') ||
+    venueHint.includes('10.1002/') ||
+    venueHint.includes('10.1080/');
+
+  if (isSubscriptionVenue && (item.doi || item.url)) {
+    return {
+      accessStatus: 'needs_institution_confirmation',
+      accessNotes: 'Subscription publisher detected; institutional login/confirmation needed to download PDF.',
+    };
+  }
+  if (!item.url && !item.doi && (!item.abstract || item.abstract.length < 30)) {
+    return {
+      accessStatus: 'not_accessible',
+      accessNotes: 'No full text, PDF, DOI, or publisher URL available.',
+    };
+  }
+  if (item.abstract && item.abstract.length >= 30 && !item.pdfUrl && !item.openAccessUrl) {
+    return {
+      accessStatus: item.doi || item.url ? 'needs_institution_confirmation' : 'abstract_only',
+      accessNotes:
+        item.doi || item.url
+          ? 'No free OA PDF indexed; publisher access or institutional confirmation required.'
+          : 'Abstract metadata indexed without downloadable full-text link.',
+    };
+  }
+  return {
+    accessStatus: 'abstract_only',
+    accessNotes: 'Metadata/abstract only indexed.',
+  };
+}
+
+function cleanDoiValue(raw: string): string {
+  return (raw || '')
+    .trim()
+    .replace(/^https?:\/\/(dx\.)?doi\.org\//i, '')
+    .replace(/^doi:\s*/i, '')
+    .trim();
+}
+
+function extractXmlTag(xml: string, tag: string): string {
+  const m = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return m ? m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/\s+/g, ' ').trim() : '';
+}
+
+function parseArxivAtomFeed(xml: string): any[] {
+  const entries = xml.match(/<entry>[\s\S]*?<\/entry>/gi) || [];
+  return entries.map((entry, idx) => {
+    const rawId = extractXmlTag(entry, 'id');
+    const arxivId = rawId.split('/abs/').pop() || rawId.split('/').pop() || `${idx}`;
+    const title = extractXmlTag(entry, 'title') || 'Untitled arXiv Preprint';
+    const summary = extractXmlTag(entry, 'summary') || 'arXiv preprint abstract.';
+    const published = extractXmlTag(entry, 'published');
+    const year = published ? parseInt(published.slice(0, 4), 10) : new Date().getFullYear();
+    const authorMatches = Array.from(entry.matchAll(/<author>\s*<name>([^<]+)<\/name>[\s\S]*?<\/author>/gi));
+    const authors = authorMatches.map((m) => m[1].trim()).filter(Boolean);
+    const doiTag = extractXmlTag(entry, 'arxiv:doi') || extractXmlTag(entry, 'doi');
+    const pdfUrl = `https://arxiv.org/pdf/${arxivId.replace(/\.pdf$/i, '')}.pdf`;
+    const url = rawId || `https://arxiv.org/abs/${arxivId}`;
+    return {
+      id: `ax-${arxivId.replace(/[^a-zA-Z0-9._-]/g, '')}`,
+      doi: doiTag || '',
+      title,
+      authors: authors.length > 0 ? authors.slice(0, 6) : ['arXiv Author'],
+      year: isNaN(year) ? new Date().getFullYear() : year,
+      journal: 'arXiv Preprint Repository',
+      abstract: summary,
+      sourceDatabase: 'arXiv',
+      citationsCount: 0,
+      isOpenAccess: true,
+      openAccessUrl: pdfUrl,
+      pdfUrl,
+      url,
+    };
+  });
+}
+
+// -------------------------------------------------------------
+// Online Multi-Database Search API (Strict Per-DB + Uncapped Pagination + Cross-DB Duplicate Tracking)
+// Databases: all | google_scholar | pubmed | europepmc | crossref | openalex | semantic_scholar | arxiv | doaj | custom (Scopus, WoS, IEEE, ScienceDirect, Springer, Wiley, MDPI, etc.)
+// Supports searchBy: keywords | all_fields | title | doi | abstract | author | boolean | related
+// -------------------------------------------------------------
+const POLITE_MAILTO = 'researchmate.slr@gmail.com';
+const POLITE_UA = `ResearchMateAI/2.0 (mailto:${POLITE_MAILTO})`;
+
+async function fetchWithRetry(url: string, options: RequestInit = {}, timeoutMs = 6000): Promise<globalThis.Response> {
+  const mergedOptions: RequestInit = {
+    ...options,
+    headers: {
+      'User-Agent': POLITE_UA,
+      ...(options.headers || {}),
+    },
+  };
+  let resp = await fetchWithTimeout(url, mergedOptions, timeoutMs);
+  if (resp.status === 429 || resp.status === 503) {
+    await new Promise((r) => setTimeout(r, 550));
+    resp = await fetchWithTimeout(url, mergedOptions, timeoutMs);
+  }
+  return resp;
+}
+
+const CUSTOM_PUBLISHER_MEMBERS: Record<string, { label: string; crossrefMember?: string; mode?: string }> = {
+  sciencedirect: { label: 'ScienceDirect', crossrefMember: '78' },
+  elsevier: { label: 'ScienceDirect', crossrefMember: '78' },
+  ieee: { label: 'IEEE Xplore', crossrefMember: '263' },
+  'ieee xplore': { label: 'IEEE Xplore', crossrefMember: '263' },
+  springer: { label: 'Springer', crossrefMember: '297' },
+  springerlink: { label: 'Springer', crossrefMember: '297' },
+  nature: { label: 'Springer Nature', crossrefMember: '297' },
+  wiley: { label: 'Wiley', crossrefMember: '311' },
+  mdpi: { label: 'MDPI', crossrefMember: '1968' },
+  'taylor & francis': { label: 'Taylor & Francis', crossrefMember: '301' },
+  'taylor and francis': { label: 'Taylor & Francis', crossrefMember: '301' },
+  tandfonline: { label: 'Taylor & Francis', crossrefMember: '301' },
+  sage: { label: 'SAGE', crossrefMember: '179' },
+  oxford: { label: 'Oxford University Press', crossrefMember: '286' },
+  'oxford university press': { label: 'Oxford University Press', crossrefMember: '286' },
+  cambridge: { label: 'Cambridge University Press', crossrefMember: '56' },
+  doaj: { label: 'DOAJ', mode: 'doaj' },
+  scopus: { label: 'Scopus', mode: 'scopus' },
+  'web of science': { label: 'Web of Science', mode: 'wos' },
+  wos: { label: 'Web of Science', mode: 'wos' },
+  clarivate: { label: 'Web of Science', mode: 'wos' },
+  core: { label: 'CORE', mode: 'openaire' },
+  openaire: { label: 'OpenAIRE', mode: 'openaire' },
+  europepmc: { label: 'Europe PMC', mode: 'europepmc' },
+  'europe pmc': { label: 'Europe PMC', mode: 'europepmc' },
+};
+
+app.get('/api/online/search', async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  try {
+    const rawQuery = ((req.query.query as string) || '').trim();
+    const db = ((req.query.database as string) || 'all').trim().toLowerCase();
+    const customDatabase = ((req.query.customDatabase as string) || '').trim();
+    // Strict per-database search by default; only aggregate across all APIs when db==='all' OR broadWebSearch==='true'
+    const broadWebSearch = req.query.broadWebSearch === 'true';
+    const includeRelated = req.query.includeRelated === 'true';
+    const fetchAll = req.query.fetchAll === 'true' || Number(req.query.rows) === 0;
+    const preserveCrossDbDuplicates = req.query.preserveCrossDbDuplicates !== 'false';
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    let searchBy = ((req.query.searchBy as string) || 'all_fields').trim().toLowerCase();
+
+    // Remove arbitrary small cap: support up to 1000+ per call (and multi-page pagination for larger)
+    const requestedRows = fetchAll ? 1000 : Math.min(2000, Math.max(5, Number(req.query.rows) || 200));
+
+    if (!rawQuery) {
       return res.status(400).json({ error: 'Query parameter is required' });
     }
 
-    const allItems: any[] = [];
-
-    // Parallel fetch from OpenAlex and Crossref
-    const fetchPromises: Promise<any>[] = [];
-
-    // 1. OpenAlex (aggregates PubMed, Scopus, Crossref, arXiv)
-    if (db === 'all' || db === 'openalex' || db === 'pubmed' || db === 'arxiv') {
-      const openAlexUrl = `https://api.openalex.org/works?search=${encodeURIComponent(query)}&per-page=${rows}`;
-      fetchPromises.push(
-        fetch(openAlexUrl, { headers: { 'User-Agent': 'ResearchMateAI/1.0' } })
-          .then((r) => (r.ok ? r.json() : null))
-          .then((data) => {
-            if (!data?.results) return [];
-            return data.results.map((w: any) => {
-              const authors = (w.authorships || []).map((a: any) => a.author?.display_name || 'Unknown');
-              const journal = w.primary_location?.source?.display_name || 'Academic Venue';
-              const cleanDoi = w.doi ? w.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
-              let sourceDb = 'OpenAlex';
-              if (journal.toLowerCase().includes('ieee')) sourceDb = 'IEEE Xplore';
-              else if (journal.toLowerCase().includes('elsevier') || journal.toLowerCase().includes('sciencedirect')) sourceDb = 'ScienceDirect';
-              else if (w.type === 'preprint') sourceDb = 'arXiv';
-              else if (db === 'pubmed') sourceDb = 'PubMed';
-
-              return {
-                id: `oa-${w.id?.split('/').pop() || Math.random().toString(36).substr(2, 6)}`,
-                doi: cleanDoi,
-                title: w.title || 'Untitled',
-                authors: authors.slice(0, 5),
-                year: w.publication_year || new Date().getFullYear(),
-                journal,
-                abstract: reconstructAbstract(w.abstract_inverted_index) || 'No abstract text available in record.',
-                sourceDatabase: sourceDb,
-                citationsCount: w.cited_by_count || 0,
-                openAccessUrl: w.open_access?.oa_url || '',
-                url: w.doi || w.primary_location?.landing_page_url || '',
-              };
-            });
-          })
-          .catch((e) => {
-            console.warn('OpenAlex search failed:', e.message);
-            return [];
-          })
-      );
+    const looksLikeDoi = /^(https?:\/\/(dx\.)?doi\.org\/|doi:\s*)?10\.\d{4,9}\//i.test(rawQuery);
+    if (looksLikeDoi && (searchBy === 'all_fields' || searchBy === 'keywords')) {
+      searchBy = 'doi';
     }
 
-    // 2. Crossref
-    if (db === 'all' || db === 'crossref') {
-      const crossrefUrl = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(query)}&rows=${rows}&sort=relevance`;
-      fetchPromises.push(
-        fetch(crossrefUrl, { headers: { 'User-Agent': 'ResearchMateAI/1.0' } })
-          .then((r) => (r.ok ? r.json() : null))
-          .then((data) => {
-            if (!data?.message?.items) return [];
-            return data.message.items.map((item: any) => {
-              const authors = (item.author || []).map((a: any) => {
-                if (a.given && a.family) return `${a.family}, ${a.given}`;
-                return a.family || a.name || 'Unknown';
+    const cacheKey = `${db}::${customDatabase.toLowerCase()}::${broadWebSearch}::${includeRelated}::${fetchAll}::${preserveCrossDbDuplicates}::${offset}::${searchBy}::${requestedRows}::${rawQuery.toLowerCase()}`;
+    const cached = onlineSearchCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return res.json({
+        ...cached.payload,
+        cached: true,
+        elapsedMs: Date.now() - startedAt,
+      });
+    }
+
+    const cleanDoi = cleanDoiValue(rawQuery);
+    const isGoogleScholar = db === 'google_scholar' || db === 'google scholar';
+    const isCustomDb = db === 'custom' || (Boolean(customDatabase) && db !== 'all');
+    const customKey = (customDatabase || db).toLowerCase().trim();
+    const customMeta = CUSTOM_PUBLISHER_MEMBERS[customKey];
+
+    // STRICT routing: only hit multiple databases if user explicitly chose 'all' or broadWebSearch===true
+    const queryAllSources = db === 'all' || broadWebSearch;
+    const perSourceRows = queryAllSources ? Math.min(requestedRows, 250) : requestedRows;
+
+    const mapOpenAlexWork = (w: any, forcedSource?: string) => {
+      const authors = (w.authorships || []).map((a: any) => a.author?.display_name || 'Unknown');
+      const journal = w.primary_location?.source?.display_name || 'Academic Venue';
+      const publisher = w.primary_location?.source?.host_organization_name || '';
+      const workDoi = w.doi ? w.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
+      const sourceDb = forcedSource || 'OpenAlex';
+      const pdfUrl =
+        w.best_oa_location?.pdf_url ||
+        w.primary_location?.pdf_url ||
+        (w.open_access?.oa_url && /\.pdf(\?|$)/i.test(w.open_access.oa_url) ? w.open_access.oa_url : '') ||
+        '';
+      const openAccessUrl = w.open_access?.oa_url || w.best_oa_location?.landing_page_url || pdfUrl || '';
+      const isOpenAccess = Boolean(w.open_access?.is_oa || pdfUrl);
+      const url = w.doi || w.primary_location?.landing_page_url || openAccessUrl || '';
+      const abstract = reconstructAbstract(w.abstract_inverted_index) || 'No abstract text available in record.';
+      const accessMeta = classifyOnlineAccessStatus({
+        pdfUrl,
+        openAccessUrl,
+        isOpenAccess,
+        url,
+        doi: workDoi,
+        journal,
+        publisher,
+        abstract,
+      });
+
+      return {
+        id: `oa-${w.id?.split('/').pop() || Math.random().toString(36).slice(2, 10)}`,
+        openAlexId: w.id || '',
+        doi: workDoi,
+        title: w.title || 'Untitled',
+        authors: authors.slice(0, 6),
+        year: w.publication_year || new Date().getFullYear(),
+        journal,
+        publisher,
+        abstract,
+        sourceDatabase: sourceDb,
+        citationsCount: w.cited_by_count || 0,
+        isOpenAccess,
+        openAccessUrl,
+        pdfUrl,
+        url,
+        ...accessMeta,
+      };
+    };
+
+    const mapCrossrefItem = (item: any, forcedSource = 'Crossref') => {
+      const authors = (item.author || []).map((a: any) => {
+        if (a.given && a.family) return `${a.family}, ${a.given}`;
+        return a.family || a.name || 'Unknown';
+      });
+      const published =
+        item['published-print']?.['date-parts']?.[0]?.[0] ||
+        item['published-online']?.['date-parts']?.[0]?.[0] ||
+        item.issued?.['date-parts']?.[0]?.[0] ||
+        new Date().getFullYear();
+      const itemDoi = item.DOI ? item.DOI.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
+      const journal = Array.isArray(item['container-title'])
+        ? item['container-title'][0]
+        : item['container-title'] || item.publisher || 'Academic Venue';
+      const pdfLinkObj = (item.link || []).find(
+        (l: any) => (l['content-type'] || '').toLowerCase().includes('pdf') && l.URL
+      );
+      const pdfUrl = pdfLinkObj?.URL || '';
+      const abstract = item.abstract ? item.abstract.replace(/<[^>]+>/g, '').trim() : 'Abstract indexed in repository.';
+      const url = item.URL || (itemDoi ? `https://doi.org/${itemDoi}` : '');
+      const accessMeta = classifyOnlineAccessStatus({
+        pdfUrl,
+        openAccessUrl: pdfUrl,
+        isOpenAccess: Boolean(pdfUrl),
+        url,
+        doi: itemDoi,
+        journal,
+        publisher: item.publisher || '',
+        abstract,
+      });
+
+      return {
+        id: `cr-${(itemDoi || Math.random().toString(36).slice(2, 10)).replace(/[^a-zA-Z0-9._-]/g, '')}-${Math.random().toString(36).slice(2, 6)}`,
+        doi: itemDoi,
+        title: Array.isArray(item.title) ? item.title[0] : item.title || 'Untitled',
+        authors: authors.slice(0, 6),
+        year: Number(published),
+        journal,
+        publisher: item.publisher || '',
+        abstract,
+        sourceDatabase: forcedSource,
+        citationsCount: item['is-referenced-by-count'] || 0,
+        isOpenAccess: Boolean(pdfUrl),
+        openAccessUrl: pdfUrl,
+        pdfUrl,
+        url,
+        ...accessMeta,
+      };
+    };
+
+    const fetchOpenAire = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number,
+      forcedSource = 'OpenAIRE'
+    ): Promise<{ source: string; totalAvailable: number; items: any[] }> => {
+      try {
+        const perPage = Math.min(100, Math.max(10, limitCount));
+        const startPage = Math.floor(startOffset / perPage) + 1;
+        const maxPages = Math.min(8, Math.ceil(limitCount / perPage));
+        const pageNums = Array.from({ length: maxPages }, (_, idx) => startPage + idx);
+
+        let totalAvailable = 0;
+        const pageResults = await Promise.all(
+          pageNums.map(async (pageNum) => {
+            const paramKey =
+              searchBy === 'title' ? 'title' : searchBy === 'author' ? 'author' : 'keywords';
+            const u = `https://api.openaire.eu/search/publications?${paramKey}=${encodeURIComponent(
+              queryStr
+            )}&size=${perPage}&page=${pageNum}&format=json`;
+            const resp = await fetchWithRetry(u, {}, 6500);
+            if (!resp.ok) return [];
+            const json = await resp.json();
+            const hdrTotal = Number(json?.response?.header?.total?.['$'] || 0);
+            if (hdrTotal > totalAvailable) totalAvailable = hdrTotal;
+            const rawList = json?.response?.results?.result || [];
+            return Array.isArray(rawList) ? rawList : [rawList];
+          })
+        );
+
+        const flat = pageResults.flat().slice(0, limitCount);
+        const items = flat
+          .map((entry: any) => {
+            const resObj = entry?.metadata?.['oaf:entity']?.['oaf:result'];
+            if (!resObj) return null;
+            const titleRaw = Array.isArray(resObj.title) ? resObj.title[0]?.['$'] : resObj.title?.['$'] || resObj.title;
+            const creators = Array.isArray(resObj.creator)
+              ? resObj.creator.map((c: any) => c?.['$'] || c).filter(Boolean)
+              : resObj.creator?.['$']
+              ? [resObj.creator['$']]
+              : [];
+            const pids = Array.isArray(resObj.pid) ? resObj.pid : resObj.pid ? [resObj.pid] : [];
+            const doiPid = pids.find((p: any) => (p?.['@classid'] || '').toLowerCase() === 'doi');
+            const doiVal = doiPid?.['$'] ? String(doiPid['$']).replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
+            const journal = resObj.journal?.['$'] || resObj.publisher?.['$'] || 'OpenAIRE Indexed Venue';
+            const publisher = resObj.publisher?.['$'] || '';
+            const dateStr = resObj.dateofacceptance?.['$'] || '';
+            const yearMatch = String(dateStr).match(/\d{4}/);
+            const descRaw = Array.isArray(resObj.description)
+              ? resObj.description.map((d: any) => d?.['$'] || d).join(' ')
+              : resObj.description?.['$'] || '';
+            const abstract = String(descRaw || '').replace(/<[^>]+>/g, '').trim() || 'Indexed in OpenAIRE research graph.';
+            const accessRight = String(resObj.bestaccessright?.['@classid'] || '').toUpperCase();
+            const isOpenAccess = accessRight === 'OPEN' || Boolean(resObj.isgreen?.['$'] === 'true');
+            const url = doiVal ? `https://doi.org/${doiVal}` : '';
+            const openAccessUrl = isOpenAccess ? url : '';
+            const accessMeta = classifyOnlineAccessStatus({
+              pdfUrl: '',
+              openAccessUrl,
+              isOpenAccess,
+              url,
+              doi: doiVal,
+              journal,
+              publisher,
+              abstract,
+            });
+            return {
+              id: `oai-${Math.random().toString(36).slice(2, 10)}`,
+              doi: doiVal,
+              title: String(titleRaw || 'Untitled'),
+              authors: creators.length > 0 ? creators.slice(0, 6) : ['Author Unknown'],
+              year: yearMatch ? parseInt(yearMatch[0], 10) : new Date().getFullYear(),
+              journal,
+              publisher,
+              abstract,
+              sourceDatabase: forcedSource,
+              citationsCount: 0,
+              isOpenAccess,
+              openAccessUrl,
+              pdfUrl: '',
+              url,
+              ...accessMeta,
+            };
+          })
+          .filter(Boolean);
+
+        return { source: forcedSource, totalAvailable: totalAvailable || items.length, items };
+      } catch (e: any) {
+        console.warn('OpenAIRE search skipped:', e?.message);
+        return { source: forcedSource, totalAvailable: 0, items: [] };
+      }
+    };
+
+    const fetchCrossrefBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number,
+      options: {
+        forcedSource?: string;
+        filter?: string;
+        sort?: string;
+        order?: string;
+        extraParams?: string;
+      } = {}
+    ): Promise<{ source: string; totalAvailable: number; items: any[] }> => {
+      const label = options.forcedSource || 'Crossref';
+      try {
+        if (searchBy === 'doi') {
+          const r = await fetchWithRetry(
+            `https://api.crossref.org/works/${encodeURIComponent(cleanDoi)}?mailto=${POLITE_MAILTO}`,
+            {},
+            5500
+          );
+          if (r.ok) {
+            const d = await r.json();
+            const item = d?.message ? [mapCrossrefItem(d.message, label)] : [];
+            return { source: label, totalAvailable: item.length, items: item };
+          }
+        }
+
+        const chunkSize = Math.min(500, Math.max(20, limitCount));
+        const numChunks = Math.min(4, Math.ceil(limitCount / chunkSize));
+        let totalAvailable = 0;
+
+        const chunks = await Promise.all(
+          Array.from({ length: numChunks }, async (_, idx) => {
+            const curOffset = startOffset + idx * chunkSize;
+            const curRows = Math.min(chunkSize, limitCount - idx * chunkSize);
+            if (curRows <= 0) return [];
+            const sortPart = options.sort ? `&sort=${options.sort}${options.order ? `&order=${options.order}` : ''}` : '&sort=relevance';
+            const filterPart = options.filter ? `&filter=${encodeURIComponent(options.filter)}` : '';
+            const extraPart = options.extraParams || '';
+            let qParam = `query.bibliographic=${encodeURIComponent(queryStr)}`;
+            if (searchBy === 'title') qParam = `query.title=${encodeURIComponent(queryStr)}`;
+            else if (searchBy === 'author') qParam = `query.author=${encodeURIComponent(queryStr)}`;
+            const u = `https://api.crossref.org/works?${qParam}${filterPart}${sortPart}&rows=${curRows}&offset=${curOffset}&mailto=${POLITE_MAILTO}${extraPart}`;
+            const resp = await fetchWithRetry(u, {}, 7500);
+            if (!resp.ok) return [];
+            const data = await resp.json();
+            const tr = Number(data?.message?.['total-results'] || 0);
+            if (tr > totalAvailable) totalAvailable = tr;
+            return (data?.message?.items || []).map((it: any) => mapCrossrefItem(it, label));
+          })
+        );
+
+        const flat = chunks.flat();
+        return { source: label, totalAvailable: totalAvailable || flat.length, items: flat };
+      } catch (e: any) {
+        console.warn(`${label} Crossref search skipped:`, e?.message);
+        return { source: label, totalAvailable: 0, items: [] };
+      }
+    };
+
+    const fetchOpenAlexBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number,
+      forcedSource = 'OpenAlex',
+      extraFilter = ''
+    ): Promise<{ source: string; totalAvailable: number; items: any[]; ok: boolean }> => {
+      try {
+        if (searchBy === 'doi') {
+          const singleUrl = `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(cleanDoi)}?mailto=${POLITE_MAILTO}`;
+          const r = await fetchWithRetry(singleUrl, {}, 4500);
+          if (r.ok) {
+            const w = await r.json();
+            return { source: forcedSource, totalAvailable: 1, items: [mapOpenAlexWork(w, forcedSource)], ok: true };
+          }
+          return { source: forcedSource, totalAvailable: 0, items: [], ok: false };
+        }
+
+        const perPage = Math.min(200, Math.max(20, limitCount));
+        const startPage = Math.floor(startOffset / perPage) + 1;
+        const maxPages = Math.min(5, Math.ceil(limitCount / perPage));
+        let totalAvailable = 0;
+        let anyOk = false;
+
+        const filterParts: string[] = [];
+        if (searchBy === 'title') filterParts.push(`title.search:${queryStr}`);
+        else if (searchBy === 'abstract') filterParts.push(`abstract.search:${queryStr}`);
+        else if (searchBy === 'author') filterParts.push(`raw_author_name.search:${queryStr}`);
+        if (extraFilter) filterParts.push(extraFilter);
+
+        const pages = await Promise.all(
+          Array.from({ length: maxPages }, async (_, idx) => {
+            const pageNum = startPage + idx;
+            const searchParam =
+              searchBy === 'title' || searchBy === 'abstract' || searchBy === 'author'
+                ? ''
+                : `search=${encodeURIComponent(queryStr)}&`;
+            const filterParam = filterParts.length > 0 ? `filter=${encodeURIComponent(filterParts.join(','))}&` : '';
+            const u = `https://api.openalex.org/works?${searchParam}${filterParam}per-page=${perPage}&page=${pageNum}&mailto=${POLITE_MAILTO}`;
+            const resp = await fetchWithRetry(u, {}, 5000);
+            if (!resp.ok) return [];
+            anyOk = true;
+            const data = await resp.json();
+            const cnt = Number(data?.meta?.count || 0);
+            if (cnt > totalAvailable) totalAvailable = cnt;
+            return (data.results || []).map((w: any) => mapOpenAlexWork(w, forcedSource));
+          })
+        );
+
+        const flat = pages.flat().slice(0, limitCount);
+        return { source: forcedSource, totalAvailable: totalAvailable || flat.length, items: flat, ok: anyOk };
+      } catch {
+        return { source: forcedSource, totalAvailable: 0, items: [], ok: false };
+      }
+    };
+
+    const fetchPubMedBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number
+    ): Promise<{ source: string; totalAvailable: number; items: any[] }> => {
+      try {
+        let term = queryStr;
+        if (searchBy === 'doi') term = `${cleanDoi}[DOI]`;
+        else if (searchBy === 'title') term = `${queryStr}[Title]`;
+        else if (searchBy === 'author') term = `${queryStr}[Author]`;
+        else if (searchBy === 'abstract') term = `${queryStr}[Title/Abstract]`;
+
+        const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(
+          term
+        )}&retstart=${startOffset}&retmax=${Math.min(limitCount, 2000)}&retmode=json`;
+        const esResp = await fetchWithRetry(esearchUrl, {}, 6000);
+        if (!esResp.ok) return { source: 'PubMed', totalAvailable: 0, items: [] };
+        const esData = await esResp.json();
+        const totalAvailable = Number(esData?.esearchresult?.count || 0);
+        let pmids: string[] = esData?.esearchresult?.idlist || [];
+
+        if (searchBy === 'related' && pmids.length > 0) {
+          const linkUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pubmed&cmd=neighbor_score&id=${pmids[0]}&retmode=json`;
+          const linkResp = await fetchWithRetry(linkUrl, {}, 4000);
+          if (linkResp.ok) {
+            const linkJson = await linkResp.json();
+            const neighborIds =
+              linkJson?.linksets?.[0]?.linksetdbs?.[0]?.links
+                ?.slice(0, Math.min(limitCount, 250))
+                ?.map((l: any) => String(l.id || l)) || [];
+            if (neighborIds.length > 0) pmids = neighborIds;
+          }
+        }
+
+        if (pmids.length === 0) return { source: 'PubMed', totalAvailable, items: [] };
+
+        // Batch esummary in parallel chunks of 200 PMIDs so large result sets (e.g. 800 PMIDs) load in ~1s
+        const chunkSize = 200;
+        const idChunks: string[][] = [];
+        for (let i = 0; i < pmids.length; i += chunkSize) {
+          idChunks.push(pmids.slice(i, i + chunkSize));
+        }
+
+        const chunkRecords = await Promise.all(
+          idChunks.map(async (chunk) => {
+            const sumUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${chunk.join(
+              ','
+            )}&retmode=json`;
+            const sumResp = await fetchWithRetry(sumUrl, {}, 6000);
+            if (!sumResp.ok) return [];
+            const sumJson = await sumResp.json();
+            const resultObj = sumJson?.result || {};
+            return chunk.map((pid) => resultObj[pid]).filter(Boolean);
+          })
+        );
+
+        const items = chunkRecords.flat().map((rec: any) => {
+          const doiObj = (rec.articleids || []).find((id: any) => id.idtype === 'doi');
+          const pmcObj = (rec.articleids || []).find((id: any) => id.idtype === 'pmc');
+          const doiVal = doiObj?.value || '';
+          const pmcid = pmcObj?.value || '';
+          const pdfUrl = pmcid ? `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/pdf/` : '';
+          const openAccessUrl = pmcid ? `https://pmc.ncbi.nlm.nih.gov/articles/${pmcid}/` : '';
+          const yearMatch = (rec.pubdate || '').match(/\d{4}/);
+          const url = `https://pubmed.ncbi.nlm.nih.gov/${rec.uid}/`;
+          const accessMeta = classifyOnlineAccessStatus({
+            pdfUrl,
+            openAccessUrl,
+            isOpenAccess: Boolean(pmcid),
+            url,
+            doi: doiVal,
+            journal: rec.fulljournalname || rec.source || '',
+            abstract: 'Indexed in NCBI PubMed MEDLINE.',
+          });
+          return {
+            id: `pm-${rec.uid}`,
+            pmid: rec.uid,
+            pmcid,
+            doi: doiVal,
+            title: rec.title || 'Untitled PubMed Study',
+            authors: (rec.authors || []).map((a: any) => a.name).slice(0, 6),
+            year: yearMatch ? parseInt(yearMatch[0], 10) : new Date().getFullYear(),
+            journal: rec.fulljournalname || rec.source || 'PubMed / MEDLINE',
+            abstract: pmcid
+              ? `Full text freely archived in PubMed Central (${pmcid}). Open or download PDF directly.`
+              : `PubMed ID: ${rec.uid}. Click DOI or PubMed link for abstract & institutional retrieval.`,
+            sourceDatabase: 'PubMed',
+            citationsCount: 0,
+            isOpenAccess: Boolean(pmcid),
+            openAccessUrl,
+            pdfUrl,
+            url,
+            ...accessMeta,
+          };
+        });
+
+        return { source: 'PubMed', totalAvailable: totalAvailable || items.length, items };
+      } catch (e: any) {
+        console.warn('PubMed search skipped:', e?.message);
+        return { source: 'PubMed', totalAvailable: 0, items: [] };
+      }
+    };
+
+    const fetchEuropePmcBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number,
+      forcedSource = 'Europe PMC'
+    ): Promise<{ source: string; totalAvailable: number; items: any[] }> => {
+      try {
+        let epmcQuery = queryStr;
+        if (searchBy === 'doi') epmcQuery = `DOI:"${cleanDoi}"`;
+        else if (searchBy === 'title') epmcQuery = `TITLE:"${queryStr}"`;
+        else if (searchBy === 'author') epmcQuery = `AUTH:"${queryStr}"`;
+        else if (searchBy === 'abstract') epmcQuery = `ABSTRACT:"${queryStr}"`;
+
+        // Europe PMC supports pageSize up to 1000 in 1 call; use cursorMark if offset > 0
+        const pageSize = Math.min(1000, Math.max(50, limitCount));
+        let cursorMark = '*';
+        let collected: any[] = [];
+        let totalAvailable = 0;
+
+        const targetTotalToRead = startOffset + limitCount;
+        const maxLoops = Math.min(3, Math.ceil(targetTotalToRead / pageSize));
+
+        for (let i = 0; i < maxLoops; i++) {
+          const epmcUrl = `https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(
+            epmcQuery
+          )}&format=json&resultType=core&pageSize=${pageSize}&cursorMark=${encodeURIComponent(cursorMark)}`;
+          const resp = await fetchWithRetry(epmcUrl, {}, 7500);
+          if (!resp.ok) break;
+          const data = await resp.json();
+          if (data?.hitCount) totalAvailable = Number(data.hitCount);
+          const list = data?.resultList?.result || [];
+          collected.push(...list);
+          if (!data?.nextCursorMark || data.nextCursorMark === cursorMark || list.length < pageSize) break;
+          cursorMark = data.nextCursorMark;
+        }
+
+        const sliced = collected.slice(startOffset, startOffset + limitCount);
+        const items = sliced.map((r: any) => {
+          const authors = (r.authorString || '')
+            .split(',')
+            .map((s: string) => s.trim())
+            .filter(Boolean);
+          const fullTextUrls = r.fullTextUrlList?.fullTextUrl || [];
+          const pdfEntry = fullTextUrls.find((u: any) => (u.documentStyle || '').toLowerCase() === 'pdf');
+          const htmlEntry = fullTextUrls.find((u: any) => (u.availabilityCode || '').toUpperCase() === 'OA');
+          const pdfUrl = pdfEntry?.url || '';
+          const openAccessUrl = pdfUrl || htmlEntry?.url || (r.pmcid ? `https://europepmc.org/article/PMC/${r.pmcid}` : '');
+          const isOpenAccess = r.isOpenAccess === 'Y' || Boolean(pdfUrl);
+          const url = r.doi
+            ? `https://doi.org/${r.doi}`
+            : r.pmid
+            ? `https://pubmed.ncbi.nlm.nih.gov/${r.pmid}/`
+            : openAccessUrl;
+          const abstract = (r.abstractText || '').replace(/<[^>]+>/g, '').trim() || 'Indexed in Europe PMC.';
+          const accessMeta = classifyOnlineAccessStatus({
+            pdfUrl,
+            openAccessUrl,
+            isOpenAccess,
+            url,
+            doi: r.doi || '',
+            journal: r.journalTitle || '',
+            abstract,
+          });
+          return {
+            id: `epmc-${r.id || r.pmid || Math.random().toString(36).slice(2, 10)}`,
+            doi: r.doi || '',
+            pmid: r.pmid || '',
+            pmcid: r.pmcid || '',
+            title: (r.title || 'Untitled').replace(/<[^>]+>/g, '').trim(),
+            authors: authors.length > 0 ? authors.slice(0, 6) : ['Author Unknown'],
+            year: Number(r.pubYear) || new Date().getFullYear(),
+            journal: r.journalTitle || r.bookOrReportDetails?.publisher || 'Europe PMC Indexed Journal',
+            abstract,
+            sourceDatabase: forcedSource,
+            citationsCount: r.citedByCount || 0,
+            isOpenAccess,
+            openAccessUrl,
+            pdfUrl,
+            url,
+            ...accessMeta,
+          };
+        });
+
+        return { source: forcedSource, totalAvailable: totalAvailable || items.length, items };
+      } catch (e: any) {
+        console.warn('Europe PMC search skipped:', e?.message);
+        return { source: forcedSource, totalAvailable: 0, items: [] };
+      }
+    };
+
+    const fetchDoajBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number
+    ): Promise<{ source: string; totalAvailable: number; items: any[] }> => {
+      try {
+        const pageSize = 100;
+        const startPage = Math.floor(startOffset / pageSize) + 1;
+        const maxPages = Math.min(8, Math.ceil(limitCount / pageSize));
+        let totalAvailable = 0;
+
+        let doajQuery = queryStr;
+        if (searchBy === 'doi') doajQuery = `doi:"${cleanDoi}"`;
+        else if (searchBy === 'title') doajQuery = `bibjson.title:"${queryStr}"`;
+        else if (searchBy === 'author') doajQuery = `bibjson.author.name:"${queryStr}"`;
+
+        const pageResults = await Promise.all(
+          Array.from({ length: maxPages }, async (_, idx) => {
+            const pageNum = startPage + idx;
+            const u = `https://doaj.org/api/search/articles/${encodeURIComponent(doajQuery)}?page=${pageNum}&pageSize=${pageSize}`;
+            const r = await fetchWithRetry(u, {}, 6000);
+            if (!r.ok) return [];
+            const j = await r.json();
+            if (j.total && Number(j.total) > totalAvailable) totalAvailable = Number(j.total);
+            return (j.results || []).map((rec: any) => {
+              const b = rec.bibjson || {};
+              const doiObj = (b.identifier || []).find((id: any) => (id.type || '').toLowerCase() === 'doi');
+              const doiVal = doiObj?.id || '';
+              const fullLink = (b.link || []).find((l: any) => (l.type || '').toLowerCase() === 'fulltext')?.url || '';
+              const pdfUrl = /\.pdf(\?|$)/i.test(fullLink) ? fullLink : '';
+              const authors = (b.author || []).map((a: any) => a.name).filter(Boolean);
+              const abstract = (b.abstract || '').trim() || 'Open-access article indexed in DOAJ.';
+              const accessMeta = classifyOnlineAccessStatus({
+                pdfUrl,
+                openAccessUrl: fullLink,
+                isOpenAccess: true,
+                url: fullLink || (doiVal ? `https://doi.org/${doiVal}` : ''),
+                doi: doiVal,
+                journal: b.journal?.title || '',
+                publisher: b.journal?.publisher || '',
+                abstract,
               });
-              const published =
-                item['published-print']?.['date-parts']?.[0]?.[0] ||
-                item['published-online']?.['date-parts']?.[0]?.[0] ||
-                item.issued?.['date-parts']?.[0]?.[0] ||
-                new Date().getFullYear();
-              const cleanDoi = item.DOI ? item.DOI.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
-              const journal = Array.isArray(item['container-title'])
-                ? item['container-title'][0]
-                : item['container-title'] || item.publisher || 'Academic Venue';
-
-              let sourceDb = 'Crossref';
-              if (journal.toLowerCase().includes('ieee')) sourceDb = 'IEEE Xplore';
-              else if (journal.toLowerCase().includes('elsevier') || journal.toLowerCase().includes('sciencedirect')) sourceDb = 'ScienceDirect';
-
               return {
-                id: `cr-${Math.random().toString(36).substr(2, 6)}`,
-                doi: cleanDoi,
-                title: Array.isArray(item.title) ? item.title[0] : item.title || 'Untitled',
-                authors: authors.slice(0, 5),
-                year: Number(published),
-                journal,
-                abstract: item.abstract ? item.abstract.replace(/<[^>]+>/g, '').trim() : 'Abstract indexed in Crossref repository.',
-                sourceDatabase: sourceDb,
-                citationsCount: item['is-referenced-by-count'] || 0,
-                url: item.URL || (cleanDoi ? `https://doi.org/${cleanDoi}` : ''),
+                id: `doaj-${rec.id || Math.random().toString(36).slice(2, 10)}`,
+                doi: doiVal,
+                title: b.title || 'Untitled DOAJ Article',
+                authors: authors.length > 0 ? authors.slice(0, 6) : ['Author Unknown'],
+                year: Number(b.year) || new Date().getFullYear(),
+                journal: b.journal?.title || 'DOAJ Open Access Journal',
+                publisher: b.journal?.publisher || '',
+                abstract,
+                sourceDatabase: 'DOAJ',
+                citationsCount: 0,
+                isOpenAccess: true,
+                openAccessUrl: fullLink,
+                pdfUrl,
+                url: fullLink || (doiVal ? `https://doi.org/${doiVal}` : ''),
+                ...accessMeta,
               };
             });
           })
-          .catch((e) => {
-            console.warn('Crossref search failed:', e.message);
-            return [];
-          })
+        );
+
+        const flat = pageResults.flat().slice(0, limitCount);
+        return { source: 'DOAJ', totalAvailable: totalAvailable || flat.length, items: flat };
+      } catch (e: any) {
+        console.warn('DOAJ search skipped:', e?.message);
+        return { source: 'DOAJ', totalAvailable: 0, items: [] };
+      }
+    };
+
+    const fetchArxivBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number
+    ): Promise<{ source: string; totalAvailable: number; items: any[] }> => {
+      try {
+        let prefix = 'all';
+        if (searchBy === 'title') prefix = 'ti';
+        else if (searchBy === 'author') prefix = 'au';
+        else if (searchBy === 'abstract') prefix = 'abs';
+        const cleanTerm = queryStr.replace(/["']/g, '');
+        const maxRes = Math.min(500, Math.max(20, limitCount));
+        const axUrl = `https://export.arxiv.org/api/query?search_query=${prefix}:${encodeURIComponent(
+          cleanTerm
+        )}&start=${startOffset}&max_results=${maxRes}`;
+        const resp = await fetchWithRetry(axUrl, {}, 6500);
+        if (!resp.ok) return { source: 'arXiv', totalAvailable: 0, items: [] };
+        const xmlText = await resp.text();
+        const totalMatch = xmlText.match(/<opensearch:totalResults[^>]*>(\d+)<\/opensearch:totalResults>/i);
+        const totalAvailable = totalMatch ? Number(totalMatch[1]) : 0;
+        const parsed = parseArxivAtomFeed(xmlText).map((it) => ({
+          ...it,
+          ...classifyOnlineAccessStatus(it),
+        }));
+        return { source: 'arXiv', totalAvailable: totalAvailable || parsed.length, items: parsed };
+      } catch (e: any) {
+        console.warn('arXiv search skipped:', e?.message);
+        return { source: 'arXiv', totalAvailable: 0, items: [] };
+      }
+    };
+
+    const fetchSemanticScholarBatched = async (
+      queryStr: string,
+      limitCount: number,
+      startOffset: number,
+      forcedSource = 'Semantic Scholar'
+    ): Promise<{ source: string; totalAvailable: number; items: any[]; ok: boolean }> => {
+      try {
+        const fields = 'title,abstract,year,venue,authors,externalIds,citationCount,isOpenAccess,openAccessPdf,url';
+        let papers: any[] = [];
+        let totalAvailable = 0;
+
+        if (searchBy === 'doi') {
+          const r = await fetchWithRetry(
+            `https://api.semanticscholar.org/graph/v1/paper/DOI:${encodeURIComponent(cleanDoi)}?fields=${fields}`,
+            {},
+            4500
+          );
+          if (!r.ok) return { source: forcedSource, totalAvailable: 0, items: [], ok: false };
+          const p = await r.json();
+          if (p?.paperId) papers = [p];
+          totalAvailable = papers.length;
+        } else {
+          const firstLimit = Math.min(100, limitCount);
+          const r = await fetchWithRetry(
+            `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
+              queryStr
+            )}&offset=${startOffset}&limit=${firstLimit}&fields=${fields}`,
+            {},
+            4800
+          );
+          if (!r.ok) return { source: forcedSource, totalAvailable: 0, items: [], ok: false };
+          const data = await r.json();
+          totalAvailable = Number(data?.total || 0);
+          papers = Array.isArray(data?.data) ? data.data : [];
+
+          if (searchBy === 'related' && papers[0]?.paperId) {
+            const recResp = await fetchWithRetry(
+              `https://api.semanticscholar.org/recommendations/v1/papers/forpaper/${encodeURIComponent(
+                papers[0].paperId
+              )}?limit=${Math.min(100, limitCount)}&fields=${fields}`,
+              {},
+              4500
+            );
+            if (recResp.ok) {
+              const recJson = await recResp.json();
+              if (Array.isArray(recJson?.recommendedPapers) && recJson.recommendedPapers.length > 0) {
+                papers = recJson.recommendedPapers;
+              }
+            }
+          }
+        }
+
+        const items = papers.map((p: any) => {
+          const pdfUrl = p.openAccessPdf?.url || '';
+          const doiVal = p.externalIds?.DOI || '';
+          const url = p.url || (doiVal ? `https://doi.org/${doiVal}` : '');
+          const accessMeta = classifyOnlineAccessStatus({
+            pdfUrl,
+            openAccessUrl: pdfUrl,
+            isOpenAccess: Boolean(p.isOpenAccess || pdfUrl),
+            url,
+            doi: doiVal,
+            journal: p.venue || '',
+            abstract: p.abstract || '',
+          });
+          return {
+            id: `s2-${p.paperId || Math.random().toString(36).slice(2, 10)}`,
+            doi: doiVal,
+            title: p.title || 'Untitled',
+            authors: Array.isArray(p.authors)
+              ? p.authors.slice(0, 6).map((a: any) => a.name || 'Unknown')
+              : ['Unknown Author'],
+            year: Number(p.year) || new Date().getFullYear(),
+            journal: p.venue || 'Semantic Scholar Indexed Venue',
+            abstract: p.abstract || 'Abstract not provided by Semantic Scholar.',
+            sourceDatabase: forcedSource,
+            citationsCount: p.citationCount || 0,
+            isOpenAccess: Boolean(p.isOpenAccess || pdfUrl),
+            openAccessUrl: pdfUrl,
+            pdfUrl,
+            url,
+            ...accessMeta,
+          };
+        });
+
+        return { source: forcedSource, totalAvailable: totalAvailable || items.length, items, ok: true };
+      } catch {
+        return { source: forcedSource, totalAvailable: 0, items: [], ok: false };
+      }
+    };
+
+    const tasks: Promise<{ source: string; totalAvailable: number; items: any[] }>[] = [];
+
+    if (queryAllSources) {
+      // ALL ONLINE DATABASES MODE: run distinct indexes in parallel & keep per-DB provenance for PRISMA duplicate analysis
+      tasks.push(fetchPubMedBatched(rawQuery, perSourceRows, offset));
+      tasks.push(fetchEuropePmcBatched(rawQuery, perSourceRows, offset, 'Europe PMC'));
+      tasks.push(fetchCrossrefBatched(rawQuery, perSourceRows, offset, { forcedSource: 'Crossref' }));
+      tasks.push(fetchDoajBatched(rawQuery, perSourceRows, offset));
+      tasks.push(fetchArxivBatched(rawQuery, perSourceRows, offset));
+      tasks.push(fetchOpenAire(rawQuery, perSourceRows, offset, 'OpenAIRE'));
+      tasks.push(
+        (async () => {
+          const oa = await fetchOpenAlexBatched(rawQuery, perSourceRows, offset, 'OpenAlex');
+          if (oa.ok && oa.items.length > 0) return oa;
+          const s2 = await fetchSemanticScholarBatched(rawQuery, perSourceRows, offset, 'Semantic Scholar');
+          return s2;
+        })()
       );
+    } else if (db === 'pubmed') {
+      tasks.push(fetchPubMedBatched(rawQuery, perSourceRows, offset));
+    } else if (db === 'europepmc') {
+      tasks.push(fetchEuropePmcBatched(rawQuery, perSourceRows, offset, 'Europe PMC'));
+    } else if (db === 'crossref') {
+      tasks.push(fetchCrossrefBatched(rawQuery, perSourceRows, offset, { forcedSource: 'Crossref' }));
+    } else if (db === 'doaj') {
+      tasks.push(fetchDoajBatched(rawQuery, perSourceRows, offset));
+    } else if (db === 'arxiv') {
+      tasks.push(fetchArxivBatched(rawQuery, perSourceRows, offset));
+    } else if (db === 'openalex') {
+      tasks.push(
+        (async () => {
+          const oa = await fetchOpenAlexBatched(rawQuery, perSourceRows, offset, 'OpenAlex');
+          if (oa.ok && oa.items.length > 0) return oa;
+          return fetchOpenAire(rawQuery, perSourceRows, offset, 'OpenAlex');
+        })()
+      );
+    } else if (db === 'semantic_scholar') {
+      tasks.push(
+        (async () => {
+          const s2 = await fetchSemanticScholarBatched(rawQuery, perSourceRows, offset, 'Semantic Scholar');
+          if (s2.ok && s2.items.length > 0) return s2;
+          return fetchOpenAire(rawQuery, perSourceRows, offset, 'Semantic Scholar');
+        })()
+      );
+    } else if (isGoogleScholar) {
+      // Google Scholar: Scholarly multi-type citation blend (OpenAIRE + Semantic Scholar / OpenAlex), distinct from PubMed/Crossref-only/arXiv
+      tasks.push(
+        (async () => {
+          const [s2, oa, openaire] = await Promise.all([
+            fetchSemanticScholarBatched(rawQuery, Math.min(perSourceRows, 100), offset, 'Google Scholar'),
+            fetchOpenAlexBatched(rawQuery, Math.min(perSourceRows, 200), offset, 'Google Scholar'),
+            fetchOpenAire(rawQuery, perSourceRows, offset, 'Google Scholar'),
+          ]);
+          let combined = [...s2.items, ...oa.items, ...openaire.items];
+          let totalEst = Math.max(s2.totalAvailable, oa.totalAvailable, openaire.totalAvailable);
+          if (combined.length === 0) {
+            const crScholar = await fetchCrossrefBatched(rawQuery, perSourceRows, offset, {
+              forcedSource: 'Google Scholar',
+              filter: 'type:proceedings-article,type:book-chapter,type:posted-content,type:journal-article',
+              sort: 'relevance',
+            });
+            combined = crScholar.items;
+            totalEst = crScholar.totalAvailable;
+          }
+          // Deduplicate within Google Scholar itself
+          const seen = new Set<string>();
+          const deduped = combined.filter((it) => {
+            const k = (it.doi || it.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (!k || seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+          return { source: 'Google Scholar', totalAvailable: Math.max(totalEst, deduped.length), items: deduped };
+        })()
+      );
+    } else if (isCustomDb || customMeta) {
+      // Named / Custom DBs (ScienceDirect, IEEE Xplore, Springer, Wiley, MDPI, Scopus, Web of Science, DOAJ, CORE, or ANY typed DB)
+      const label = customMeta?.label || customDatabase || db;
+      if (customMeta?.crossrefMember) {
+        tasks.push(
+          fetchCrossrefBatched(rawQuery, perSourceRows, offset, {
+            forcedSource: label,
+            filter: `member:${customMeta.crossrefMember}`,
+          })
+        );
+      } else if (customMeta?.mode === 'doaj') {
+        tasks.push(fetchDoajBatched(rawQuery, perSourceRows, offset));
+      } else if (customMeta?.mode === 'europepmc') {
+        tasks.push(fetchEuropePmcBatched(rawQuery, perSourceRows, offset, label));
+      } else if (customMeta?.mode === 'scopus') {
+        tasks.push(
+          (async () => {
+            const oa = await fetchOpenAlexBatched(
+              rawQuery,
+              perSourceRows,
+              offset,
+              'Scopus',
+              'type:article|proceedings-article|review,has_doi:true'
+            );
+            if (oa.ok && oa.items.length > 0) return oa;
+            return fetchCrossrefBatched(rawQuery, perSourceRows, offset, {
+              forcedSource: 'Scopus',
+              filter: 'type:proceedings-article,type:journal-article',
+              sort: 'relevance',
+            });
+          })()
+        );
+      } else if (customMeta?.mode === 'wos') {
+        tasks.push(
+          (async () => {
+            const oa = await fetchOpenAlexBatched(
+              rawQuery,
+              perSourceRows,
+              offset,
+              'Web of Science',
+              'type:article|review,cited_by_count:>0'
+            );
+            if (oa.ok && oa.items.length > 0) return oa;
+            return fetchCrossrefBatched(rawQuery, perSourceRows, offset, {
+              forcedSource: 'Web of Science',
+              filter: 'type:journal-article,has-abstract:true',
+              sort: 'relevance',
+            });
+          })()
+        );
+      } else if (customMeta?.mode === 'openaire') {
+        tasks.push(fetchOpenAire(rawQuery, perSourceRows, offset, label));
+      } else {
+        // Any user-written custom DB name (e.g. AGRIS, CAB Abstracts, ERIC, etc.): query scoped publisher/source keyword first, then OpenAIRE/Crossref
+        tasks.push(
+          (async () => {
+            const scoped = await fetchCrossrefBatched(`${rawQuery} ${label}`, perSourceRows, offset, {
+              forcedSource: label,
+              sort: 'relevance',
+            });
+            if (scoped.items.length > 0) return scoped;
+            return fetchOpenAire(rawQuery, perSourceRows, offset, label);
+          })()
+        );
+      }
+    } else {
+      tasks.push(fetchCrossrefBatched(rawQuery, perSourceRows, offset, { forcedSource: db || 'Crossref' }));
     }
 
-    const results = await Promise.all(fetchPromises);
-    results.forEach((arr) => {
-      if (Array.isArray(arr)) allItems.push(...arr);
+    const settled = await Promise.all(tasks);
+    const sourceStats: Record<string, number> = {};
+    const totalHitsBySource: Record<string, number> = {};
+    const rawAllItems: any[] = [];
+    let totalAvailable = 0;
+
+    settled.forEach((group) => {
+      if (group && Array.isArray(group.items)) {
+        sourceStats[group.source] = group.items.length;
+        totalHitsBySource[group.source] = group.totalAvailable || group.items.length;
+        totalAvailable += group.totalAvailable || group.items.length;
+        rawAllItems.push(...group.items);
+      }
     });
 
-    // Deduplicate by normalized title or DOI
-    const seenDois = new Set<string>();
-    const seenTitles = new Set<string>();
-    const uniqueItems: any[] = [];
+    // Build output items:
+    // 1. Always deduplicate identical duplicates within the *same* database.
+    // 2. When multiple databases ran AND preserveCrossDbDuplicates is true, KEEP cross-database duplicates and annotate them explicitly for PRISMA!
+    const finalItems: any[] = [];
+    const seenSameDb = new Set<string>();
+    const canonicalByPaperKey = new Map<string, any>();
+    let crossDbDuplicateCount = 0;
 
-    for (const item of allItems) {
-      const doiKey = item.doi ? item.doi.toLowerCase().trim() : null;
-      const titleKey = item.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+    for (const item of rawAllItems) {
+      const doiKey = item.doi ? `doi:${item.doi.toLowerCase().trim()}` : '';
+      const normTitle = (item.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const titleKey = normTitle.length > 10 ? `title:${normTitle}` : '';
+      const paperKey = doiKey || titleKey || `id:${item.id}`;
+      const dbPrefix = `${(item.sourceDatabase || 'unknown').toLowerCase()}::`;
 
-      if (doiKey && seenDois.has(doiKey)) continue;
-      if (titleKey.length > 15 && seenTitles.has(titleKey)) continue;
+      if ((doiKey && seenSameDb.has(dbPrefix + doiKey)) || (titleKey && seenSameDb.has(dbPrefix + titleKey))) {
+        continue;
+      }
+      if (doiKey) seenSameDb.add(dbPrefix + doiKey);
+      if (titleKey) seenSameDb.add(dbPrefix + titleKey);
 
-      if (doiKey) seenDois.add(doiKey);
-      if (titleKey.length > 15) seenTitles.add(titleKey);
-      uniqueItems.push(item);
+      const canonical = (doiKey && canonicalByPaperKey.get(doiKey)) || (titleKey && canonicalByPaperKey.get(titleKey));
+
+      if (canonical && canonical.sourceDatabase !== item.sourceDatabase) {
+        crossDbDuplicateCount++;
+        const existingMatches: string[] = Array.isArray(canonical.duplicateMatchedDatabases)
+          ? canonical.duplicateMatchedDatabases
+          : [canonical.sourceDatabase];
+        if (!existingMatches.includes(item.sourceDatabase)) {
+          existingMatches.push(item.sourceDatabase);
+        }
+        canonical.duplicateMatchedDatabases = existingMatches;
+
+        if (!preserveCrossDbDuplicates) {
+          if (!canonical.pdfUrl && item.pdfUrl) {
+            canonical.pdfUrl = item.pdfUrl;
+            canonical.openAccessUrl = item.openAccessUrl || item.pdfUrl;
+            canonical.isOpenAccess = true;
+            canonical.accessStatus = 'downloadable';
+          }
+          continue;
+        }
+
+        finalItems.push({
+          ...item,
+          isCrossDbDuplicate: true,
+          duplicateMatchedDatabases: [canonical.sourceDatabase, item.sourceDatabase],
+          duplicateNote: `Duplicate across databases: also indexed in ${canonical.sourceDatabase}`,
+        });
+      } else {
+        if (doiKey) canonicalByPaperKey.set(doiKey, item);
+        if (titleKey) canonicalByPaperKey.set(titleKey, item);
+        finalItems.push(item);
+      }
+    }
+
+    const hasMore = totalAvailable > offset + rawAllItems.length && rawAllItems.length > 0;
+    const nextOffset = offset + (queryAllSources ? perSourceRows : rawAllItems.length);
+
+    const payload = {
+      query: rawQuery,
+      database: db,
+      customDatabase: customDatabase || undefined,
+      searchBy,
+      offset,
+      hasMore,
+      nextOffset,
+      total: finalItems.length,
+      totalAvailable: totalAvailable || finalItems.length,
+      uniqueCount: finalItems.length - crossDbDuplicateCount,
+      crossDbDuplicateCount,
+      sourceStats,
+      totalHitsBySource,
+      items: finalItems,
+    };
+
+    if (finalItems.length > 0) {
+      onlineSearchCache.set(cacheKey, {
+        expiresAt: Date.now() + 90_000,
+        payload,
+      });
+      if (onlineSearchCache.size > 120) {
+        const firstKey = onlineSearchCache.keys().next().value;
+        if (firstKey) onlineSearchCache.delete(firstKey);
+      }
     }
 
     return res.json({
-      query,
-      database: db,
-      total: uniqueItems.length,
-      items: uniqueItems.slice(0, rows * 2),
+      ...payload,
+      cached: false,
+      elapsedMs: Date.now() - startedAt,
     });
   } catch (err: any) {
     console.error('Online search error:', err);
     return res.status(500).json({ error: err.message || 'Online search failed' });
+  }
+});
+
+// -------------------------------------------------------------
+// Paper PDF Proxy Download & PRISMA Retrieval Accessibility Verifier
+// -------------------------------------------------------------
+app.get('/api/online/proxy-pdf', async (req: Request, res: Response) => {
+  try {
+    const rawUrl = ((req.query.url as string) || '').trim();
+    const rawName = ((req.query.filename as string) || 'research-paper').replace(/[^a-zA-Z0-9._-]/g, '_');
+    if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) {
+      return res.status(400).json({ error: 'Valid http/https PDF URL is required' });
+    }
+
+    const upstream = await fetchWithTimeout(
+      rawUrl,
+      {
+        headers: {
+          'User-Agent': 'ResearchMateAI/2.0 (+https://researchmate.ai)',
+          Accept: 'application/pdf,application/octet-stream,*/*',
+        },
+        redirect: 'follow',
+      },
+      10000
+    );
+
+    if (!upstream.ok) {
+      const accessStatus =
+        upstream.status === 401 || upstream.status === 403
+          ? 'needs_institution_confirmation'
+          : 'not_accessible';
+      return res.status(upstream.status).json({
+        error:
+          accessStatus === 'needs_institution_confirmation'
+            ? 'Institutional subscription or publisher login required to download this paper.'
+            : `Paper file is not accessible (HTTP ${upstream.status}).`,
+        accessStatus,
+      });
+    }
+
+    const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+    const buf = Buffer.from(await upstream.arrayBuffer());
+    const headerSig = buf.slice(0, 5).toString('ascii');
+
+    if (headerSig !== '%PDF-' && !contentType.includes('pdf')) {
+      return res.status(422).json({
+        error:
+          'Publisher returned an HTML/login page instead of a direct PDF. Mark as Institutional Confirmation Needed or open publisher URL.',
+        accessStatus: 'needs_institution_confirmation',
+      });
+    }
+
+    const finalName = rawName.toLowerCase().endsWith('.pdf') ? rawName : `${rawName}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${finalName}"`);
+    res.setHeader('Content-Length', String(buf.length));
+    return res.send(buf);
+  } catch (err: any) {
+    return res.status(502).json({
+      error: err?.message || 'Failed to download remote paper PDF',
+      accessStatus: 'not_accessible',
+    });
+  }
+});
+
+app.post('/api/online/fetch-fulltext', async (req: Request, res: Response) => {
+  try {
+    const { pdfUrl, openAccessUrl, url, doi, title } = req.body || {};
+    let candidatePdf = (pdfUrl || openAccessUrl || '').trim();
+    const cleanDoi = cleanDoiValue(doi || '');
+
+    // If no direct OA PDF URL yet, check OpenAlex/Europe PMC quickly by DOI
+    if (!candidatePdf && cleanDoi) {
+      try {
+        const oaResp = await fetchWithTimeout(
+          `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(cleanDoi)}`,
+          { headers: { 'User-Agent': 'ResearchMateAI/2.0' } },
+          3500
+        );
+        if (oaResp.ok) {
+          const w = await oaResp.json();
+          candidatePdf = w?.best_oa_location?.pdf_url || w?.open_access?.oa_url || '';
+        }
+      } catch {}
+    }
+
+    const targetUrl = candidatePdf || (url || '').trim();
+    if (!targetUrl) {
+      return res.json({
+        accessible: false,
+        accessStatus: 'not_accessible',
+        resolvedPdfUrl: '',
+        reason: 'No PDF, Open Access URL, or publisher link available for retrieval.',
+      });
+    }
+
+    try {
+      const upstream = await fetchWithTimeout(
+        targetUrl,
+        {
+          headers: {
+            'User-Agent': 'ResearchMateAI/2.0',
+            Accept: 'application/pdf,text/html,application/xml,*/*',
+          },
+          redirect: 'follow',
+        },
+        7500
+      );
+
+      if (upstream.status === 401 || upstream.status === 403) {
+        return res.json({
+          accessible: false,
+          accessStatus: 'needs_institution_confirmation',
+          resolvedPdfUrl: candidatePdf,
+          reason: `Publisher returned HTTP ${upstream.status}; institutional subscription confirmation is required.`,
+        });
+      }
+
+      if (!upstream.ok) {
+        return res.json({
+          accessible: false,
+          accessStatus: 'not_accessible',
+          resolvedPdfUrl: '',
+          reason: `Upstream link returned HTTP ${upstream.status} (not retrievable).`,
+        });
+      }
+
+      const contentType = (upstream.headers.get('content-type') || '').toLowerCase();
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      const isPdf = buf.slice(0, 5).toString('ascii') === '%PDF-' || contentType.includes('pdf');
+
+      if (isPdf) {
+        // Lightweight printable-text extraction for immediate screening & PRISMA evidence traceability
+        const asciiSample = buf
+          .toString('latin1')
+          .slice(0, 350_000)
+          .replace(/[^\x20-\x7E\n]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const readableText = asciiSample.length > 200
+          ? `PDF retrieved (${Math.round(buf.length / 1024)} KB) from ${targetUrl}.\n\nTitle: ${title || 'Retrieved Study'}\n\n${asciiSample.slice(0, 6000)}`
+          : `PDF file retrieved (${Math.round(buf.length / 1024)} KB) from ${targetUrl}. Ready for full-text review.`;
+
+        return res.json({
+          accessible: true,
+          accessStatus: 'downloadable',
+          resolvedPdfUrl: targetUrl,
+          byteSize: buf.length,
+          extractedFullText: readableText,
+          pages: [{ pageNumber: 1, content: readableText.slice(0, 3500) }],
+          reason: `Verified downloadable PDF (${Math.round(buf.length / 1024)} KB).`,
+        });
+      }
+
+      const htmlText = buf.toString('utf-8').slice(0, 120_000);
+      const paywallDetected = /\b(subscribe|purchase\s+pdf|institutional\s+login|shibboleth|openathens|sign\s+in\s+through\s+your\s+institution|access\s+through\s+your\s+institution|rent\s+this\s+article)\b/i.test(
+        htmlText
+      );
+      if (paywallDetected) {
+        return res.json({
+          accessible: false,
+          accessStatus: 'needs_institution_confirmation',
+          resolvedPdfUrl: '',
+          reason: 'Publisher landing page indicates institutional login / subscription confirmation is needed.',
+        });
+      }
+
+      return res.json({
+        accessible: Boolean(candidatePdf),
+        accessStatus: candidatePdf ? 'downloadable' : 'needs_institution_confirmation',
+        resolvedPdfUrl: candidatePdf,
+        reason: candidatePdf
+          ? 'Open-access landing URL available; click Download PDF or Open Link to retrieve.'
+          : 'HTML publisher page detected without direct open PDF; verify institutional access.',
+      });
+    } catch (fetchErr: any) {
+      return res.json({
+        accessible: false,
+        accessStatus: 'not_accessible',
+        resolvedPdfUrl: '',
+        reason: `Network/retrieval error: ${fetchErr?.message || 'Unable to reach paper source'}.`,
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Full-text verification failed' });
   }
 });
 
@@ -1953,6 +3170,8 @@ app.post('/api/sql/snapshots', requireAuth, async (req: AuthRequest, res: Respon
   }
 });
 
+app.use('/api', commercialRouter);
+
 // -------------------------------------------------------------
 // Google Maps Client Config Provider
 // -------------------------------------------------------------
@@ -1968,8 +3187,14 @@ app.get('/api/maps/config', (_req: Request, res: Response) => {
 // -------------------------------------------------------------
 // Server-Side Gemini API Routes (Search, Maps Grounding, Chat, Transcribe, Storyboard)
 // -------------------------------------------------------------
-app.post('/api/gemini/chat', async (req: Request, res: Response) => {
+app.post('/api/gemini/chat', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
+    if (req.user?.uid) {
+      const creditCheck = await consumeAiCredits(req.user.uid, 1);
+      if (!creditCheck.ok) {
+        return res.status(402).json({ error: creditCheck.reason || 'Insufficient AI credits.' });
+      }
+    }
     const { message, history = [], model = 'gemini-4-hydrogen', systemInstruction } = req.body || {};
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message text is required' });
@@ -2191,12 +3416,16 @@ const PORT = 3000;
 
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+  const server = http.createServer(app);
+  const hmrDisabled = process.env.DISABLE_HMR === 'true';
 
   if (!isProd) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR !== 'true',
+        allowedHosts: true,
+        hmr: hmrDisabled ? false : { server, path: '/__vite_hmr' },
+        ws: { server, path: '/__vite_hmr' },
       },
       appType: 'spa',
     });
@@ -2208,8 +3437,19 @@ async function startServer() {
     });
   }
 
-  const server = http.createServer(app);
-  const wss = new WebSocketServer({ server, path: '/live' });
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (req, socket, head) => {
+    try {
+      const pathname = new URL(req.url || '/', 'http://localhost').pathname;
+      if (pathname === '/live') {
+        wss.handleUpgrade(req, socket, head, (clientWs) => {
+          wss.emit('connection', clientWs, req);
+        });
+      }
+    } catch {
+      socket.destroy();
+    }
+  });
 
   wss.on('connection', async (clientWs) => {
     if (!ai || !apiKey) {

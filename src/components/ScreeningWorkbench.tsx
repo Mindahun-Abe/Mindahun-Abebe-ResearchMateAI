@@ -1,5 +1,12 @@
-import React, { useState } from 'react';
-import { Article, ReviewProject, ScreeningDecision, PageCitation } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Article,
+  ModuleQaRescanRecord,
+  PageCitation,
+  ReviewProject,
+  ScreeningDecision,
+  WorkbenchModuleId,
+} from '../types';
 import {
   CheckCircle2,
   XCircle,
@@ -20,6 +27,7 @@ import {
   X,
 } from 'lucide-react';
 import { apiService, evaluateArticleClient } from '../services/apiService';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface ScreeningWorkbenchProps {
   project: ReviewProject;
@@ -30,6 +38,23 @@ interface ScreeningWorkbenchProps {
   hasPrev: boolean;
   hasNext: boolean;
   onBackToLibrary: () => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
@@ -41,6 +66,12 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
   hasPrev,
   hasNext,
   onBackToLibrary,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const [activeView, setActiveView] = useState<'text' | 'pages' | 'appraisal'>('text');
   const [selectedPageNum, setSelectedPageNum] = useState<number>(1);
@@ -54,11 +85,41 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
   const [pinRelevance, setPinRelevance] = useState<string>('');
   const [isPinning, setIsPinning] = useState<boolean>(false);
 
-  // Decision state
+  // Decision state (synchronized cleanly when switching articles + debounced notes auto-save)
   const [selectedReason, setSelectedReason] = useState<string>(
     article.decisionReason || project.standardExclusionReasons[0] || ''
   );
   const [reviewerNotes, setReviewerNotes] = useState<string>(article.reviewerNotes || '');
+  const notesTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const articleRef = useRef(article);
+  articleRef.current = article;
+
+  useEffect(() => {
+    if (notesTimerRef.current) {
+      clearTimeout(notesTimerRef.current);
+      notesTimerRef.current = null;
+    }
+    setSelectedReason(article.decisionReason || project.standardExclusionReasons[0] || '');
+    setReviewerNotes(article.reviewerNotes || '');
+  }, [article.id]);
+
+  const handleNotesChangeAutoSave = (nextNotes: string) => {
+    setReviewerNotes(nextNotes);
+    if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+    const snapshotArticle = articleRef.current;
+    notesTimerRef.current = setTimeout(() => {
+      onUpdateArticle({
+        ...snapshotArticle,
+        reviewerNotes: nextNotes,
+      });
+    }, 500);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (notesTimerRef.current) clearTimeout(notesTimerRef.current);
+    };
+  }, []);
 
   // Extract selected text from reader
   const handleTextSelection = () => {
@@ -168,6 +229,21 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
 
   return (
     <div className="space-y-4">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="screening"
+        moduleLabel="Eligibility & Full-Text Screening"
+        autoSaveStatus={autoSaveStatus}
+        resetFieldsLabel="Reset Decisions & Notes -> Unscreened"
+        deleteModes={['excluded', 'uncertain', 'unscreened']}
+        compact
+        onResetModule={onResetWorkbenchModule}
+        onResetLocalView={() => setReviewerNotes('')}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Top Navigation & Status Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2">
@@ -662,15 +738,19 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
               </label>
               <textarea
                 rows={2}
-                placeholder="Add working notes on GSD, latency, ground truth, or uncertainty..."
+                placeholder="Add working notes on GSD, latency, ground truth, or uncertainty (auto-saves)..."
                 value={reviewerNotes}
-                onChange={(e) => setReviewerNotes(e.target.value)}
-                onBlur={() =>
+                onChange={(e) => handleNotesChangeAutoSave(e.target.value)}
+                onBlur={() => {
+                  if (notesTimerRef.current) {
+                    clearTimeout(notesTimerRef.current);
+                    notesTimerRef.current = null;
+                  }
                   onUpdateArticle({
                     ...article,
                     reviewerNotes,
-                  })
-                }
+                  });
+                }}
                 className="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded-xl p-2 text-xs focus:outline-none focus:border-indigo-500"
               />
             </div>

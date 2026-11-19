@@ -1,5 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Article, ReviewProject, SearchHistoryEntry } from '../types';
+import {
+  Article,
+  BatchScreenerRunRecord,
+  ModuleQaRescanRecord,
+  ReviewProject,
+  SearchHistoryEntry,
+  WorkbenchModuleId,
+  WorkbenchState,
+} from '../types';
 import {
   Search,
   Filter,
@@ -37,9 +45,15 @@ import {
   Globe,
   Building2,
   Lock,
+  BookOpenText,
+  Maximize2,
+  ArchiveRestore,
 } from 'lucide-react';
 import { apiService } from '../services/apiService';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
+import { NotebookStudioModal } from './NotebookStudioModal';
+import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 type BulkRemoveMode = 'ids' | 'all' | 'excluded' | 'duplicates' | 'uncertain' | 'unscreened' | 'delete_folder';
 
@@ -57,10 +71,21 @@ interface ArticleLibraryProps {
     }
   ) => Promise<{
     removedCount: number;
+    deletedOnlineCount?: number;
     remainingCount: number;
     savedAt?: string;
     databaseFolderPath?: string;
   }>;
+  onRestoredDeletedArticles?: (
+    projectId: string,
+    res: {
+      restoredCount: number;
+      restoredArticles: Article[];
+      remainingArticles: Article[];
+      remainingDeletedCount: number;
+      databaseFolderPath?: string;
+    }
+  ) => void;
   onSaveFolderChanges?: (projectId: string) => Promise<{
     totalInSubLibrary: number;
     savedAt?: string;
@@ -76,6 +101,28 @@ interface ArticleLibraryProps {
   onOpenManualPaperModal?: () => void;
   onAddMultipleArticles?: (articles: Article[], options?: { keepOpen?: boolean; targetProjectId?: string }) => void;
   initialStageFilter?: string;
+  autoOpenBatchScreener?: boolean;
+  onBatchScreenerOpened?: () => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onUpdateWorkbenchState?: (
+    updater: Partial<WorkbenchState> | ((prev: WorkbenchState) => WorkbenchState),
+    options?: { immediate?: boolean; moduleId?: WorkbenchModuleId; label?: string }
+  ) => void;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
 }
 
 export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
@@ -85,6 +132,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   onCreateNewReview,
   onUpdateArticles,
   onBulkRemoveFromFolder,
+  onRestoredDeletedArticles,
   onSaveFolderChanges,
   onDeleteProjectFolder,
   onSelectArticleForScreening,
@@ -93,6 +141,14 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   onOpenManualPaperModal,
   onAddMultipleArticles,
   initialStageFilter,
+  autoOpenBatchScreener = false,
+  onBatchScreenerOpened,
+  autoSaveStatus,
+  onUpdateWorkbenchState,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [stageFilter, setStageFilter] = useState<string>(initialStageFilter || 'all');
@@ -100,6 +156,9 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   const [batchFilter, setBatchFilter] = useState<string>('all');
   const [showDuplicateModal, setShowDuplicateModal] = useState(false);
   const [showOnlineSearchPanel, setShowOnlineSearchPanel] = useState(false);
+  const [showNotebookStudio, setShowNotebookStudio] = useState(false);
+  const [showDeletedOnlineArchive, setShowDeletedOnlineArchive] = useState(false);
+  const [deletedOnlineCount, setDeletedOnlineCount] = useState<number>(0);
   const [syncingArticleId, setSyncingArticleId] = useState<string | null>(null);
   const [visibleLimit, setVisibleLimit] = useState<number>(100);
 
@@ -133,6 +192,12 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   useEffect(() => {
     setSelectedIds(new Set());
     setBulkRemoveTargetProjectId(project.id);
+    if (project.id) {
+      apiService
+        .fetchDeletedOnlineArticles(project.id)
+        .then((res) => setDeletedOnlineCount(res.count || 0))
+        .catch(() => {});
+    }
   }, [project.id]);
 
   useEffect(() => {
@@ -285,10 +350,19 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     return new Date(ts).toLocaleDateString();
   };
 
-  // High-Throughput Batch Screener States (10,000+ articles in 15-60s)
+  // High-Throughput Fast Batch Screener States (10,000+ articles in 15-60s)
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [isBatchScreening, setIsBatchScreening] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
+
+  useEffect(() => {
+    if (autoOpenBatchScreener) {
+      setShowBatchModal(true);
+      onBatchScreenerOpened?.();
+    }
+  }, [autoOpenBatchScreener, onBatchScreenerOpened]);
+
+  const savedBatchState = project.workbenchState?.batchScreener;
   const [batchStats, setBatchStats] = useState<{
     processed: number;
     total: number;
@@ -297,13 +371,39 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     uncertain: number;
     speed: number;
     elapsedSeconds: number;
-  }>({ processed: 0, total: 0, included: 0, excluded: 0, uncertain: 0, speed: 0, elapsedSeconds: 0 });
+  }>(() =>
+    savedBatchState?.lastStats
+      ? savedBatchState.lastStats
+      : { processed: 0, total: 0, included: 0, excluded: 0, uncertain: 0, speed: 0, elapsedSeconds: 0 }
+  );
 
-  // Run Batch Screener on all articles in the library
-  const handleExecuteBatchScreen = async (articlesToScreen: Article[]) => {
+  // Hydrate last auto-saved Fast Batch Screener results when project changes or modal opens
+  useEffect(() => {
+    const last = project.workbenchState?.batchScreener?.lastStats;
+    if (last) {
+      setBatchStats(last);
+    } else {
+      setBatchStats({ processed: 0, total: 0, included: 0, excluded: 0, uncertain: 0, speed: 0, elapsedSeconds: 0 });
+    }
+  }, [project.id, project.workbenchState?.batchScreener?.lastRunAt]);
+
+  // Run Batch Screener on all articles in the library (with live checkpoint & final auto-save)
+  const handleExecuteBatchScreen = async (
+    articlesToScreen: Article[],
+    runMode: 'unscreened_only' | 'full_library' = 'full_library'
+  ) => {
     setIsBatchScreening(true);
     setBatchProgress(0);
     const start = performance.now();
+    let finalSnapshot = {
+      processed: 0,
+      total: articlesToScreen.length,
+      included: 0,
+      excluded: 0,
+      uncertain: 0,
+      speed: 0,
+      elapsedSeconds: 0,
+    };
 
     const resultMap = await apiService.batchScreenArticles(
       articlesToScreen,
@@ -311,8 +411,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
       (processed, total, stats) => {
         const elapsed = (performance.now() - start) / 1000;
         const currentSpeed = Math.round(processed / Math.max(elapsed, 0.05));
-        setBatchProgress(Math.round((processed / total) * 100));
-        setBatchStats({
+        finalSnapshot = {
           processed,
           total,
           included: stats.included,
@@ -320,7 +419,22 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           uncertain: stats.uncertain,
           speed: currentSpeed,
           elapsedSeconds: parseFloat(elapsed.toFixed(1)),
-        });
+        };
+        setBatchProgress(Math.round((processed / total) * 100));
+        setBatchStats(finalSnapshot);
+        if (processed % 450 === 0 && processed < total && onUpdateWorkbenchState) {
+          onUpdateWorkbenchState(
+            (prevWs) => ({
+              ...prevWs,
+              batchScreener: {
+                ...prevWs.batchScreener,
+                lastStats: finalSnapshot,
+                lastRunAt: new Date().toISOString(),
+              },
+            }),
+            { moduleId: 'batch_screener', label: 'Batch Checkpoint' }
+          );
+        }
       }
     );
 
@@ -331,7 +445,12 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           ...art,
           decision: res.decision,
           decisionReason: res.decision === 'exclude' ? res.primaryReason : undefined,
-          screeningStage: res.decision === 'include' ? ('final_included' as const) : res.decision === 'exclude' ? ('excluded' as const) : ('full_text' as const),
+          screeningStage:
+            res.decision === 'include'
+              ? ('final_included' as const)
+              : res.decision === 'exclude'
+              ? ('excluded' as const)
+              : ('full_text' as const),
           aiSuggestedDecision: res.decision,
           aiConfidence: res.confidenceScore,
           aiReason: res.primaryReason,
@@ -351,6 +470,26 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     });
 
     onUpdateArticles(updatedArticles);
+    if (onUpdateWorkbenchState) {
+      const nowIso = new Date().toISOString();
+      const record: BatchScreenerRunRecord = {
+        ...finalSnapshot,
+        runId: `batch-${Date.now()}`,
+        completedAt: nowIso,
+        mode: runMode,
+      };
+      onUpdateWorkbenchState(
+        (prevWs) => ({
+          ...prevWs,
+          batchScreener: {
+            lastStats: finalSnapshot,
+            lastRunAt: nowIso,
+            history: [record, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
+          },
+        }),
+        { immediate: true, moduleId: 'batch_screener', label: 'Fast Batch Screener' }
+      );
+    }
     setIsBatchScreening(false);
   };
 
@@ -405,14 +544,22 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
 
     // Now screen all 10,000 articles using high-speed vectorized engine
     const start = performance.now();
+    let finalSnapshot = {
+      processed: 0,
+      total: generatedBatch.length,
+      included: 0,
+      excluded: 0,
+      uncertain: 0,
+      speed: 0,
+      elapsedSeconds: 0,
+    };
     const resultMap = await apiService.batchScreenArticles(
       generatedBatch,
       project,
       (processed, total, stats) => {
         const elapsed = (performance.now() - start) / 1000;
         const currentSpeed = Math.round(processed / Math.max(elapsed, 0.05));
-        setBatchProgress(Math.round((processed / total) * 100));
-        setBatchStats({
+        finalSnapshot = {
           processed,
           total,
           included: stats.included,
@@ -420,7 +567,9 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           uncertain: stats.uncertain,
           speed: currentSpeed,
           elapsedSeconds: parseFloat(elapsed.toFixed(1)),
-        });
+        };
+        setBatchProgress(Math.round((processed / total) * 100));
+        setBatchStats(finalSnapshot);
       }
     );
 
@@ -442,6 +591,26 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     });
 
     onUpdateArticles([...subLibraryArticles, ...screenedBatch]);
+    if (onUpdateWorkbenchState) {
+      const nowIso = new Date().toISOString();
+      const record: BatchScreenerRunRecord = {
+        ...finalSnapshot,
+        runId: `bench-${Date.now()}`,
+        completedAt: nowIso,
+        mode: 'benchmark',
+      };
+      onUpdateWorkbenchState(
+        (prevWs) => ({
+          ...prevWs,
+          batchScreener: {
+            lastStats: finalSnapshot,
+            lastRunAt: nowIso,
+            history: [record, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
+          },
+        }),
+        { immediate: true, moduleId: 'batch_screener', label: 'Fast Batch Screener Benchmark' }
+      );
+    }
     setIsBatchScreening(false);
   };
 
@@ -742,10 +911,16 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         });
         if (targetBulkProject.id === project.id) {
           setSelectedIds(new Set());
+          apiService
+            .fetchDeletedOnlineArticles(project.id)
+            .then((d) => setDeletedOnlineCount(d.count || 0))
+            .catch(() => {});
         }
         setFolderActionStatus({
           type: 'success',
-          message: `Permanently removed ${res.removedCount} article(s) from "${targetBulkProject.title || targetBulkProject.id}" (${res.remainingCount} remaining) & saved changes`,
+          message: `Removed ${res.removedCount} article(s) from "${targetBulkProject.title || targetBulkProject.id}" (${res.remainingCount} remaining)${
+            res.deletedOnlineCount ? ` · ${res.deletedOnlineCount} online DB file(s) moved to separate Deleted Online Archive` : ''
+          }`,
           path: res.databaseFolderPath || targetBulkProject.databaseFolderPath,
           timestamp: new Date(res.savedAt || Date.now()).toLocaleTimeString(),
         });
@@ -789,9 +964,15 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           articleIds: [id],
           mode: 'ids',
         });
+        apiService
+          .fetchDeletedOnlineArticles(project.id)
+          .then((d) => setDeletedOnlineCount(d.count || 0))
+          .catch(() => {});
         setFolderActionStatus({
           type: 'success',
-          message: `Permanently removed 1 article & saved changes (${res.remainingCount} left)`,
+          message: `Removed 1 article (${res.remainingCount} left)${
+            res.deletedOnlineCount ? ' · Online DB file placed in separate Deleted Online Archive (no auto-recovery)' : ''
+          }`,
           path: res.databaseFolderPath || project.databaseFolderPath,
           timestamp: new Date(res.savedAt || Date.now()).toLocaleTimeString(),
         });
@@ -1277,11 +1458,21 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
 
             <button
               onClick={() => setShowBatchModal(true)}
-              className="px-3 py-2 bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm transition inline-flex items-center gap-1.5 cursor-pointer"
-              title="High-throughput batch screening (screens 10,000+ articles in 15-60s)"
+              className="px-3 py-2 bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              title="Fast Batch Screener: screens active Article Library records only (deleted online DB files stay excluded)"
             >
               <Zap className="w-3.5 h-3.5" />
               <span>⚡ Fast Batch Screener</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowDeletedOnlineArchive(true)}
+              className="px-3 py-2 bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border border-amber-700/60 text-xs font-semibold rounded-xl shadow-sm transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              title="View deleted online database files separately from Article Library & Fast Batch Screener; mark reviewer interest or selectively build back"
+            >
+              <ArchiveRestore className="w-3.5 h-3.5 text-amber-400" />
+              <span>Deleted Online DBs ({deletedOnlineCount})</span>
             </button>
 
             <button
@@ -1297,6 +1488,16 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
               <Globe className="w-3.5 h-3.5" />
               <span>+ Add from Online DBs</span>
               <ChevronDown className={`w-3 h-3 transition-transform ${showOnlineSearchPanel ? 'rotate-180' : ''}`} />
+            </button>
+
+            <button
+              onClick={() => setShowNotebookStudio(true)}
+              className="px-3 py-2 bg-gradient-to-r from-indigo-600 via-sky-600 to-teal-600 hover:from-indigo-500 hover:to-teal-500 text-white text-xs font-bold rounded-xl shadow-sm transition inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              title="Open fullscreen NotebookLM PDF Exporter & Unconstrained Grounded Research Chat (https://notebook.google.com/)"
+            >
+              <BookOpenText className="w-3.5 h-3.5" />
+              <span>Export to NotebookLM &amp; Chat ({subLibraryArticles.filter((a) => a.decision === 'include').length} Included)</span>
+              <Maximize2 className="w-3 h-3 opacity-85" />
             </button>
 
             <button
@@ -1500,6 +1701,17 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
 
           <button
             type="button"
+            onClick={() => setShowNotebookStudio(true)}
+            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-teal-600 hover:from-indigo-500 hover:to-teal-500 text-white font-bold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition"
+            title="Export included original PDFs & sources to notebook.google.com or chat in fullscreen"
+          >
+            <BookOpenText className="w-3.5 h-3.5" />
+            <span>NotebookLM Export &amp; Chat</span>
+            <Maximize2 className="w-3 h-3 opacity-85" />
+          </button>
+
+          <button
+            type="button"
             onClick={onOpenAddModal}
             className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
           >
@@ -1544,6 +1756,8 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
             }
           }}
           onRecordSearchHistory={(q, count) => recordSearchQuery(q, count)}
+          onOpenDeletedArchive={() => setShowDeletedOnlineArchive(true)}
+          deletedOnlineCount={deletedOnlineCount}
           onClose={() => setShowOnlineSearchPanel(false)}
         />
       )}
@@ -1865,52 +2079,87 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
       {/* High-Throughput Batch Screener Modal (10,000+ articles in 15-60s) */}
       {showBatchModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 rounded-xl bg-teal-500/20 text-teal-400">
                   <Zap className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-white text-base">High-Throughput Batch Screener</h3>
+                  <h3 className="font-bold text-white text-base">Fast Batch Screener (High-Throughput Engine)</h3>
                   <p className="text-xs text-slate-400">
-                    Optimized to screen 10,000+ articles in 15–60 seconds using vectorized semantic heuristics
+                    Auto-saves results &amp; history; deleted online DB files stay excluded unless built back
                   </p>
                 </div>
               </div>
               {!isBatchScreening && (
-                <button onClick={() => setShowBatchModal(false)} className="text-slate-400 hover:text-white text-lg">
+                <button onClick={() => setShowBatchModal(false)} className="text-slate-400 hover:text-white text-lg cursor-pointer">
                   ✕
                 </button>
               )}
             </div>
 
-            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs space-y-3">
+            <ModuleWorkbenchControls
+              project={project}
+              moduleId="batch_screener"
+              moduleLabel="Fast Batch Screener"
+              autoSaveStatus={autoSaveStatus}
+              compact
+              resetFieldsLabel="Reset Screening Decisions -> Unscreened"
+              deleteModes={['excluded', 'uncertain', 'unscreened']}
+              onResetModule={onResetWorkbenchModule}
+              onResetLocalView={() =>
+                setBatchStats({
+                  processed: 0,
+                  total: 0,
+                  included: 0,
+                  excluded: 0,
+                  uncertain: 0,
+                  speed: 0,
+                  elapsedSeconds: 0,
+                })
+              }
+              onAddDataFiles={onDirectAddDataFiles}
+              onOpenBulkImporter={() => {
+                setShowBatchModal(false);
+                onOpenAddModal();
+              }}
+              onRescanQueryQA={onRescanWithQueryQA}
+              onDeleteQaEntry={onDeleteQaEntry}
+            />
+
+            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs space-y-2.5">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-300">Target Systematic Review:</span>
                 <span className="text-indigo-400 font-mono text-[11px] truncate max-w-xs">{project.title}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-300">Articles in Current Partitioned Library:</span>
-                <span className="text-white font-mono font-bold">{subLibraryArticles.length} records</span>
+                <span className="font-semibold text-slate-300">Active Articles in Article Library:</span>
+                <span className="text-white font-mono font-bold tabular-nums">{subLibraryArticles.length} records</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-300">Unscreened Records:</span>
-                <span className="text-amber-400 font-mono font-bold">
+                <span className="font-semibold text-slate-300">Unscreened Records Ready to Screen:</span>
+                <span className="text-amber-400 font-mono font-bold tabular-nums">
                   {subLibraryArticles.filter((a) => a.decision === 'unscreened').length} records
+                </span>
+              </div>
+              <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
+                <span className="font-semibold text-slate-400">Deleted Online Archive (Excluded from Screener):</span>
+                <span className="text-amber-300 font-mono font-bold tabular-nums">
+                  {deletedOnlineCount} archived
                 </span>
               </div>
             </div>
 
             {/* Progress Bar & Live Stats when screening */}
             {isBatchScreening && (
-              <div className="p-4 bg-slate-950 rounded-xl border border-teal-800/60 space-y-3 animate-in fade-in">
+              <div className="p-4 bg-slate-950 rounded-xl border border-teal-800/60 space-y-3">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-bold text-teal-300 flex items-center gap-1.5">
-                    <Zap className="w-4 h-4 animate-bounce" />
-                    High-Throughput Batch Processing...
+                    <Zap className="w-4 h-4" />
+                    High-Throughput Batch Processing (Auto-Saving Checkpoints)...
                   </span>
-                  <span className="font-mono text-white font-bold">{batchProgress}%</span>
+                  <span className="font-mono text-white font-bold tabular-nums">{batchProgress}%</span>
                 </div>
 
                 <div className="w-full bg-slate-800 h-3 rounded-full overflow-hidden">
@@ -1923,58 +2172,97 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-center text-[11px]">
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
                     <span className="text-slate-500 block">Processed</span>
-                    <span className="font-mono font-bold text-white">
+                    <span className="font-mono font-bold text-white tabular-nums">
                       {batchStats.processed} / {batchStats.total}
                     </span>
                   </div>
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
                     <span className="text-slate-500 block">Processing Speed</span>
-                    <span className="font-mono font-bold text-teal-400">~{batchStats.speed} art/sec</span>
+                    <span className="font-mono font-bold text-teal-400 tabular-nums">~{batchStats.speed} art/sec</span>
                   </div>
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
                     <span className="text-slate-500 block">Time Elapsed</span>
-                    <span className="font-mono font-bold text-amber-300">{batchStats.elapsedSeconds}s</span>
+                    <span className="font-mono font-bold text-amber-300 tabular-nums">{batchStats.elapsedSeconds}s</span>
                   </div>
                   <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
                     <span className="text-slate-500 block">Decisions</span>
-                    <span className="font-mono font-bold text-emerald-400">{batchStats.included} Inc</span>
+                    <span className="font-mono font-bold text-emerald-400 tabular-nums">{batchStats.included} Inc</span>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Summary card after completion */}
+            {/* Summary card after completion (persisted across reloads via workbench_state.json) */}
             {!isBatchScreening && batchStats.processed > 0 && (
               <div className="p-4 bg-emerald-950/30 border border-emerald-800/60 rounded-xl text-xs space-y-2">
-                <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>Batch Screening Complete! Finished in {batchStats.elapsedSeconds} seconds</span>
+                <div className="flex flex-wrap items-center justify-between gap-2 text-emerald-400 font-bold">
+                  <span className="inline-flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      Auto-Saved Batch Result · {batchStats.processed} processed in {batchStats.elapsedSeconds}s
+                    </span>
+                  </span>
+                  {savedBatchState?.lastRunAt && (
+                    <span className="text-[11px] font-mono text-emerald-300/80 tabular-nums">
+                      Saved {new Date(savedBatchState.lastRunAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                  )}
                 </div>
                 <div className="grid grid-cols-3 gap-2 pt-1 text-center">
                   <div className="p-2 rounded bg-emerald-900/30 border border-emerald-800">
                     <span className="text-slate-400 block text-[10px]">Included</span>
-                    <span className="font-bold text-emerald-300 font-mono text-sm">{batchStats.included}</span>
+                    <span className="font-bold text-emerald-300 font-mono text-sm tabular-nums">{batchStats.included}</span>
                   </div>
                   <div className="p-2 rounded bg-rose-900/30 border border-rose-800">
                     <span className="text-slate-400 block text-[10px]">Excluded</span>
-                    <span className="font-bold text-rose-300 font-mono text-sm">{batchStats.excluded}</span>
+                    <span className="font-bold text-rose-300 font-mono text-sm tabular-nums">{batchStats.excluded}</span>
                   </div>
                   <div className="p-2 rounded bg-amber-900/30 border border-amber-800">
                     <span className="text-slate-400 block text-[10px]">Uncertain / Review</span>
-                    <span className="font-bold text-amber-300 font-mono text-sm">{batchStats.uncertain}</span>
+                    <span className="font-bold text-amber-300 font-mono text-sm tabular-nums">{batchStats.uncertain}</span>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {/* Recent Auto-Saved Run History */}
+            {savedBatchState?.history && savedBatchState.history.length > 0 && (
+              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2 text-[11px]">
+                <div className="flex items-center justify-between text-slate-300 font-semibold">
+                  <span className="inline-flex items-center gap-1.5">
+                    <History className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Auto-Saved Batch Run Log ({savedBatchState.history.length})</span>
+                  </span>
+                </div>
+                <div className="max-h-28 overflow-y-auto space-y-1 pr-1">
+                  {savedBatchState.history.slice(0, 6).map((h) => (
+                    <div
+                      key={h.runId}
+                      className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800/80 font-mono text-[10px] tabular-nums"
+                    >
+                      <span className="text-slate-300">
+                        {h.mode} · {h.processed}/{h.total} articles
+                      </span>
+                      <span className="text-slate-400">
+                        <span className="text-emerald-400">{h.included} Inc</span> /{' '}
+                        <span className="text-rose-400">{h.excluded} Exc</span> /{' '}
+                        <span className="text-amber-300">{h.uncertain} Unc</span> ·{' '}
+                        {new Date(h.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}
 
             {/* Actions */}
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   disabled={isBatchScreening}
                   onClick={() => handleStressTest10k(10000)}
-                  className="px-3 py-2 text-xs font-semibold bg-indigo-600/80 hover:bg-indigo-600 text-white rounded-xl disabled:opacity-50 transition"
+                  className="px-3 py-2 text-xs font-semibold bg-indigo-600/80 hover:bg-indigo-600 text-white rounded-xl disabled:opacity-50 transition whitespace-nowrap shrink-0 cursor-pointer"
                   title="Benchmark test: generate and screen 10,000 articles in 15-30 seconds"
                 >
                   ⚡ Benchmark 10,000 Articles (15-30s)
@@ -1983,26 +2271,45 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                   type="button"
                   disabled={isBatchScreening}
                   onClick={() => handleStressTest10k(1000)}
-                  className="px-3 py-2 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl disabled:opacity-50 transition"
+                  className="px-3 py-2 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl disabled:opacity-50 transition whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   Screen 1,000 Sample Set
                 </button>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   disabled={isBatchScreening}
                   onClick={() => setShowBatchModal(false)}
-                  className="px-4 py-2 text-xs rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300"
+                  className="px-4 py-2 text-xs rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   Close
                 </button>
                 <button
                   type="button"
+                  disabled={
+                    isBatchScreening ||
+                    subLibraryArticles.filter((a) => a.decision === 'unscreened').length === 0
+                  }
+                  onClick={() =>
+                    handleExecuteBatchScreen(
+                      subLibraryArticles.filter((a) => a.decision === 'unscreened'),
+                      'unscreened_only'
+                    )
+                  }
+                  className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-md disabled:opacity-40 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>
+                    Screen Unscreened Only ({subLibraryArticles.filter((a) => a.decision === 'unscreened').length})
+                  </span>
+                </button>
+                <button
+                  type="button"
                   disabled={isBatchScreening || subLibraryArticles.length === 0}
-                  onClick={() => handleExecuteBatchScreen(subLibraryArticles)}
-                  className="px-5 py-2 text-xs font-bold bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white rounded-xl shadow-md disabled:opacity-50 transition inline-flex items-center gap-1.5"
+                  onClick={() => handleExecuteBatchScreen(subLibraryArticles, 'full_library')}
+                  className="px-5 py-2 text-xs font-bold bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white rounded-xl shadow-md disabled:opacity-50 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                 >
                   <Zap className="w-4 h-4" />
                   <span>Batch Screen Library Now</span>
@@ -2240,6 +2547,39 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           </div>
         </div>
       )}
+
+      {/* Fullscreen NotebookLM Exporter & Grounded Research Chat */}
+      <NotebookStudioModal
+        isOpen={showNotebookStudio}
+        onClose={() => setShowNotebookStudio(false)}
+        project={project}
+        articles={subLibraryArticles}
+        preselectedIds={selectedIds}
+        onUpdateArticles={onUpdateArticles}
+      />
+
+      {/* Separate Deleted Online Database Files Archive (Reviewer Interest & Selective Restore) */}
+      <DeletedOnlineArchiveModal
+        isOpen={showDeletedOnlineArchive}
+        onClose={() => setShowDeletedOnlineArchive(false)}
+        projectId={project.id}
+        projectTitle={project.title || 'Untitled Review'}
+        onCountChange={setDeletedOnlineCount}
+        onRestoredArticles={(res) => {
+          setDeletedOnlineCount(res.remainingDeletedCount);
+          if (onRestoredDeletedArticles) {
+            onRestoredDeletedArticles(project.id, res);
+          } else {
+            onUpdateArticles(res.remainingArticles);
+          }
+          setFolderActionStatus({
+            type: 'success',
+            message: `Rebuilt ${res.restoredCount} deleted online database file(s) back into Article Library & Fast Batch Screener (${res.remainingDeletedCount} still archived)`,
+            path: res.databaseFolderPath || project.databaseFolderPath,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+        }}
+      />
     </div>
   );
 };

@@ -204,6 +204,434 @@ export interface ReviewProject {
   uncertainCasesGuidance: string;
   booleanQuery: string;
   articles: Article[];
+  workbenchState?: WorkbenchState;
+}
+
+export type WorkbenchModuleId =
+  | 'batch_screener'
+  | 'picoc'
+  | 'duplicates'
+  | 'title_screening'
+  | 'screening'
+  | 'extraction'
+  | 'appraisal'
+  | 'prisma'
+  | 'results'
+  | 'quant_synthesis'
+  | 'briefing'
+  | 'proposal'
+  | 'export';
+
+export type QuantEffectMeasure = 'SMD' | 'MD' | 'OR' | 'RR' | 'COR' | 'PROP';
+export type QuantModelType = 'random' | 'fixed';
+export type QuantTauEstimator = 'DL' | 'REML' | 'PM';
+export type QuantEligibilityStatus =
+  | 'eligible'
+  | 'excluded_incompatible'
+  | 'excluded_incomplete'
+  | 'excluded_duplicate_cluster'
+  | 'excluded_manual'
+  | 'excluded_review_type'
+  | 'pending';
+
+export interface QuantRawNumericalInput {
+  mean1?: number | null;
+  sd1?: number | null;
+  n1?: number | null;
+  mean2?: number | null;
+  sd2?: number | null;
+  n2?: number | null;
+  events1?: number | null;
+  total1?: number | null;
+  events2?: number | null;
+  total2?: number | null;
+  r?: number | null;
+  n?: number | null;
+  events?: number | null;
+  total?: number | null;
+  effectSize?: number | null;
+  se?: number | null;
+  variance?: number | null;
+  ciLow?: number | null;
+  ciHigh?: number | null;
+  totalSampleSize?: number | null;
+  isNaturalScaleRatio?: boolean;
+  isRawCorrelation?: boolean;
+}
+
+export interface QuantStudyExtractionRecord {
+  id: string;
+  projectId: string;
+  articleId: string;
+  studyLabel?: string;
+  title?: string;
+  authors?: string[];
+  year?: number;
+  studyClusterId: string;
+  outcomeType: string;
+  outcomeLabel: string;
+  effectMeasure: QuantEffectMeasure;
+  subgroup: string;
+  moderatorYear?: number | null;
+  moderatorQuality?: number | null;
+  moderatorSampleSize?: number | null;
+  studyDesign?: string;
+  units?: string;
+  originalData: QuantRawNumericalInput;
+  effectSize?: number | null;
+  se?: number | null;
+  variance?: number | null;
+  ciLow?: number | null;
+  ciHigh?: number | null;
+  displayEffect?: number | null;
+  displayCiLow?: number | null;
+  displayCiHigh?: number | null;
+  weightFe?: number | null;
+  weightRe?: number | null;
+  activeWeight?: number | null;
+  continuityCorrected?: boolean;
+  extractionStatus: 'pending' | 'awaiting_numerical_entry' | 'extracted' | 'verified';
+  verifiedBy?: string;
+  pdfPageNumbers?: string;
+  supportingEvidence?: string;
+  eligibilityStatus: QuantEligibilityStatus;
+  eligibilityOverride?: 'auto' | 'approved' | 'excluded';
+  eligibilityReasons?: string[];
+  checksPassed?: string[];
+  doubleCountGuardNote?: string;
+  source?: string;
+  updatedAt?: string;
+}
+
+export interface QuantMetaConfig {
+  effectMeasure: QuantEffectMeasure;
+  modelType: QuantModelType;
+  estimator: QuantTauEstimator;
+  targetOutcomeType: string;
+  targetUnits?: string;
+  subgroupBy: 'subgroup' | 'studyDesign' | 'effectMeasure';
+  metaRegressionModerator: 'moderatorYear' | 'moderatorQuality' | 'moderatorSampleSize';
+  allowedStudyDesign?: string;
+  requireCompatibleStudyDesign?: boolean;
+  allowSecondaryReviewPooling?: boolean;
+}
+
+export interface QuantPooledEstimateSummary {
+  pooledEffect: number;
+  se: number;
+  ciLow: number;
+  ciHigh: number;
+  zStat: number;
+  pValue: number;
+  displayPooledEffect: number;
+  displayCiLow: number;
+  displayCiHigh: number;
+}
+
+export interface QuantDescriptiveSynthesis {
+  counts: {
+    totalIdentified: number;
+    duplicatesRemoved: number;
+    uniqueRecords: number;
+    screened: number;
+    excluded: number;
+    uncertain: number;
+    unscreened: number;
+    included: number;
+    includedOriginalResearch: number;
+    includedReviews: number;
+    includedOriginalPct: number;
+    includedReviewPct: number;
+    identifiedOriginalResearch: number;
+    identifiedReviews: number;
+  };
+  publicationYearDistribution: Array<{
+    year: string;
+    count: number;
+    originalCount: number;
+    reviewCount: number;
+    percentage: number;
+  }>;
+  countryDistribution: Array<{ label: string; count: number; percentage: number }>;
+  continentDistribution: Array<{ label: string; count: number; percentage: number }>;
+  researchDesignDistribution: Array<{ label: string; count: number; percentage: number }>;
+  databaseIdentificationDistribution: Array<{ label: string; count: number; percentage: number }>;
+  databaseIncludedDistribution: Array<{ label: string; count: number; percentage: number }>;
+  sensorDistribution: Array<{ label: string; count: number; percentage: number }>;
+  platformDistribution: Array<{ label: string; count: number; percentage: number }>;
+  algorithmDistribution: Array<{
+    algorithm: string;
+    count: number;
+    percentage: number;
+    meanNormalizedScore: number | null;
+    reportedScoreCount: number;
+  }>;
+  outcomeDistribution: Array<{ label: string; count: number; percentage: number }>;
+  researchObjectiveContributions: Array<{
+    code: string;
+    question: string;
+    mainEvidenceToCollect: string;
+    count: number;
+    percentage: number;
+    contributingArticleIds: string[];
+    contributingTitles: string[];
+  }>;
+  extractedMetricAggregates: Record<
+    string,
+    { count: number; min: number; max: number; mean: number; median: number }
+  >;
+  studyTraceRows: Array<{
+    articleId: string;
+    title: string;
+    year: number;
+    category: string;
+    country: string;
+    continent: string;
+    design: string;
+    database: string;
+    sensor: string;
+    platform: string;
+    algorithm: string;
+    outcomeType: string;
+    appraisalScore?: number;
+    riskOfBias: string;
+  }>;
+}
+
+export interface QuantMetaAnalysisResult {
+  pooledAvailable: boolean;
+  reason?: string | null;
+  k: number;
+  effectMeasure: QuantEffectMeasure;
+  modelType: QuantModelType;
+  estimator: QuantTauEstimator;
+  overall: (QuantPooledEstimateSummary & {
+    k: number;
+    effectMeasure: QuantEffectMeasure;
+    modelType: QuantModelType;
+    estimator: QuantTauEstimator;
+    fixedEffect: QuantPooledEstimateSummary;
+    randomEffects: QuantPooledEstimateSummary;
+    heterogeneity: {
+      qStat: number;
+      qDf: number;
+      qPvalue: number;
+      i2: number;
+      h2: number;
+      tau2: number;
+      tau: number;
+      tau2DL: number;
+    };
+    predictionInterval: {
+      low: number;
+      high: number;
+      displayLow: number;
+      displayHigh: number;
+    } | null;
+    studies: QuantStudyExtractionRecord[];
+  }) | null;
+  subgroupAnalysis: {
+    subgroupField: string;
+    subgroups: Array<{
+      subgroup: string;
+      k: number;
+      pooledEffect: number;
+      ciLow: number;
+      ciHigh: number;
+      displayPooledEffect: number;
+      displayCiLow: number;
+      displayCiHigh: number;
+      pValue: number;
+      i2: number;
+      tau2: number;
+      qStat: number;
+    }>;
+    qBetween: number | null;
+    dfBetween: number;
+    pBetween: number | null;
+  } | null;
+  sensitivityAnalysis: Array<{
+    omittedId: string;
+    omittedArticleId: string;
+    omittedLabel: string;
+    kRemaining: number;
+    pooledEffect: number;
+    ciLow: number;
+    ciHigh: number;
+    displayPooledEffect: number;
+    displayCiLow: number;
+    displayCiHigh: number;
+    i2: number;
+    tau2: number;
+    pValue: number;
+  }>;
+  metaRegression: {
+    moderatorKey: string;
+    k: number;
+    intercept: number;
+    slope: number;
+    seSlope: number;
+    seIntercept: number;
+    zStat: number;
+    pValue: number;
+    qm: number;
+    r2Analog: number;
+    points: Array<{ x: number; y: number; weight: number; label: string }>;
+  } | null;
+  publicationBias: {
+    eligible: boolean;
+    k: number;
+    eggerIntercept?: number;
+    eggerSe?: number;
+    eggerT?: number;
+    eggerPvalue?: number;
+    beggTau?: number;
+    beggPvalue?: number;
+    advisory: string;
+  };
+  influenceDiagnostics: Array<{
+    id: string;
+    articleId: string;
+    studyLabel: string;
+    hatWeight: number;
+    standardizedResidual: number;
+    cooksDistance: number;
+    isOutlier: boolean;
+    isInfluential: boolean;
+  }>;
+  outcomeStratified: Array<any>;
+}
+
+export interface QuantAnalysisResponse {
+  success: boolean;
+  runId: string;
+  analysisDate: string;
+  softwareVersion: string;
+  descriptive: QuantDescriptiveSynthesis;
+  records: QuantStudyExtractionRecord[];
+  metaAnalysis: QuantMetaAnalysisResult;
+  audit?: {
+    runs: Array<any>;
+    auditLog: Array<any>;
+    migrations: Array<any>;
+  };
+}
+
+export interface QualitativeThemeEntry {
+  id: string;
+  theme: string;
+  researchQuestionCode: string;
+  synthesisNarrative: string;
+  supportingArticleIds: string[];
+  evidenceQuotes: string[];
+  updatedAt: string;
+}
+
+export interface QuantSynthesisSavedState {
+  activeSynthesisMode?: 'qualitative' | 'quantitative';
+  config?: QuantMetaConfig;
+  lastRunId?: string;
+  analysisDate?: string;
+  softwareVersion?: string;
+  lastDescriptive?: QuantDescriptiveSynthesis | null;
+  lastMetaAnalysis?: QuantMetaAnalysisResult | null;
+  studyRecords?: QuantStudyExtractionRecord[];
+  qualitativeThemes?: QualitativeThemeEntry[];
+  updatedAt?: string;
+}
+
+export interface BatchScreenerStatsSnapshot {
+  processed: number;
+  total: number;
+  included: number;
+  excluded: number;
+  uncertain: number;
+  speed: number;
+  elapsedSeconds: number;
+}
+
+export interface BatchScreenerRunRecord extends BatchScreenerStatsSnapshot {
+  runId: string;
+  completedAt: string;
+  mode: 'unscreened_only' | 'full_library' | 'qa_rescan' | 'benchmark' | 'newly_added_files';
+  queryPrompt?: string;
+}
+
+export interface ModuleQaRescanRecord {
+  id: string;
+  moduleId: WorkbenchModuleId;
+  query: string;
+  answer: string;
+  matchedArticleIds: string[];
+  matchedTitles?: string[];
+  matchedCount: number;
+  totalScanned: number;
+  rescanDecisionsApplied?: boolean;
+  engine?: string;
+  createdAt: string;
+}
+
+export interface BriefingChatTurn {
+  id: string;
+  role: 'user' | 'model';
+  text: string;
+  model?: string;
+  citationStyle?: string;
+  citedPaperCount?: number;
+  responseMode?: string;
+  timestamp: string;
+}
+
+export interface BriefingStudioSavedState {
+  scopeMode?: 'included' | 'included_starred' | 'selected' | 'all';
+  excludedPaperIds?: string[];
+  citationStyle?: string;
+  responseMode?: 'qa' | 'flexible_review' | 'rq_matrix' | 'methods_critique' | 'custom_outline';
+  customOutline?: string;
+  selectedModel?: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite';
+  chatHistory?: BriefingChatTurn[];
+  podcastEpisode?: PodcastEpisode | null;
+  updatedAt?: string;
+}
+
+export interface ProposalSavedState {
+  activeTab?: 'proposal' | 'included_table';
+  customInstructions?: string;
+  proposal?: NotebookProposal | null;
+  updatedAt?: string;
+}
+
+export interface ExportConfigSavedState {
+  selectedFormat?: 'markdown' | 'word' | 'notebooklm';
+  citationStyle?: string;
+  citationSourceType?: string;
+  includeAbstract?: boolean;
+  includePicoc?: boolean;
+  includeRqs?: boolean;
+  includeCoreNineSections?: boolean;
+  includePrismaCounts?: boolean;
+  includeAppraisalMatrix?: boolean;
+  includePageEvidence?: boolean;
+  includeExtractionTable?: boolean;
+  includeReferences?: boolean;
+  updatedAt?: string;
+}
+
+export interface WorkbenchState {
+  lastAutoSavedAt?: string;
+  lastSavedModule?: WorkbenchModuleId;
+  batchScreener?: {
+    lastStats?: BatchScreenerStatsSnapshot | null;
+    lastRunAt?: string;
+    history?: BatchScreenerRunRecord[];
+  };
+  briefing?: BriefingStudioSavedState;
+  proposal?: ProposalSavedState;
+  exportConfig?: ExportConfigSavedState;
+  quantSynthesis?: QuantSynthesisSavedState;
+  moduleNotes?: Record<string, string>;
+  moduleLastSavedAt?: Record<string, string>;
+  qaRescans?: Partial<Record<WorkbenchModuleId, ModuleQaRescanRecord[]>>;
 }
 
 export interface PrismaNumbers {
@@ -265,3 +693,12 @@ export interface SearchHistoryEntry {
   };
 }
 
+export interface DeletedOnlineArticleRecord {
+  archiveId: string;
+  projectId: string;
+  article: Article;
+  deletedAt: string;
+  deletionMode?: string;
+  reviewerInterestSelected?: boolean;
+  reviewerInterestNote?: string;
+}

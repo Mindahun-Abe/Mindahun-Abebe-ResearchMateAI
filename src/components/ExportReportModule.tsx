@@ -1,5 +1,12 @@
-import React, { useState, useMemo } from 'react';
-import { ReviewProject, Article, NotebookProposal } from '../types';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Article,
+  ExportConfigSavedState,
+  ModuleQaRescanRecord,
+  NotebookProposal,
+  ReviewProject,
+  WorkbenchModuleId,
+} from '../types';
 import {
   analyzeArticleForMatrix,
   NOT_PRIMARY_SUBTYPE_LABELS,
@@ -41,31 +48,133 @@ import {
   getCitationStyleDefinition,
 } from '../utils/citationFormatter';
 import { CitationGuidePanel } from './CitationGuidePanel';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface ExportReportModuleProps {
   project: ReviewProject;
   onRestoreProject?: (restored: ReviewProject) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onSaveExportState?: (config: ExportConfigSavedState, immediate?: boolean) => void;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
-export const ExportReportModule: React.FC<ExportReportModuleProps> = ({ project, onRestoreProject }) => {
-  const [selectedFormat, setSelectedFormat] = useState<'markdown' | 'word' | 'notebooklm'>('word');
+export const ExportReportModule: React.FC<ExportReportModuleProps> = ({
+  project,
+  onRestoreProject,
+  autoSaveStatus,
+  onSaveExportState,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
+}) => {
+  const savedExport = project.workbenchState?.exportConfig;
+  const [selectedFormat, setSelectedFormat] = useState<'markdown' | 'word' | 'notebooklm'>(
+    () => savedExport?.selectedFormat || 'word'
+  );
   const [copied, setCopied] = useState(false);
   const [activeCitationModal, setActiveCitationModal] = useState<number | null>(null);
   const [restoreMessage, setRestoreMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Configuration toggles for what to include in report
-  const [includeAbstract, setIncludeAbstract] = useState(true);
-  const [includePicoc, setIncludePicoc] = useState(true);
-  const [includeRqs, setIncludeRqs] = useState(true);
-  const [includeCoreNineSections, setIncludeCoreNineSections] = useState(true);
-  const [includePrismaCounts, setIncludePrismaCounts] = useState(true);
-  const [includeAppraisalMatrix, setIncludeAppraisalMatrix] = useState(true);
-  const [includePageEvidence, setIncludePageEvidence] = useState(true);
-  const [includeExtractionTable, setIncludeExtractionTable] = useState(true);
-  const [includeReferences, setIncludeReferences] = useState(true);
-  const [citationStyle, setCitationStyle] = useState<CitationStyleId>('apa7');
-  const [citationSourceType, setCitationSourceType] = useState<CitationSourceType>('auto');
+  const [includeAbstract, setIncludeAbstract] = useState(() => savedExport?.includeAbstract ?? true);
+  const [includePicoc, setIncludePicoc] = useState(() => savedExport?.includePicoc ?? true);
+  const [includeRqs, setIncludeRqs] = useState(() => savedExport?.includeRqs ?? true);
+  const [includeCoreNineSections, setIncludeCoreNineSections] = useState(
+    () => savedExport?.includeCoreNineSections ?? true
+  );
+  const [includePrismaCounts, setIncludePrismaCounts] = useState(() => savedExport?.includePrismaCounts ?? true);
+  const [includeAppraisalMatrix, setIncludeAppraisalMatrix] = useState(
+    () => savedExport?.includeAppraisalMatrix ?? true
+  );
+  const [includePageEvidence, setIncludePageEvidence] = useState(() => savedExport?.includePageEvidence ?? true);
+  const [includeExtractionTable, setIncludeExtractionTable] = useState(
+    () => savedExport?.includeExtractionTable ?? true
+  );
+  const [includeReferences, setIncludeReferences] = useState(() => savedExport?.includeReferences ?? true);
+  const [citationStyle, setCitationStyle] = useState<CitationStyleId>(
+    () => (savedExport?.citationStyle as CitationStyleId) || 'apa7'
+  );
+  const [citationSourceType, setCitationSourceType] = useState<CitationSourceType>(
+    () => (savedExport?.citationSourceType as CitationSourceType) || 'auto'
+  );
   const [copiedCitationKey, setCopiedCitationKey] = useState<string | null>(null);
+
+  const hydratedProjRef = useRef(project.id);
+  const skipFirstAutoSaveRef = useRef(true);
+
+  useEffect(() => {
+    if (hydratedProjRef.current === project.id) return;
+    hydratedProjRef.current = project.id;
+    const cfg = project.workbenchState?.exportConfig;
+    setSelectedFormat(cfg?.selectedFormat || 'word');
+    setIncludeAbstract(cfg?.includeAbstract ?? true);
+    setIncludePicoc(cfg?.includePicoc ?? true);
+    setIncludeRqs(cfg?.includeRqs ?? true);
+    setIncludeCoreNineSections(cfg?.includeCoreNineSections ?? true);
+    setIncludePrismaCounts(cfg?.includePrismaCounts ?? true);
+    setIncludeAppraisalMatrix(cfg?.includeAppraisalMatrix ?? true);
+    setIncludePageEvidence(cfg?.includePageEvidence ?? true);
+    setIncludeExtractionTable(cfg?.includeExtractionTable ?? true);
+    setIncludeReferences(cfg?.includeReferences ?? true);
+    setCitationStyle((cfg?.citationStyle as CitationStyleId) || 'apa7');
+    setCitationSourceType((cfg?.citationSourceType as CitationSourceType) || 'auto');
+  }, [project.id, project.workbenchState?.exportConfig]);
+
+  useEffect(() => {
+    if (skipFirstAutoSaveRef.current) {
+      skipFirstAutoSaveRef.current = false;
+      return;
+    }
+    onSaveExportState?.(
+      {
+        selectedFormat,
+        citationStyle,
+        citationSourceType,
+        includeAbstract,
+        includePicoc,
+        includeRqs,
+        includeCoreNineSections,
+        includePrismaCounts,
+        includeAppraisalMatrix,
+        includePageEvidence,
+        includeExtractionTable,
+        includeReferences,
+        updatedAt: new Date().toISOString(),
+      },
+      false
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    selectedFormat,
+    citationStyle,
+    citationSourceType,
+    includeAbstract,
+    includePicoc,
+    includeRqs,
+    includeCoreNineSections,
+    includePrismaCounts,
+    includeAppraisalMatrix,
+    includePageEvidence,
+    includeExtractionTable,
+    includeReferences,
+  ]);
 
   // Included studies
   const includedArticles = useMemo(
@@ -949,18 +1058,43 @@ ${markdownContent}
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="export"
+        moduleLabel="Export & Portable Backup Hub"
+        autoSaveStatus={autoSaveStatus}
+        deleteModes={['excluded', 'uncertain', 'duplicates']}
+        onResetModule={onResetWorkbenchModule}
+        onResetLocalView={() => {
+          setSelectedFormat('word');
+          setCitationStyle('apa7');
+          setCitationSourceType('auto');
+          setIncludeAbstract(true);
+          setIncludePicoc(true);
+          setIncludeRqs(true);
+          setIncludeCoreNineSections(true);
+          setIncludePrismaCounts(true);
+          setIncludeAppraisalMatrix(true);
+          setIncludePageEvidence(true);
+          setIncludeExtractionTable(true);
+          setIncludeReferences(true);
+        }}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Top Header Card */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-sm space-y-4">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Download className="w-5 h-5 text-indigo-400" />
               <h2 className="text-base sm:text-lg font-bold text-white">
                 Export & Portable Backup Hub
               </h2>
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                Auto-Sync for Export Active · {includedArticles.length} Studies Live
+              <span className="px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 tabular-nums">
+                Auto-Sync Active · {includedArticles.length} Studies Live
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1 max-w-3xl">

@@ -1,5 +1,12 @@
-import React, { useState } from 'react';
-import { ReviewProject, Article, NotebookProposal } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Article,
+  ModuleQaRescanRecord,
+  NotebookProposal,
+  ProposalSavedState,
+  ReviewProject,
+  WorkbenchModuleId,
+} from '../types';
 import {
   Sparkles,
   Download,
@@ -17,22 +24,92 @@ import {
   FileCheck,
 } from 'lucide-react';
 import { apiService } from '../services/apiService';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface ProposalGeneratorProps {
   project: ReviewProject;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onSaveProposalState?: (state: ProposalSavedState, immediate?: boolean) => void;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
-export const ProposalGenerator: React.FC<ProposalGeneratorProps> = ({ project }) => {
-  const [activeTab, setActiveTab] = useState<'proposal' | 'included_table'>('proposal');
-  const [proposal, setProposal] = useState<NotebookProposal | null>(null);
+export const ProposalGenerator: React.FC<ProposalGeneratorProps> = ({
+  project,
+  autoSaveStatus,
+  onSaveProposalState,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
+}) => {
+  const savedProposal = project.workbenchState?.proposal;
+  const [activeTab, setActiveTab] = useState<'proposal' | 'included_table'>(
+    () => savedProposal?.activeTab || 'proposal'
+  );
+  const [proposal, setProposal] = useState<NotebookProposal | null>(
+    () => savedProposal?.proposal || null
+  );
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [copied, setCopied] = useState(false);
   const [selectedCitation, setSelectedCitation] = useState<number | null>(null);
-  const [customInstructions, setCustomInstructions] = useState('');
+  const [customInstructions, setCustomInstructions] = useState(
+    () => savedProposal?.customInstructions || ''
+  );
 
   // Included articles
   const includedArticles = project.articles.filter((a) => a.decision === 'include');
+  const hydratedProjRef = useRef<string>(project.id);
+  const skipFirstAutoSaveRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    if (hydratedProjRef.current === project.id) return;
+    hydratedProjRef.current = project.id;
+    const saved = project.workbenchState?.proposal;
+    setActiveTab(saved?.activeTab || 'proposal');
+    setCustomInstructions(saved?.customInstructions || '');
+    setProposal(saved?.proposal || null);
+  }, [project.id, project.workbenchState?.proposal]);
+
+  // Fallback initial generator if no proposal saved yet
+  useEffect(() => {
+    if (!proposal && !project.workbenchState?.proposal?.proposal && includedArticles.length > 0) {
+      setProposal(buildFallbackProposal(project, includedArticles));
+    }
+  }, [project.id, includedArticles.length]);
+
+  useEffect(() => {
+    if (skipFirstAutoSaveRef.current) {
+      skipFirstAutoSaveRef.current = false;
+      return;
+    }
+    onSaveProposalState?.(
+      {
+        activeTab,
+        customInstructions,
+        proposal,
+        updatedAt: new Date().toISOString(),
+      },
+      false
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, customInstructions]);
 
   // Fallback initial generator if AI not yet invoked
   const handleGenerateProposal = async () => {
@@ -45,22 +122,32 @@ export const ProposalGenerator: React.FC<ProposalGeneratorProps> = ({ project })
         customInstructions
       );
       setProposal(generated);
+      onSaveProposalState?.(
+        {
+          activeTab,
+          customInstructions,
+          proposal: generated,
+          updatedAt: new Date().toISOString(),
+        },
+        true
+      );
     } catch (err: any) {
       console.warn('Backend proposal generation error, creating high-fidelity structured fallback:', err);
-      // Construct robust, high-fidelity default 9-part synthesis based on current project & evidence
       const fallbackProposal: NotebookProposal = buildFallbackProposal(project, includedArticles);
       setProposal(fallbackProposal);
+      onSaveProposalState?.(
+        {
+          activeTab,
+          customInstructions,
+          proposal: fallbackProposal,
+          updatedAt: new Date().toISOString(),
+        },
+        true
+      );
     } finally {
       setIsGenerating(false);
     }
   };
-
-  // If user opens proposal and none exists, generate automatically or show prompt
-  React.useEffect(() => {
-    if (!proposal && includedArticles.length > 0) {
-      setProposal(buildFallbackProposal(project, includedArticles));
-    }
-  }, [project.id, includedArticles.length]);
 
   const copyFullMarkdown = () => {
     if (!proposal) return;
@@ -136,6 +223,22 @@ export const ProposalGenerator: React.FC<ProposalGeneratorProps> = ({ project })
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="proposal"
+        moduleLabel="Proposal & Manuscript Generator"
+        autoSaveStatus={autoSaveStatus}
+        deleteModes={['excluded', 'uncertain']}
+        onResetModule={onResetWorkbenchModule}
+        onResetLocalView={() => {
+          setCustomInstructions('');
+          setProposal(includedArticles.length > 0 ? buildFallbackProposal(project, includedArticles) : null);
+        }}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Header and Controls */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">

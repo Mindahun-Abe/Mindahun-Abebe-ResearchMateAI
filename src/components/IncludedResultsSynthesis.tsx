@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { jsPDF } from 'jspdf';
-import { ReviewProject, Article } from '../types';
+import { Article, ModuleQaRescanRecord, ReviewProject, WorkbenchModuleId } from '../types';
 import { classifyPaperType, detectArticleSourceDatabase } from '../utils/slrDetectionEngine';
 import {
   TrendingUp,
@@ -20,6 +20,7 @@ import {
   FileCode,
   FileDown,
 } from 'lucide-react';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface IncludedResultsSynthesisProps {
   project: ReviewProject;
@@ -27,6 +28,23 @@ interface IncludedResultsSynthesisProps {
   onNavigateToBriefing?: () => void;
   onNavigateToProposal?: () => void;
   onSelectArticle?: (articleId: string) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 const escapeHtml = (value: unknown): string => {
@@ -76,6 +94,12 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
   onNavigateToBriefing,
   onNavigateToProposal,
   onSelectArticle,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
@@ -759,6 +783,19 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="results"
+        moduleLabel="Included Studies Synthesis"
+        autoSaveStatus={autoSaveStatus}
+        resetFieldsLabel="Reset Quantitative Synthesis Flags"
+        deleteModes={['excluded', 'uncertain']}
+        onResetModule={onResetWorkbenchModule}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Header */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-4">
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">

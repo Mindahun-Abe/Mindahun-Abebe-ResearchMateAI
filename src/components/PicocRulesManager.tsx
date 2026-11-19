@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import {
   EligibilityCriterion,
   LiteratureReviewTypeId,
+  ModuleQaRescanRecord,
   ProtocolStandardType,
   ResearchQuestion,
   ReviewFrameworkType,
   ReviewProject,
+  WorkbenchModuleId,
 } from '../types';
 import {
   FRAMEWORK_DEFINITIONS,
@@ -29,17 +31,41 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface PicocRulesManagerProps {
   project: ReviewProject;
   onUpdateProject: (updated: ReviewProject) => void;
   onAutoSyncScreening?: () => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
   project,
   onUpdateProject,
   onAutoSyncScreening,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'picoc' | 'rq' | 'criteria' | 'exclusions' | 'query'>('picoc');
   const [copiedQuery, setCopiedQuery] = useState(false);
@@ -203,6 +229,18 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="picoc"
+        moduleLabel="Protocol & Framework"
+        autoSaveStatus={autoSaveStatus}
+        deleteModes={['excluded', 'uncertain', 'unscreened']}
+        onResetModule={onResetWorkbenchModule}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Top Protocol Action & Auto-Sync Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">

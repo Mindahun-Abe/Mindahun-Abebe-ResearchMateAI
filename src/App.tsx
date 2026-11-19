@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { ReviewProject, Article } from './types';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { ReviewProject, Article, WorkbenchModuleId, WorkbenchState } from './types';
 import { Navbar } from './components/Navbar';
 import { ProjectInfoBanner } from './components/ProjectInfoBanner';
 import { DashboardOverview } from './components/DashboardOverview';
@@ -24,6 +24,7 @@ import { LandingWebsite } from './components/commercial/LandingWebsite';
 import { AccountBillingPortal } from './components/commercial/AccountBillingPortal';
 import { AdminDashboard } from './components/commercial/AdminDashboard';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { AutoSaveStatusInfo } from './components/ModuleWorkbenchControls';
 import { useAuth } from './contexts/AuthContext';
 import {
   OfflineSyncOperation,
@@ -36,6 +37,7 @@ import {
   syncProjectToCloudBackend,
 } from './utils/syncEngine';
 import { apiService, evaluateArticleClient } from './services/apiService';
+import { parseLocalDataFilesToArticles } from './utils/localFileImporter';
 
 type SurfaceView = 'workbench' | 'website' | 'billing' | 'admin';
 
@@ -81,6 +83,37 @@ export default function App() {
   const [suiteInitialTab, setSuiteInitialTab] = useState<'cloud' | 'gemini_chat_search'>('cloud');
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
   const [addModalInitialTab, setAddModalInitialTab] = useState<'manual' | 'bulk_local' | 'online'>('manual');
+  const [openBatchScreenerOnLibrary, setOpenBatchScreenerOnLibrary] = useState<boolean>(false);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatusInfo>({ state: 'idle' });
+  const workbenchDebounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const pendingWorkbenchPayloadsRef = useRef<Map<string, WorkbenchState>>(new Map());
+  const projectsRef = useRef<ReviewProject[]>(projects);
+
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  const flushPendingWorkbenchSaves = useCallback((projectIdFilter?: string) => {
+    workbenchDebounceRef.current.forEach((timer, pid) => {
+      if (projectIdFilter && pid !== projectIdFilter) return;
+      clearTimeout(timer);
+      workbenchDebounceRef.current.delete(pid);
+      const pending = pendingWorkbenchPayloadsRef.current.get(pid);
+      if (pending) {
+        pendingWorkbenchPayloadsRef.current.delete(pid);
+        apiService.saveWorkbenchState(pid, pending).catch(() => {});
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => flushPendingWorkbenchSaves();
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      flushPendingWorkbenchSaves();
+    };
+  }, [flushPendingWorkbenchSaves]);
 
   const navigateSurface = (
     nextView: SurfaceView,
@@ -331,46 +364,306 @@ export default function App() {
       ...updated,
       articles: (updated.articles || []).map((a) => ({ ...a, projectId: updated.id })),
     };
+    setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Protocol & Settings' }));
     setProjects((prev) => {
       const next = prev.map((p) => (p.id === updated.id ? isolatedUpdated : p));
       cacheProjectsOffline(next);
       return next;
     });
-    apiService.updateProjectFolder(isolatedUpdated).then((saved) => {
-      if (saved?.databaseFolderPath) {
-        setProjects((prev) =>
-          prev.map((p) =>
-            p.id === saved.id
-              ? {
-                  ...p,
-                  databaseFolderName: saved.databaseFolderName,
-                  databaseFolderPath: saved.databaseFolderPath,
-                }
-              : p
-          )
-        );
-      }
-    }).catch((err) => console.warn('Folder sync warning:', err?.message));
+    apiService
+      .updateProjectFolder(isolatedUpdated)
+      .then((saved) => {
+        const savedIso = new Date().toISOString();
+        setAutoSaveStatus({ state: 'saved', lastSavedAt: saved?.updatedAt || savedIso, label: 'Protocol & Settings' });
+        if (saved?.databaseFolderPath) {
+          setProjects((prev) =>
+            prev.map((p) =>
+              p.id === saved.id
+                ? {
+                    ...p,
+                    databaseFolderName: saved.databaseFolderName,
+                    databaseFolderPath: saved.databaseFolderPath,
+                  }
+                : p
+            )
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn('Folder sync warning:', err?.message);
+        setAutoSaveStatus((prev) => ({
+          ...prev,
+          state: 'error',
+          error: err?.message || 'Offline cached locally',
+        }));
+      });
     void triggerCloudBackgroundSync(isolatedUpdated, 'update_project', `Updated ${isolatedUpdated.title}`);
   };
 
+  const handleUpdateArticlesForProject = useCallback(
+    (targetId: string, newArticles: Article[]) => {
+      const isolated = newArticles
+        .filter((a) => !a.projectId || a.projectId === targetId)
+        .map((a) => ({ ...a, projectId: targetId }));
+      const baseProj = projectsRef.current.find((p) => p.id === targetId);
+      setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: `${isolated.length} Articles` }));
+      setProjects((prev) => {
+        const next = prev.map((p) => (p.id === targetId ? { ...p, articles: isolated } : p));
+        cacheProjectsOffline(next);
+        return next;
+      });
+      apiService
+        .syncProjectArticles(targetId, isolated)
+        .then((res) => {
+          setAutoSaveStatus({
+            state: 'saved',
+            lastSavedAt: res?.savedAt || new Date().toISOString(),
+            label: `${isolated.length} Articles`,
+          });
+        })
+        .catch((err) => {
+          console.warn('Sub-library articles sync warning:', err?.message);
+          setAutoSaveStatus((prev) => ({
+            ...prev,
+            state: 'error',
+            error: err?.message || 'Cached offline',
+          }));
+        });
+      if (baseProj) {
+        void triggerCloudBackgroundSync(
+          { ...baseProj, articles: isolated },
+          'screen_decision',
+          `Updated ${isolated.length} articles`
+        );
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [idToken, user?.uid, user?.emailVerified]
+  );
+
   const handleUpdateArticles = (newArticles: Article[]) => {
     if (!isolatedCurrentProject) return;
-    const targetId = isolatedCurrentProject.id;
-    const isolated = newArticles
-      .filter((a) => !a.projectId || a.projectId === targetId)
-      .map((a) => ({ ...a, projectId: targetId }));
-    const updatedProj = { ...isolatedCurrentProject, articles: isolated };
-    setProjects((prev) => {
-      const next = prev.map((p) => (p.id === targetId ? { ...p, articles: isolated } : p));
-      cacheProjectsOffline(next);
-      return next;
-    });
-    apiService.syncProjectArticles(targetId, isolated).catch((err) =>
-      console.warn('Sub-library articles sync warning:', err?.message)
-    );
-    void triggerCloudBackgroundSync(updatedProj, 'screen_decision', `Updated ${isolated.length} articles`);
+    handleUpdateArticlesForProject(isolatedCurrentProject.id, newArticles);
   };
+
+  // Auto-save WorkbenchState (Fast Batch Screener + all 11 Core SLR Modules)
+  const handleUpdateWorkbenchState = useCallback(
+    (
+      targetProjectId: string,
+      updater: Partial<WorkbenchState> | ((prev: WorkbenchState) => WorkbenchState),
+      options?: { immediate?: boolean; moduleId?: WorkbenchModuleId; label?: string }
+    ) => {
+      const nowIso = new Date().toISOString();
+      let computedState: WorkbenchState = {};
+      setAutoSaveStatus((prev) => ({
+        ...prev,
+        state: 'saving',
+        label: options?.label || options?.moduleId || 'Workbench',
+      }));
+
+      setProjects((prev) => {
+        const next = prev.map((p) => {
+          if (p.id !== targetProjectId) return p;
+          const prevWs: WorkbenchState = p.workbenchState || {};
+          const merged =
+            typeof updater === 'function' ? updater(prevWs) : { ...prevWs, ...updater };
+          const nextModuleTimestamps = options?.moduleId
+            ? { ...(merged.moduleLastSavedAt || {}), [options.moduleId]: nowIso }
+            : merged.moduleLastSavedAt;
+          computedState = {
+            ...merged,
+            lastAutoSavedAt: nowIso,
+            lastSavedModule: options?.moduleId || merged.lastSavedModule,
+            moduleLastSavedAt: nextModuleTimestamps,
+          };
+          return { ...p, workbenchState: computedState };
+        });
+        cacheProjectsOffline(next);
+        return next;
+      });
+
+      const existingTimer = workbenchDebounceRef.current.get(targetProjectId);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        workbenchDebounceRef.current.delete(targetProjectId);
+      }
+      pendingWorkbenchPayloadsRef.current.set(targetProjectId, computedState);
+
+      const persistNow = () => {
+        const payloadToSave = pendingWorkbenchPayloadsRef.current.get(targetProjectId) || computedState;
+        pendingWorkbenchPayloadsRef.current.delete(targetProjectId);
+        apiService
+          .saveWorkbenchState(targetProjectId, payloadToSave)
+          .then((res) => {
+            setAutoSaveStatus({
+              state: 'saved',
+              lastSavedAt: res?.savedAt || nowIso,
+              label: options?.label || options?.moduleId || 'Workbench',
+            });
+          })
+          .catch((err) => {
+            setAutoSaveStatus((prev) => ({
+              ...prev,
+              state: 'error',
+              error: err?.message || 'Cached locally',
+            }));
+          });
+      };
+
+      if (options?.immediate) {
+        persistNow();
+      } else {
+        const timer = setTimeout(() => {
+          workbenchDebounceRef.current.delete(targetProjectId);
+          persistNow();
+        }, 450);
+        workbenchDebounceRef.current.set(targetProjectId, timer);
+      }
+    },
+    []
+  );
+
+  // Reset or delete saved output/articles for Fast Batch Screener or any Core SLR module
+  const handleResetWorkbenchModule = useCallback(
+    async (
+      targetProjectId: string,
+      params: {
+        target: WorkbenchModuleId;
+        resetArticleFields?: boolean;
+        deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates' | 'all' | 'ids';
+        articleIds?: string[];
+      }
+    ) => {
+      const existingTimer = workbenchDebounceRef.current.get(targetProjectId);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+        workbenchDebounceRef.current.delete(targetProjectId);
+      }
+      pendingWorkbenchPayloadsRef.current.delete(targetProjectId);
+
+      setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: `Resetting ${params.target}` }));
+      const res = await apiService.resetWorkbenchModule(targetProjectId, params);
+      const nextArticles = (res.articles || []).map((a) => ({ ...a, projectId: targetProjectId }));
+
+      setProjects((prev) => {
+        const next = prev.map((p) =>
+          p.id === targetProjectId
+            ? {
+                ...p,
+                databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
+                workbenchState: res.workbenchState,
+                articles: nextArticles,
+              }
+            : p
+        );
+        cacheProjectsOffline(next);
+        return next;
+      });
+
+      if (targetProjectId === currentProjectId) {
+        setSelectedArticleId((prevSel) => {
+          if (prevSel && nextArticles.some((a) => a.id === prevSel)) return prevSel;
+          return nextArticles[0]?.id || '';
+        });
+      }
+
+      setAutoSaveStatus({
+        state: 'saved',
+        lastSavedAt: res.savedAt || new Date().toISOString(),
+        label: `Reset ${params.target}`,
+      });
+      return res;
+    },
+    [currentProjectId]
+  );
+
+  // Query Q&A Rescan across active non-duplicate articles (auto-saved into workbench_state.json)
+  const handleRescanWithQueryQA = useCallback(
+    async (
+      targetProjectId: string,
+      moduleId: WorkbenchModuleId,
+      query: string,
+      applyScreeningUpdates: boolean = false
+    ) => {
+      const targetProj = projectsRef.current.find((p) => p.id === targetProjectId);
+      if (!targetProj) {
+        throw new Error('Active review folder not found');
+      }
+      setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Query Q&A Rescan' }));
+
+      const res = await apiService.rescanWithQueryQA({
+        projectId: targetProjectId,
+        moduleId,
+        query,
+        project: targetProj,
+        articles: targetProj.articles,
+        applyScreeningUpdates,
+        persist: true,
+      });
+
+      let updatedCount = 0;
+      if (applyScreeningUpdates && res.screeningUpdates && res.screeningUpdates.length > 0) {
+        const updateMap = new Map(res.screeningUpdates.map((u) => [u.articleId, u]));
+        const nextArticles = (targetProj.articles || []).map((art) => {
+          const upd = updateMap.get(art.id);
+          if (!upd) return art;
+          updatedCount++;
+          return {
+            ...art,
+            decision: upd.decision,
+            aiSuggestedDecision: upd.decision,
+            aiConfidence: upd.confidenceScore,
+            aiReason: upd.primaryReason,
+            screeningStage:
+              upd.decision === 'include'
+                ? ('final_included' as const)
+                : upd.decision === 'exclude'
+                ? ('excluded' as const)
+                : ('full_text' as const),
+          };
+        });
+        handleUpdateArticlesForProject(targetProjectId, nextArticles);
+      }
+
+      if (res.workbenchState) {
+        setProjects((prev) => {
+          const next = prev.map((p) =>
+            p.id === targetProjectId ? { ...p, workbenchState: res.workbenchState } : p
+          );
+          cacheProjectsOffline(next);
+          return next;
+        });
+      }
+
+      setAutoSaveStatus({
+        state: 'saved',
+        lastSavedAt: res.record?.createdAt || new Date().toISOString(),
+        label: 'Query Q&A Saved',
+      });
+      return { record: res.record, updatedCount };
+    },
+    [handleUpdateArticlesForProject]
+  );
+
+  const handleDeleteQaRescanEntry = useCallback(
+    (targetProjectId: string, moduleId: WorkbenchModuleId, recordId: string) => {
+      handleUpdateWorkbenchState(
+        targetProjectId,
+        (prevWs) => {
+          const currentList = prevWs.qaRescans?.[moduleId] || [];
+          return {
+            ...prevWs,
+            qaRescans: {
+              ...(prevWs.qaRescans || {}),
+              [moduleId]: currentList.filter((r) => r.id !== recordId),
+            },
+          };
+        },
+        { immediate: true, moduleId, label: 'Deleted Q&A Entry' }
+      );
+    },
+    [handleUpdateWorkbenchState]
+  );
 
   // Permanently remove articles in bulk from a specific review sub-library folder & persist to disk
   const handleBulkRemoveFromFolder = async (
@@ -386,8 +679,8 @@ export default function App() {
       projectId: targetProjectId,
     }));
 
-    setProjects((prev) =>
-      prev.map((p) =>
+    setProjects((prev) => {
+      const next = prev.map((p) =>
         p.id === targetProjectId
           ? {
               ...p,
@@ -395,8 +688,10 @@ export default function App() {
               articles: nextArticles,
             }
           : p
-      )
-    );
+      );
+      cacheProjectsOffline(next);
+      return next;
+    });
 
     if (targetProjectId === currentProjectId) {
       setSelectedArticleId((prevSel) => {
@@ -406,6 +701,39 @@ export default function App() {
     }
 
     return res;
+  };
+
+  // Rebuild selectively restored deleted online-database articles back into active library state
+  const handleRestoredDeletedOnlineArticles = (
+    targetProjectId: string,
+    res: {
+      restoredCount: number;
+      restoredArticles: Article[];
+      remainingArticles: Article[];
+      remainingDeletedCount: number;
+      databaseFolderPath?: string;
+    }
+  ) => {
+    const nextArticles = (res.remainingArticles || []).map((a) => ({
+      ...a,
+      projectId: targetProjectId,
+    }));
+    setProjects((prev) => {
+      const next = prev.map((p) =>
+        p.id === targetProjectId
+          ? {
+              ...p,
+              databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
+              articles: nextArticles,
+            }
+          : p
+      );
+      cacheProjectsOffline(next);
+      return next;
+    });
+    if (targetProjectId === currentProjectId && res.restoredArticles?.length > 0) {
+      setSelectedArticleId(res.restoredArticles[0].id);
+    }
   };
 
   // Explicitly save all changes (metadata + articles + manifest) for a review folder to disk
@@ -431,6 +759,7 @@ export default function App() {
     } catch {}
     const remainingProjects = projects.filter((p) => p.id !== targetProjectId);
     setProjects(remainingProjects);
+    cacheProjectsOffline(remainingProjects);
     if (currentProjectId === targetProjectId) {
       if (remainingProjects.length > 0) {
         setCurrentProjectId(remainingProjects[0].id);
@@ -448,11 +777,21 @@ export default function App() {
     const targetId = isolatedCurrentProject.id;
     const isolatedArt = { ...updatedArt, projectId: targetId };
     let updatedProjForSync: ReviewProject | null = null;
+    setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Screening Update' }));
     setProjects((prev) => {
       const next = prev.map((p) => {
         if (p.id !== targetId) return p;
         const nextArticles = p.articles.map((a) => (a.id === isolatedArt.id ? isolatedArt : a));
-        apiService.syncProjectArticles(targetId, nextArticles).catch(() => {});
+        apiService
+          .syncProjectArticles(targetId, nextArticles)
+          .then((res) =>
+            setAutoSaveStatus({
+              state: 'saved',
+              lastSavedAt: res?.savedAt || new Date().toISOString(),
+              label: 'Screening Update',
+            })
+          )
+          .catch(() => {});
         updatedProjForSync = { ...p, articles: nextArticles };
         return updatedProjForSync;
       });
@@ -494,17 +833,27 @@ export default function App() {
     const targetId = targetProjectId || newArt.projectId || isolatedCurrentProject?.id;
     if (!targetId) return;
     const isolatedArt: Article = { ...newArt, projectId: targetId };
-    setProjects((prev) =>
-      prev.map((p) =>
+    setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Add Paper' }));
+    setProjects((prev) => {
+      const next = prev.map((p) =>
         p.id === targetId ? { ...p, articles: [isolatedArt, ...p.articles] } : p
-      )
-    );
+      );
+      cacheProjectsOffline(next);
+      return next;
+    });
     if (targetId === currentProjectId) {
       setSelectedArticleId(isolatedArt.id);
     }
-    apiService.uploadArticlesChunk(targetId, [isolatedArt]).catch((err) =>
-      console.warn('Article save warning:', err?.message)
-    );
+    apiService
+      .uploadArticlesChunk(targetId, [isolatedArt])
+      .then(() =>
+        setAutoSaveStatus({
+          state: 'saved',
+          lastSavedAt: new Date().toISOString(),
+          label: 'Paper Added',
+        })
+      )
+      .catch((err) => console.warn('Article save warning:', err?.message));
   };
 
   // Supports continuous streaming chunks during large bulk imports locked to a specific review partition
@@ -602,8 +951,8 @@ export default function App() {
       }
     }
 
-    setProjects((prev) =>
-      prev.map((p) => {
+    setProjects((prev) => {
+      const next = prev.map((p) => {
         if (p.id !== targetId) return p;
         const currIds = new Set(p.articles.map((a) => a.id));
         const uniqueNew = newRecordsToInsert.filter((a) => !currIds.has(a.id));
@@ -612,14 +961,21 @@ export default function App() {
           return patch ? { ...ex, ...patch } : ex;
         });
         return { ...p, articles: [...uniqueNew, ...updatedExisting] };
-      })
-    );
+      });
+      cacheProjectsOffline(next);
+      return next;
+    });
 
     if (!options?.keepOpen && newRecordsToInsert.length > 0 && targetId === currentProjectId) {
       setSelectedArticleId(newRecordsToInsert[0].id);
     }
 
     if (newRecordsToInsert.length > 0) {
+      setAutoSaveStatus((prev) => ({
+        ...prev,
+        state: 'saving',
+        label: `Saving ${newRecordsToInsert.length} Added Files`,
+      }));
       apiService
         .uploadArticlesChunk(
           targetId,
@@ -627,6 +983,11 @@ export default function App() {
           newRecordsToInsert.map((a) => a.sourceFileName).filter(Boolean) as string[]
         )
         .then((res) => {
+          setAutoSaveStatus({
+            state: 'saved',
+            lastSavedAt: new Date().toISOString(),
+            label: `${newRecordsToInsert.length} Files Saved`,
+          });
           if (res?.databaseFolderPath) {
             setProjects((prev) =>
               prev.map((p) =>
@@ -637,6 +998,91 @@ export default function App() {
         })
         .catch((err) => console.warn('Chunk persistence warning:', err?.message));
     }
+  };
+
+  // Direct data file importer used inside Fast Batch Screener, Dashboard, and Core SLR Modules
+  const handleDirectAddDataFiles = async (
+    targetProjectId: string,
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ): Promise<{ addedCount: number }> => {
+    const targetProj = projectsRef.current.find((p) => p.id === targetProjectId);
+    if (!targetProj) throw new Error('Target review folder not found');
+
+    setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Importing Data Files' }));
+    const parsed = await parseLocalDataFilesToArticles(files, targetProjectId);
+    if (parsed.length === 0) {
+      setAutoSaveStatus((prev) => ({ ...prev, state: 'idle' }));
+      return { addedCount: 0 };
+    }
+
+    let finalArticles = parsed;
+    if (options?.autoScreen) {
+      let inc = 0;
+      let exc = 0;
+      let unc = 0;
+      const start = performance.now();
+      finalArticles = parsed.map((art) => {
+        const res = evaluateArticleClient(art, targetProj);
+        if (res.decision === 'include') inc++;
+        else if (res.decision === 'exclude') exc++;
+        else unc++;
+        return {
+          ...art,
+          decision: res.decision,
+          decisionReason: res.decision === 'exclude' ? res.primaryReason : undefined,
+          screeningStage:
+            res.decision === 'include'
+              ? ('final_included' as const)
+              : res.decision === 'exclude'
+              ? ('excluded' as const)
+              : ('full_text' as const),
+          aiSuggestedDecision: res.decision,
+          aiConfidence: res.confidenceScore,
+          aiReason: res.primaryReason,
+        };
+      });
+      const elapsed = parseFloat(((performance.now() - start) / 1000).toFixed(2));
+      const nowIso = new Date().toISOString();
+      const runRecord = {
+        runId: `run-add-${Date.now()}`,
+        completedAt: nowIso,
+        mode: 'newly_added_files' as const,
+        processed: finalArticles.length,
+        total: finalArticles.length,
+        included: inc,
+        excluded: exc,
+        uncertain: unc,
+        speed: Math.round(finalArticles.length / Math.max(elapsed, 0.05)),
+        elapsedSeconds: elapsed,
+      };
+      handleUpdateWorkbenchState(
+        targetProjectId,
+        (prevWs) => ({
+          ...prevWs,
+          batchScreener: {
+            lastStats: runRecord,
+            lastRunAt: nowIso,
+            history: [runRecord, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
+          },
+        }),
+        { immediate: true, moduleId: 'batch_screener', label: 'Auto-Screened Added Files' }
+      );
+    }
+
+    handleAddMultipleArticles(finalArticles, { targetProjectId, keepOpen: true });
+
+    if (options?.rescanQuery?.trim()) {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await handleRescanWithQueryQA(
+        targetProjectId,
+        options.moduleId || 'screening',
+        options.rescanQuery.trim(),
+        Boolean(options.autoScreen)
+      );
+    }
+
+    return { addedCount: finalArticles.length };
   };
 
   const handleSelectArticleForScreening = (artId: string) => {
@@ -657,6 +1103,7 @@ export default function App() {
   };
 
   const handleSwitchProject = (newId: string) => {
+    flushPendingWorkbenchSaves();
     setCurrentProjectId(newId);
     const proj = projects.find((p) => p.id === newId);
     const isolatedFirst =
@@ -732,6 +1179,34 @@ export default function App() {
         setSelectedArticleId(isolated.articles[0]?.id || '');
         setCurrentTab('dashboard');
       });
+  };
+
+  // One-click Backup: persist folder to disk & download complete portable SLR Backup (.json)
+  const handleDownloadProjectBackup = () => {
+    if (!isolatedCurrentProject) return;
+    handleSaveFolderChanges(isolatedCurrentProject.id).catch(() => {});
+    const activeOnlyArticles = (isolatedCurrentProject.articles || []).filter(
+      (a) => !a.projectId || a.projectId === isolatedCurrentProject.id
+    );
+    const backupData = {
+      format: 'ResearchMate-SLR-Backup',
+      version: '1.3',
+      exportedAt: new Date().toISOString(),
+      project: {
+        ...isolatedCurrentProject,
+        articles: activeOnlyArticles,
+      },
+    };
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    link.download = `${isolatedCurrentProject.id}-complete-slr-backup-${dateStamp}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
   };
 
   // Create New Project (Manual Blank — creates dedicated partitioned storing database & empty individual library without touching existing folders)
@@ -887,6 +1362,7 @@ export default function App() {
         onOpenAddModal={() => handleOpenAddModal('bulk_local')}
         onCreateNewReview={() => setIsCreateReviewOpen(true)}
         onOpenManualPaperModal={() => handleOpenAddModal('manual')}
+        onBackupProject={handleDownloadProjectBackup}
         onOpenCloudWorkspace={() => {
           setSuiteInitialTab('cloud');
           setIsResearchSuiteOpen(true);
@@ -981,6 +1457,25 @@ export default function App() {
                       onCreateNewReview={() => setIsCreateReviewOpen(true)}
                       onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                       onOpenResearchSuite={() => setIsResearchSuiteOpen(true)}
+                      onOpenFastBatchScreener={() => {
+                        setOpenBatchScreenerOnLibrary(true);
+                        setCurrentTab('library');
+                      }}
+                      onBackupProject={handleDownloadProjectBackup}
+                      onRestoreProject={handleRestoreProject}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
                     />
                   )}
                   {currentTab === 'folders' && (
@@ -1007,6 +1502,7 @@ export default function App() {
                       initialStageFilter="starred"
                       onUpdateArticles={handleUpdateArticles}
                       onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
+                      onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
                       onSaveFolderChanges={handleSaveFolderChanges}
                       onDeleteProjectFolder={handleDeleteProjectFolder}
                       onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -1014,6 +1510,22 @@ export default function App() {
                       onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                       onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                       onAddMultipleArticles={handleAddMultipleArticles}
+                      autoSaveStatus={autoSaveStatus}
+                      onUpdateWorkbenchState={(updater, opts) =>
+                        handleUpdateWorkbenchState(isolatedCurrentProject.id, updater, opts)
+                      }
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
                     />
                   )}
                   {currentTab === 'picoc' && (
@@ -1021,6 +1533,20 @@ export default function App() {
                       project={isolatedCurrentProject}
                       onUpdateProject={handleUpdateProject}
                       onAutoSyncScreening={handleAutoSyncScreeningCriteria}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'library' && (
@@ -1031,6 +1557,7 @@ export default function App() {
                       onCreateNewReview={() => setIsCreateReviewOpen(true)}
                       onUpdateArticles={handleUpdateArticles}
                       onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
+                      onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
                       onSaveFolderChanges={handleSaveFolderChanges}
                       onDeleteProjectFolder={handleDeleteProjectFolder}
                       onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -1038,6 +1565,24 @@ export default function App() {
                       onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                       onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                       onAddMultipleArticles={handleAddMultipleArticles}
+                      autoOpenBatchScreener={openBatchScreenerOnLibrary}
+                      onBatchScreenerOpened={() => setOpenBatchScreenerOnLibrary(false)}
+                      autoSaveStatus={autoSaveStatus}
+                      onUpdateWorkbenchState={(updater, opts) =>
+                        handleUpdateWorkbenchState(isolatedCurrentProject.id, updater, opts)
+                      }
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
                     />
                   )}
                   {currentTab === 'duplicates' && (
@@ -1045,6 +1590,20 @@ export default function App() {
                       project={isolatedCurrentProject}
                       onUpdateArticles={handleUpdateArticles}
                       onNavigateToScreening={handleSelectArticleForScreening}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'title_screening' && (
@@ -1054,6 +1613,20 @@ export default function App() {
                       onUpdateArticle={handleUpdateArticle}
                       onNavigateToFullText={handleSelectArticleForScreening}
                       onToggleStarArticle={handleToggleStarArticle}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'screening' && selectedArticle && (
@@ -1066,6 +1639,20 @@ export default function App() {
                       hasPrev={hasPrev}
                       hasNext={hasNext}
                       onBackToLibrary={() => setCurrentTab('library')}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'extraction' && (
@@ -1075,6 +1662,20 @@ export default function App() {
                       onUpdateArticle={handleUpdateArticle}
                       onBatchUpdateArticles={handleUpdateArticles}
                       onNavigateToScreening={handleSelectArticleForScreening}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'appraisal' && selectedArticle && (
@@ -1084,12 +1685,40 @@ export default function App() {
                       onUpdateArticle={handleUpdateArticle}
                       articles={isolatedCurrentProject.articles}
                       onSelectArticle={setSelectedArticleId}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'prisma' && (
                     <PrismaDiagram
                       project={isolatedCurrentProject}
                       onUpdateArticle={handleUpdateArticle}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'results' && (
@@ -1099,19 +1728,101 @@ export default function App() {
                       onNavigateToBriefing={() => setCurrentTab('briefing')}
                       onNavigateToProposal={() => setCurrentTab('proposal')}
                       onSelectArticle={handleSelectArticleForScreening}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                   {currentTab === 'briefing' && (
                     <ResearchBriefingModule
                       project={isolatedCurrentProject}
                       articles={isolatedCurrentProject.articles}
+                      onUpdateArticles={handleUpdateArticles}
+                      autoSaveStatus={autoSaveStatus}
+                      onSaveBriefingState={(briefingState, immediate) =>
+                        handleUpdateWorkbenchState(
+                          isolatedCurrentProject.id,
+                          { briefing: briefingState },
+                          { immediate, moduleId: 'briefing', label: 'NotebookLM Studio' }
+                        )
+                      }
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
-                  {currentTab === 'proposal' && <ProposalGenerator project={isolatedCurrentProject} />}
+                  {currentTab === 'proposal' && (
+                    <ProposalGenerator
+                      project={isolatedCurrentProject}
+                      autoSaveStatus={autoSaveStatus}
+                      onSaveProposalState={(proposalState, immediate) =>
+                        handleUpdateWorkbenchState(
+                          isolatedCurrentProject.id,
+                          { proposal: proposalState },
+                          { immediate, moduleId: 'proposal', label: 'Proposal Generator' }
+                        )
+                      }
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                    />
+                  )}
                   {currentTab === 'export' && (
                     <ExportReportModule
                       project={isolatedCurrentProject}
                       onRestoreProject={handleRestoreProject}
+                      autoSaveStatus={autoSaveStatus}
+                      onSaveExportState={(exportConfig, immediate) =>
+                        handleUpdateWorkbenchState(
+                          isolatedCurrentProject.id,
+                          { exportConfig },
+                          { immediate, moduleId: 'export', label: 'Export Hub Config' }
+                        )
+                      }
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
                 </div>
@@ -1145,6 +1856,25 @@ export default function App() {
                   onCreateNewReview={() => setIsCreateReviewOpen(true)}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                   onOpenResearchSuite={() => setIsResearchSuiteOpen(true)}
+                  onOpenFastBatchScreener={() => {
+                    setOpenBatchScreenerOnLibrary(true);
+                    setCurrentTab('library');
+                  }}
+                  onBackupProject={handleDownloadProjectBackup}
+                  onRestoreProject={handleRestoreProject}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
                 />
               )}
 
@@ -1173,6 +1903,7 @@ export default function App() {
                   initialStageFilter="starred"
                   onUpdateArticles={handleUpdateArticles}
                   onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
+                  onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
                   onSaveFolderChanges={handleSaveFolderChanges}
                   onDeleteProjectFolder={handleDeleteProjectFolder}
                   onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -1180,6 +1911,22 @@ export default function App() {
                   onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                   onAddMultipleArticles={handleAddMultipleArticles}
+                  autoSaveStatus={autoSaveStatus}
+                  onUpdateWorkbenchState={(updater, opts) =>
+                    handleUpdateWorkbenchState(isolatedCurrentProject.id, updater, opts)
+                  }
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
                 />
               )}
 
@@ -1188,6 +1935,20 @@ export default function App() {
                   project={isolatedCurrentProject}
                   onUpdateProject={handleUpdateProject}
                   onAutoSyncScreening={handleAutoSyncScreeningCriteria}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1199,6 +1960,7 @@ export default function App() {
                   onCreateNewReview={() => setIsCreateReviewOpen(true)}
                   onUpdateArticles={handleUpdateArticles}
                   onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
+                  onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
                   onSaveFolderChanges={handleSaveFolderChanges}
                   onDeleteProjectFolder={handleDeleteProjectFolder}
                   onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -1206,6 +1968,24 @@ export default function App() {
                   onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                   onAddMultipleArticles={handleAddMultipleArticles}
+                  autoOpenBatchScreener={openBatchScreenerOnLibrary}
+                  onBatchScreenerOpened={() => setOpenBatchScreenerOnLibrary(false)}
+                  autoSaveStatus={autoSaveStatus}
+                  onUpdateWorkbenchState={(updater, opts) =>
+                    handleUpdateWorkbenchState(isolatedCurrentProject.id, updater, opts)
+                  }
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
                 />
               )}
 
@@ -1214,6 +1994,20 @@ export default function App() {
                   project={isolatedCurrentProject}
                   onUpdateArticles={handleUpdateArticles}
                   onNavigateToScreening={handleSelectArticleForScreening}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1224,6 +2018,20 @@ export default function App() {
                   onUpdateArticle={handleUpdateArticle}
                   onNavigateToFullText={handleSelectArticleForScreening}
                   onToggleStarArticle={handleToggleStarArticle}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1237,6 +2045,20 @@ export default function App() {
                   hasPrev={hasPrev}
                   hasNext={hasNext}
                   onBackToLibrary={() => setCurrentTab('library')}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1247,6 +2069,20 @@ export default function App() {
                   onUpdateArticle={handleUpdateArticle}
                   onBatchUpdateArticles={handleUpdateArticles}
                   onNavigateToScreening={handleSelectArticleForScreening}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1257,6 +2093,20 @@ export default function App() {
                   onUpdateArticle={handleUpdateArticle}
                   articles={isolatedCurrentProject.articles}
                   onSelectArticle={setSelectedArticleId}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1264,6 +2114,20 @@ export default function App() {
                 <PrismaDiagram
                   project={isolatedCurrentProject}
                   onUpdateArticle={handleUpdateArticle}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1274,6 +2138,20 @@ export default function App() {
                   onNavigateToBriefing={() => setCurrentTab('briefing')}
                   onNavigateToProposal={() => setCurrentTab('proposal')}
                   onSelectArticle={handleSelectArticleForScreening}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
@@ -1281,15 +2159,83 @@ export default function App() {
                 <ResearchBriefingModule
                   project={isolatedCurrentProject}
                   articles={isolatedCurrentProject.articles}
+                  onUpdateArticles={handleUpdateArticles}
+                  autoSaveStatus={autoSaveStatus}
+                  onSaveBriefingState={(briefingState, immediate) =>
+                    handleUpdateWorkbenchState(
+                      isolatedCurrentProject.id,
+                      { briefing: briefingState },
+                      { immediate, moduleId: 'briefing', label: 'NotebookLM Studio' }
+                    )
+                  }
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
 
-              {currentTab === 'proposal' && <ProposalGenerator project={isolatedCurrentProject} />}
+              {currentTab === 'proposal' && (
+                <ProposalGenerator
+                  project={isolatedCurrentProject}
+                  autoSaveStatus={autoSaveStatus}
+                  onSaveProposalState={(proposalState, immediate) =>
+                    handleUpdateWorkbenchState(
+                      isolatedCurrentProject.id,
+                      { proposal: proposalState },
+                      { immediate, moduleId: 'proposal', label: 'Proposal Generator' }
+                    )
+                  }
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                />
+              )}
 
               {currentTab === 'export' && (
                 <ExportReportModule
                   project={isolatedCurrentProject}
                   onRestoreProject={handleRestoreProject}
+                  autoSaveStatus={autoSaveStatus}
+                  onSaveExportState={(exportConfig, immediate) =>
+                    handleUpdateWorkbenchState(
+                      isolatedCurrentProject.id,
+                      { exportConfig },
+                      { immediate, moduleId: 'export', label: 'Export Hub Config' }
+                    )
+                  }
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                 />
               )}
             </div>
@@ -1328,6 +2274,7 @@ export default function App() {
               mode: 'all',
             });
           }}
+          onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
           project={isolatedCurrentProject}
           allProjects={projects}
           onSwitchProject={handleSwitchProject}

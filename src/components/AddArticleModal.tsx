@@ -29,6 +29,7 @@ import {
   detectArticleSourceDatabase,
 } from '../utils/slrDetectionEngine';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
+import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
 
 interface UploadedFileRecord {
   id: string;
@@ -44,6 +45,16 @@ interface AddArticleModalProps {
   onAddMultipleArticles?: (articles: Article[], options?: { keepOpen?: boolean; targetProjectId?: string }) => void;
   onDeleteArticlesByIds?: (articleIds: string[], targetProjectId?: string) => Promise<void> | void;
   onClearFolderArticles?: (targetProjectId?: string) => Promise<void> | void;
+  onRestoredDeletedArticles?: (
+    targetProjectId: string,
+    res: {
+      restoredCount: number;
+      restoredArticles: Article[];
+      remainingArticles: Article[];
+      remainingDeletedCount: number;
+      databaseFolderPath?: string;
+    }
+  ) => void;
   project?: ReviewProject;
   allProjects?: ReviewProject[];
   onSwitchProject?: (projectId: string) => void;
@@ -114,12 +125,14 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
   onAddMultipleArticles,
   onDeleteArticlesByIds,
   onClearFolderArticles,
+  onRestoredDeletedArticles,
   project,
   allProjects = [],
   onSwitchProject,
   onCreateNewReview,
   initialTab = 'manual',
 }) => {
+  const [showDeletedOnlineArchive, setShowDeletedOnlineArchive] = useState(false);
   // Support manual insertion with empty placeholders as well as bulk
   const [activeTab, setActiveTab] = useState<'manual' | 'bulk_local' | 'online'>(initialTab);
   const [selectedTargetId, setSelectedTargetId] = useState<string>(project?.id || '');
@@ -1581,10 +1594,25 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
                   articles.forEach((a) => onAddArticle(a, lockedProjectId));
                 }
               }}
+              onOpenDeletedArchive={() => setShowDeletedOnlineArchive(true)}
               onClose={onClose}
               compact
             />
           </div>
+        )}
+
+        {targetProject && (
+          <DeletedOnlineArchiveModal
+            isOpen={showDeletedOnlineArchive}
+            onClose={() => setShowDeletedOnlineArchive(false)}
+            projectId={targetProject.id}
+            projectTitle={targetProject.title || 'Untitled Review'}
+            onRestoredArticles={(res) => {
+              if (onRestoredDeletedArticles) {
+                onRestoredDeletedArticles(targetProject.id, res);
+              }
+            }}
+          />
         )}
 
         {/* TAB: MANUAL PAPER INSERTION (CLEAN PLACEHOLDERS, NOT AUTO-FILLED) */}

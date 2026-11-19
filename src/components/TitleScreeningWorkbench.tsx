@@ -1,5 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Article, ReviewProject, ScreeningDecision } from '../types';
+import {
+  Article,
+  ModuleQaRescanRecord,
+  ReviewProject,
+  ScreeningDecision,
+  WorkbenchModuleId,
+} from '../types';
 import {
   CheckCircle2,
   XCircle,
@@ -17,6 +23,7 @@ import {
   ExternalLink,
 } from 'lucide-react';
 import { apiService } from '../services/apiService';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface TitleScreeningWorkbenchProps {
   project: ReviewProject;
@@ -24,6 +31,23 @@ interface TitleScreeningWorkbenchProps {
   onUpdateArticle: (article: Article) => void;
   onNavigateToFullText: (articleId: string) => void;
   onToggleStarArticle: (articleId: string) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = ({
@@ -32,6 +56,12 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
   onUpdateArticle,
   onNavigateToFullText,
   onToggleStarArticle,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [filterMode, setFilterMode] = useState<'all' | 'unscreened' | 'uncertain'>('unscreened');
@@ -164,6 +194,20 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
 
   return (
     <div className="space-y-5">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="title_screening"
+        moduleLabel="Title Screening Workbench"
+        autoSaveStatus={autoSaveStatus}
+        resetFieldsLabel="Reset Decisions -> Unscreened"
+        deleteModes={['excluded', 'uncertain', 'unscreened']}
+        onResetModule={onResetWorkbenchModule}
+        onResetLocalView={() => setCurrentIndex(0)}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Top Controller */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div className="space-y-1">

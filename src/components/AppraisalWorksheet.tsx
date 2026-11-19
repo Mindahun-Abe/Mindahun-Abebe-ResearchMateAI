@@ -1,5 +1,12 @@
 import React, { useState, useMemo } from 'react';
-import { Article, AppraisalItem, AppraisalRating, ReviewProject } from '../types';
+import {
+  AppraisalItem,
+  AppraisalRating,
+  Article,
+  ModuleQaRescanRecord,
+  ReviewProject,
+  WorkbenchModuleId,
+} from '../types';
 import { defaultAppraisalTemplate } from '../data/sampleProjects';
 import {
   CheckCircle2,
@@ -13,6 +20,7 @@ import {
   FileSpreadsheet,
 } from 'lucide-react';
 import { apiService } from '../services/apiService';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface AppraisalWorksheetProps {
   project?: ReviewProject;
@@ -20,6 +28,23 @@ interface AppraisalWorksheetProps {
   onUpdateArticle: (updated: Article) => void;
   articles: Article[];
   onSelectArticle: (articleId: string) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 const escapeHtml = (value: string | number | undefined | null): string => {
@@ -72,6 +97,12 @@ export const AppraisalWorksheet: React.FC<AppraisalWorksheetProps> = ({
   onUpdateArticle,
   articles,
   onSelectArticle,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const [copied, setCopied] = useState(false);
   const [isAiAppraising, setIsAiAppraising] = useState(false);
@@ -567,6 +598,21 @@ Evidence Note: ${item.notes || 'None recorded'}`
 
   return (
     <div className="space-y-6">
+      {project && (
+        <ModuleWorkbenchControls
+          project={project}
+          moduleId="appraisal"
+          moduleLabel="Quality Appraisal & Risk-of-Bias"
+          autoSaveStatus={autoSaveStatus}
+          resetFieldsLabel="Reset All 13-Pt Appraisals"
+          deleteModes={['excluded', 'uncertain']}
+          onResetModule={onResetWorkbenchModule}
+          onAddDataFiles={onDirectAddDataFiles}
+          onOpenBulkImporter={onOpenBulkImporter}
+          onRescanQueryQA={onRescanWithQueryQA}
+          onDeleteQaEntry={onDeleteQaEntry}
+        />
+      )}
       {/* Top Header Card */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">

@@ -1,5 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { Article, ReviewProject, ArticleExtractedData } from '../types';
+import {
+  Article,
+  ArticleExtractedData,
+  ModuleQaRescanRecord,
+  ReviewProject,
+  WorkbenchModuleId,
+} from '../types';
 import {
   analyzeArticleForMatrix,
   ArticleMatrixAnalysis,
@@ -18,6 +24,7 @@ import {
   Check,
 } from 'lucide-react';
 import { ArticleCodeDetailModal } from './ArticleCodeDetailModal';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface EvidenceExtractionMatrixProps {
   project: ReviewProject;
@@ -25,6 +32,23 @@ interface EvidenceExtractionMatrixProps {
   onUpdateArticle: (article: Article) => void;
   onBatchUpdateArticles?: (updatedArticles: Article[]) => void;
   onNavigateToScreening?: (articleId: string) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 export const EvidenceExtractionMatrix: React.FC<EvidenceExtractionMatrixProps> = ({
@@ -33,6 +57,12 @@ export const EvidenceExtractionMatrix: React.FC<EvidenceExtractionMatrixProps> =
   onUpdateArticle,
   onBatchUpdateArticles,
   onNavigateToScreening,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const [filterMode, setFilterMode] = useState<'included' | 'all'>('included');
   const [paperTypeFilter, setPaperTypeFilter] = useState<'all' | 'Original Research' | 'Review'>('all');
@@ -280,6 +310,19 @@ export const EvidenceExtractionMatrix: React.FC<EvidenceExtractionMatrixProps> =
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="extraction"
+        moduleLabel="Record Evidence & Extraction Matrix"
+        autoSaveStatus={autoSaveStatus}
+        resetFieldsLabel="Clear Extracted Data Fields"
+        deleteModes={['excluded', 'uncertain']}
+        onResetModule={onResetWorkbenchModule}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Header & Protocol Scope Focus */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 space-y-4">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">

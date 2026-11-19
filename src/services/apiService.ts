@@ -1,4 +1,14 @@
-import { Article, ReviewProject, NotebookProposal, AppraisalItem, ScreeningDecision } from '../types';
+import {
+  Article,
+  ReviewProject,
+  NotebookProposal,
+  AppraisalItem,
+  ScreeningDecision,
+  DeletedOnlineArticleRecord,
+  WorkbenchModuleId,
+  WorkbenchState,
+  ModuleQaRescanRecord,
+} from '../types';
 import { getActiveFrameworkFieldEntries, getFrameworkDefinition } from '../utils/protocolFrameworks';
 
 export interface CrossrefResult {
@@ -428,6 +438,7 @@ export const apiService = {
     success: boolean;
     projectId: string;
     removedCount: number;
+    deletedOnlineCount?: number;
     remainingCount: number;
     remainingArticles: Article[];
     savedAt?: string;
@@ -441,6 +452,86 @@ export const apiService = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Failed to bulk remove articles from folder (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async fetchDeletedOnlineArticles(
+    projectId: string
+  ): Promise<{ projectId: string; items: DeletedOnlineArticleRecord[]; count: number }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles`);
+    if (!res.ok) {
+      return { projectId, items: [], count: 0 };
+    }
+    return res.json();
+  },
+
+  async updateDeletedOnlineInterest(
+    projectId: string,
+    params: {
+      archiveIds: string[];
+      reviewerInterestSelected?: boolean;
+      reviewerInterestNote?: string;
+    }
+  ): Promise<{ success: boolean; items: DeletedOnlineArticleRecord[]; count: number }> {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles/interest`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to update reviewer interest (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async restoreDeletedOnlineArticles(
+    projectId: string,
+    params: {
+      archiveIds: string[];
+      restoreMode?: 'unscreened' | 'starred' | 'include';
+    }
+  ): Promise<{
+    success: boolean;
+    projectId: string;
+    restoredCount: number;
+    restoredArticles: Article[];
+    remainingArticles: Article[];
+    remainingDeletedCount: number;
+    savedAt?: string;
+    databaseFolderPath?: string;
+  }> {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles/restore`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to restore deleted online articles (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async purgeDeletedOnlineArticles(
+    projectId: string,
+    params: { archiveIds?: string[]; clearAll?: boolean }
+  ): Promise<{ success: boolean; purgedCount: number; remainingDeletedCount: number }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to purge deleted online articles (${res.status})`);
     }
     return res.json();
   },
@@ -968,5 +1059,103 @@ export const apiService = {
       answer: `Based on the synthesis of ${arts.length} included studies in this review, empirical data shows robust diagnostic fidelity for micro-scale interventions [1]. Latency reporting remains critical, with edge computing proving pivotal for operational adoption.`,
       groundedCount: arts.length,
     };
+  },
+
+  async saveWorkbenchState(
+    projectId: string,
+    workbenchState: WorkbenchState,
+    replace: boolean = false
+  ): Promise<{ success: boolean; workbenchState: WorkbenchState; savedAt: string; databaseFolderPath?: string }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/workbench-state`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workbenchState, replace }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to auto-save workbench state (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async resetWorkbenchModule(
+    projectId: string,
+    params: {
+      target: WorkbenchModuleId;
+      resetArticleFields?: boolean;
+      deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates' | 'all' | 'ids';
+      articleIds?: string[];
+    }
+  ): Promise<{
+    success: boolean;
+    projectId: string;
+    target: WorkbenchModuleId;
+    workbenchState: WorkbenchState;
+    articles: Article[];
+    removedCount: number;
+    savedAt: string;
+    databaseFolderPath?: string;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/workbench-reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to reset workbench module (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async rescanWithQueryQA(params: {
+    projectId: string;
+    moduleId: WorkbenchModuleId;
+    query: string;
+    project: ReviewProject;
+    articles?: Article[];
+    applyScreeningUpdates?: boolean;
+    citationStyle?: string;
+    persist?: boolean;
+  }): Promise<{
+    success: boolean;
+    record: ModuleQaRescanRecord;
+    screeningUpdates: Array<{
+      articleId: string;
+      decision: ScreeningDecision;
+      confidenceScore: number;
+      primaryReason: string;
+      matchedTerms: string[];
+    }>;
+    workbenchState?: WorkbenchState;
+  }> {
+    const res = await fetch('/api/ai/rescan-qa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: params.projectId,
+        moduleId: params.moduleId,
+        query: params.query,
+        project: {
+          id: params.project.id,
+          title: params.project.title,
+          subtitle: params.project.subtitle,
+          scope: params.project.scope,
+          picoc: params.project.picoc,
+          inclusionCriteria: params.project.inclusionCriteria,
+          standardExclusionReasons: params.project.standardExclusionReasons,
+          researchQuestions: params.project.researchQuestions,
+        },
+        articles: params.articles ?? params.project.articles,
+        applyScreeningUpdates: Boolean(params.applyScreeningUpdates),
+        citationStyle: params.citationStyle || 'apa7',
+        persist: params.persist ?? true,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to rescan corpus with Query Q&A (${res.status})`);
+    }
+    return res.json();
   },
 };

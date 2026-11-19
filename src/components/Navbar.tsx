@@ -32,6 +32,8 @@ import {
   Wifi,
   WifiOff,
   RefreshCw,
+  HardDriveDownload,
+  Check,
 } from 'lucide-react';
 import { SyncStatus } from '../utils/syncEngine';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -52,6 +54,7 @@ interface NavbarProps {
   onOpenAddModal?: () => void;
   onCreateNewReview?: () => void;
   onOpenManualPaperModal?: () => void;
+  onBackupProject?: () => void;
   onOpenCloudWorkspace?: () => void;
   syncStatus?: SyncStatus;
   pendingOpsCount?: number;
@@ -76,6 +79,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAddModal,
   onCreateNewReview,
   onOpenManualPaperModal,
+  onBackupProject,
   onOpenCloudWorkspace,
   syncStatus = 'Synced',
   pendingOpsCount = 0,
@@ -83,6 +87,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenBilling,
   onOpenAdmin,
 }) => {
+  const [backupJustSaved, setBackupJustSaved] = React.useState(false);
   const { user, accountOverview, signInWithGoogle } = useAuth();
   const isAdmin = accountOverview?.user.role === 'admin';
   const currentProject = projects.find((p) => p.id === currentProjectId) || projects[0];
@@ -163,7 +168,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     },
     {
       id: 'briefing',
-      label: 'NotebookLM Briefing',
+      label: 'NotebookLM & Audio',
       icon: Radio,
     },
     {
@@ -294,6 +299,28 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Upload className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Bulk Import</span>
+              </button>
+            )}
+
+            {/* Instant Workbench Backup Button */}
+            {onBackupProject && (
+              <button
+                type="button"
+                disabled={projects.length === 0}
+                onClick={() => {
+                  onBackupProject();
+                  setBackupJustSaved(true);
+                  setTimeout(() => setBackupJustSaved(false), 2400);
+                }}
+                className="px-2.5 py-1.5 bg-emerald-950/60 hover:bg-emerald-900/70 disabled:opacity-40 text-emerald-300 border border-emerald-500/40 text-xs font-semibold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                title="Save folder changes to disk and download a complete portable SLR backup (.json)"
+              >
+                {backupJustSaved ? (
+                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                ) : (
+                  <HardDriveDownload className="w-3.5 h-3.5 text-emerald-400" />
+                )}
+                <span className="hidden md:inline">{backupJustSaved ? 'Backed Up' : 'Backup'}</span>
               </button>
             )}
 

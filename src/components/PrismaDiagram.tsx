@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Article, ReviewProject } from '../types';
+import { Article, ModuleQaRescanRecord, ReviewProject, WorkbenchModuleId } from '../types';
 import {
   analyzeArticleForMatrix,
   ArticleMatrixAnalysis,
@@ -27,13 +27,40 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { ArticleCodeDetailModal } from './ArticleCodeDetailModal';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface PrismaDiagramProps {
   project: ReviewProject;
   onUpdateArticle?: (article: Article) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
-export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({ project, onUpdateArticle }) => {
+export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
+  project,
+  onUpdateArticle,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
+}) => {
   const [copiedText, setCopiedText] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [selectedDiagnosticFilter, setSelectedDiagnosticFilter] = useState<
@@ -436,6 +463,19 @@ Total included studies: n = ${liveCounts.includedCount}
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="prisma"
+        moduleLabel="PRISMA 2020 Flow & Diagnostics"
+        autoSaveStatus={autoSaveStatus}
+        resetFieldsLabel="Clear PRISMA Exclusion Flags"
+        deleteModes={['excluded', 'duplicates', 'uncertain']}
+        onResetModule={onResetWorkbenchModule}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Top Banner */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>

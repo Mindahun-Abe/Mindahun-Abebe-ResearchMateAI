@@ -1,9 +1,10 @@
-import React, { useMemo, useState } from 'react';
-import { Article, PaperAccessStatus, ReviewProject } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Article, DeletedOnlineArticleRecord, PaperAccessStatus, ReviewProject } from '../types';
 import { apiService } from '../services/apiService';
 import { classifyPaperType, detectArticleSourceDatabase } from '../utils/slrDetectionEngine';
 import {
   AlertCircle,
+  ArchiveRestore,
   BookOpen,
   Building2,
   CheckCircle2,
@@ -20,6 +21,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShieldCheck,
   Sparkles,
   X,
   XCircle,
@@ -86,11 +88,19 @@ interface SearchSessionLog {
   timestamp: number;
 }
 
+interface StagedSelectionEntry {
+  item: OnlineResultItem;
+  batchId: string;
+  queryUsed: string;
+}
+
 interface FastOnlineSearchPanelProps {
   project?: ReviewProject;
   targetProjectId?: string;
   onAddArticles: (articles: Article[], options?: { keepOpen?: boolean; targetProjectId?: string }) => void;
   onRecordSearchHistory?: (query: string, resultsCount: number) => void;
+  onOpenDeletedArchive?: () => void;
+  deletedOnlineCount?: number;
   onClose?: () => void;
   compact?: boolean;
 }
@@ -218,6 +228,8 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
   targetProjectId,
   onAddArticles,
   onRecordSearchHistory,
+  onOpenDeletedArchive,
+  deletedOnlineCount,
   onClose,
   compact = false,
 }) => {
@@ -238,12 +250,17 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
   const [rowsLimit, setRowsLimit] = useState<number>(0);
   // Strict per-database default (false) so each database returns its own distinct result set
   const [broadWebSearch, setBroadWebSearch] = useState<boolean>(false);
-  const [autoAddAllToLibrary, setAutoAddAllToLibrary] = useState<boolean>(false);
+  // Retain checked selections across multiple searches before final checkbox confirmation
+  const [retainCheckedAcrossSearches, setRetainCheckedAcrossSearches] = useState<boolean>(true);
+  const [stagedCheckedMap, setStagedCheckedMap] = useState<Record<string, StagedSelectionEntry>>({});
+  const [pendingConfirmMode, setPendingConfirmMode] = useState<'none' | 'record' | 'verify_pdf'>('none');
+  const [confirmCheckboxChecked, setConfirmCheckboxChecked] = useState<boolean>(false);
+  const [skipPreviouslyDeletedInConfirm, setSkipPreviouslyDeletedInConfirm] = useState<boolean>(true);
+  const [deletedArchiveRecords, setDeletedArchiveRecords] = useState<DeletedOnlineArticleRecord[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [results, setResults] = useState<OnlineResultItem[]>([]);
   const [visibleDisplayLimit, setVisibleDisplayLimit] = useState<number>(100);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [accessFilter, setAccessFilter] = useState<
     'all' | 'downloadable' | 'needs_institution_confirmation' | 'not_accessible'
   >('all');
@@ -274,6 +291,43 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
   const [fetchingItemId, setFetchingItemId] = useState<string | null>(null);
   const [isBatchImporting, setIsBatchImporting] = useState(false);
   const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
+
+  const effectiveProjectId = targetProjectId || project?.id || '';
+
+  useEffect(() => {
+    if (!effectiveProjectId) return;
+    apiService
+      .fetchDeletedOnlineArticles(effectiveProjectId)
+      .then((res) => setDeletedArchiveRecords(res.items || []))
+      .catch(() => {});
+  }, [effectiveProjectId, deletedOnlineCount, project?.articles?.length]);
+
+  const deletedOnlineKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const rec of deletedArchiveRecords) {
+      const a = rec.article;
+      if (!a) continue;
+      if (a.doi) keys.add(`doi:${a.doi.toLowerCase().trim()}`);
+      if (a.title) {
+        const tk = a.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (tk.length > 14) keys.add(`title:${tk}`);
+      }
+    }
+    return keys;
+  }, [deletedArchiveRecords]);
+
+  const isPreviouslyDeletedOnline = (item: OnlineResultItem): boolean => {
+    const dk = item.doi ? `doi:${item.doi.toLowerCase().trim()}` : '';
+    const tk = `title:${(item.title || '').toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+    return Boolean((dk && deletedOnlineKeys.has(dk)) || (tk.length > 20 && deletedOnlineKeys.has(tk)));
+  };
+
+  const stagedEntries = useMemo(() => Object.values(stagedCheckedMap), [stagedCheckedMap]);
+  const stagedIdsSet = useMemo(() => new Set(Object.keys(stagedCheckedMap)), [stagedCheckedMap]);
+  const currentSearchCheckedCount = useMemo(
+    () => results.filter((r) => stagedIdsSet.has(r.id)).length,
+    [results, stagedIdsSet]
+  );
 
   const activeFieldMeta = useMemo(
     () => SEARCH_BY_OPTIONS.find((o) => o.value === searchBy) || SEARCH_BY_OPTIONS[0],
@@ -412,7 +466,11 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
 
       setResults(normalized);
       setAccessFilter('all');
-      setSelectedIds(new Set(normalized.map((r) => r.id)));
+      setPendingConfirmMode('none');
+      setConfirmCheckboxChecked(false);
+      if (!retainCheckedAcrossSearches) {
+        setStagedCheckedMap({});
+      }
       const totalAvail = resp.totalAvailable ?? normalized.length;
       const crossDupes = resp.crossDbDuplicateCount ?? normalized.filter((r) => r.isCrossDbDuplicate).length;
       setSearchMeta({
@@ -446,15 +504,9 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
         if (alsoLogToHistory && onRecordSearchHistory) {
           onRecordSearchHistory(`[Online:${dbLabel}/${sb}] ${q}`, normalized.length);
         }
-        if (autoAddAllToLibrary) {
-          const preparedAll = normalized.map((it) => buildArticleFromOnlineItem(it, undefined, batchId, q));
-          sendChunkedToLibrary(preparedAll);
-          preparedAll.forEach((_, idx) => markItemAdded(normalized[idx]));
-          sessionEntry.recordedCount = preparedAll.length;
-          setStatusBanner(
-            `Found ${normalized.length} papers in ${dbLabel} (${totalAvail.toLocaleString()} total in DB) & automatically recorded all to Library (cross-DB duplicates flagged for PRISMA).`
-          );
-        }
+        setStatusBanner(
+          `Loaded ${normalized.length} papers from ${dbLabel} (${totalAvail.toLocaleString()} total in DB). Select checkboxes below, run additional database searches if needed, then confirm selected checkboxes to record into the Article Library.`
+        );
       }
 
       setSearchSessions((prev) => [sessionEntry, ...prev.slice(0, 14)]);
@@ -505,11 +557,6 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
         const uniqueNew = accumulated.filter((it) => !existingIds.has(it.id));
         const merged = [...results, ...uniqueNew];
         setResults(merged);
-        setSelectedIds((prev) => {
-          const next = new Set(prev);
-          uniqueNew.forEach((it) => next.add(it.id));
-          return next;
-        });
         setSearchMeta((prev) =>
           prev
             ? {
@@ -789,21 +836,72 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
     }
   };
 
-  // Batch import selected (or ALL) online results into Library without PRISMA/DB limits
-  const handleBatchAddItems = async (targetItems: OnlineResultItem[], fetchFullTextWherePossible: boolean) => {
-    if (targetItems.length === 0) return;
+  const handleToggleItemSelection = (item: OnlineResultItem) => {
+    setPendingConfirmMode('none');
+    setConfirmCheckboxChecked(false);
+    setStagedCheckedMap((prev) => {
+      const next = { ...prev };
+      if (next[item.id]) {
+        delete next[item.id];
+      } else {
+        next[item.id] = {
+          item,
+          batchId: activeBatchId,
+          queryUsed: activeSearchMeta?.query || query || '',
+        };
+      }
+      return next;
+    });
+  };
+
+  const handleSelectItemsBatch = (targetList: OnlineResultItem[]) => {
+    setPendingConfirmMode('none');
+    setConfirmCheckboxChecked(false);
+    setStagedCheckedMap((prev) => {
+      const next = { ...prev };
+      for (const item of targetList) {
+        next[item.id] = {
+          item,
+          batchId: activeBatchId,
+          queryUsed: activeSearchMeta?.query || query || '',
+        };
+      }
+      return next;
+    });
+  };
+
+  const handleClearCurrentSearchSelection = () => {
+    const currIds = new Set(results.map((r) => r.id));
+    setPendingConfirmMode('none');
+    setConfirmCheckboxChecked(false);
+    setStagedCheckedMap((prev) => {
+      const next: Record<string, StagedSelectionEntry> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        if (!currIds.has(k)) next[k] = v;
+      }
+      return next;
+    });
+  };
+
+  // Commit confirmed checkbox selections to Library & PRISMA
+  const handleConfirmAndRecordStaged = async (fetchFullTextWherePossible: boolean) => {
+    const entriesToRecord = stagedEntries.filter((entry) =>
+      skipPreviouslyDeletedInConfirm ? !isPreviouslyDeletedOnline(entry.item) : true
+    );
+    if (entriesToRecord.length === 0) return;
 
     setIsBatchImporting(true);
     try {
       const prepared: Article[] = [];
+      const recordedByBatch = new Map<string, number>();
 
       if (fetchFullTextWherePossible) {
-        // Process up to 4 concurrent retrieval checks so it remains fast
-        const queue = [...targetItems];
+        const queue = [...entriesToRecord];
         const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
           while (queue.length > 0) {
-            const it = queue.shift();
-            if (!it) break;
+            const entry = queue.shift();
+            if (!entry) break;
+            const it = entry.item;
             let working = { ...it };
             let extractedFullText: string | undefined;
             let pages: { pageNumber: number; content: string }[] | undefined;
@@ -833,20 +931,33 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
             }
 
             prepared.push(
-              buildArticleFromOnlineItem(working, {
-                fullText: extractedFullText,
-                pages,
-                resolvedPdfUrl,
-              })
+              buildArticleFromOnlineItem(
+                working,
+                {
+                  fullText: extractedFullText,
+                  pages,
+                  resolvedPdfUrl,
+                },
+                entry.batchId,
+                entry.queryUsed
+              )
             );
             markItemAdded(it);
+            if (entry.batchId) {
+              recordedByBatch.set(entry.batchId, (recordedByBatch.get(entry.batchId) || 0) + 1);
+            }
           }
         });
         await Promise.all(workers);
       } else {
-        for (const it of targetItems) {
-          prepared.push(buildArticleFromOnlineItem(it));
-          markItemAdded(it);
+        for (const entry of entriesToRecord) {
+          prepared.push(
+            buildArticleFromOnlineItem(entry.item, undefined, entry.batchId, entry.queryUsed)
+          );
+          markItemAdded(entry.item);
+          if (entry.batchId) {
+            recordedByBatch.set(entry.batchId, (recordedByBatch.get(entry.batchId) || 0) + 1);
+          }
         }
       }
 
@@ -854,31 +965,25 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
         sendChunkedToLibrary(prepared);
         const dlCount = prepared.filter((a) => a.accessStatus === 'downloadable').length;
         const instCount = prepared.filter((a) => a.accessStatus === 'needs_institution_confirmation').length;
-        const notAccCount = prepared.filter((a) => a.accessStatus === 'not_accessible' || a.accessStatus === 'abstract_only').length;
-        if (activeBatchId) {
-          setSearchSessions((prev) =>
-            prev.map((s) =>
-              s.id === activeBatchId ? { ...s, recordedCount: s.recordedCount + prepared.length } : s
-            )
-          );
-        }
-        setStatusBanner(
-          `Recorded ${prepared.length} paper(s) to Library & PRISMA (${dlCount} Downloadable, ${instCount} Institutional Confirmation, ${notAccCount} Not Accessible / Abstract Only). Cross-database overlaps are auto-reported to PRISMA.`
+        const notAccCount = prepared.filter(
+          (a) => a.accessStatus === 'not_accessible' || a.accessStatus === 'abstract_only'
+        ).length;
+        setSearchSessions((prev) =>
+          prev.map((s) => {
+            const addedForSess = recordedByBatch.get(s.id) || 0;
+            return addedForSess > 0 ? { ...s, recordedCount: s.recordedCount + addedForSess } : s;
+          })
         );
-        setSelectedIds(new Set());
+        setStatusBanner(
+          `Confirmed & recorded ${prepared.length} checked paper(s) to Article Library & PRISMA (${dlCount} Downloadable, ${instCount} Institutional Confirmation, ${notAccCount} Not Accessible / Abstract Only).`
+        );
+        setStagedCheckedMap({});
+        setPendingConfirmMode('none');
+        setConfirmCheckboxChecked(false);
       }
     } finally {
       setIsBatchImporting(false);
     }
-  };
-
-  const handleBatchAddSelected = async (fetchFullTextWherePossible: boolean) => {
-    const selected = results.filter((r) => selectedIds.has(r.id));
-    await handleBatchAddItems(selected, fetchFullTextWherePossible);
-  };
-
-  const handleAddAllResultsToLibrary = async () => {
-    await handleBatchAddItems(results, false);
   };
 
   const accessCounts = useMemo(() => {
@@ -919,16 +1024,31 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
           </div>
         </div>
 
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white self-end sm:self-center cursor-pointer transition"
-            title="Collapse fast search panel"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
+        <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+          {onOpenDeletedArchive && (
+            <button
+              type="button"
+              onClick={onOpenDeletedArchive}
+              className="px-3 py-1.5 rounded-xl bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border border-amber-700/60 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition"
+              title="Open deleted online database files archive (separate from Article Library & Fast Batch Screener) to mark reviewer interest or selectively build back"
+            >
+              <ArchiveRestore className="w-3.5 h-3.5 text-amber-400" />
+              <span>
+                Deleted Online Files ({deletedOnlineCount ?? deletedArchiveRecords.length})
+              </span>
+            </button>
+          )}
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white cursor-pointer transition"
+              title="Collapse fast search panel"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Fast Search Form: Database Dropdown + Search Method Selector + Query Input */}
@@ -1164,15 +1284,15 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
 
             <label
               className="inline-flex items-center gap-1.5 text-emerald-300 cursor-pointer select-none"
-              title="Automatically record every returned search output into the Article Library (cross-DB duplicates flagged for PRISMA)"
+              title="Keep checked paper selections across multiple searches so you can compare results from other databases before final checkbox confirmation"
             >
               <input
                 type="checkbox"
-                checked={autoAddAllToLibrary}
-                onChange={(e) => setAutoAddAllToLibrary(e.target.checked)}
+                checked={retainCheckedAcrossSearches}
+                onChange={(e) => setRetainCheckedAcrossSearches(e.target.checked)}
                 className="rounded accent-emerald-500 cursor-pointer"
               />
-              <span>Auto-Record Search to Library</span>
+              <span>Hold Checked Selection Across Searches (Multi-Search Confirmation)</span>
             </label>
 
             {onRecordSearchHistory && (
@@ -1260,6 +1380,55 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
         <div className="px-3.5 py-2.5 rounded-xl bg-rose-950/40 border border-rose-800/70 text-rose-200 text-xs flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
           <span>{errorMsg}</span>
+        </div>
+      )}
+
+      {results.length === 0 && stagedEntries.length > 0 && (
+        <div className="bg-indigo-950/35 border border-indigo-500/50 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="text-slate-200 font-semibold">
+            {stagedEntries.length} checked paper(s) held from earlier search(es) awaiting final confirmation.
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setPendingConfirmMode('record');
+                setConfirmCheckboxChecked(false);
+              }}
+              className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Confirm &amp; Record ({stagedEntries.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setStagedCheckedMap({})}
+              className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/60 text-rose-300 border border-rose-800/50 text-[11px] cursor-pointer whitespace-nowrap shrink-0"
+            >
+              Clear Checked
+            </button>
+          </div>
+          {pendingConfirmMode !== 'none' && (
+            <div className="w-full pt-2 border-t border-indigo-900/60 flex flex-wrap items-center justify-between gap-2">
+              <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={confirmCheckboxChecked}
+                  onChange={(e) => setConfirmCheckboxChecked(e.target.checked)}
+                  className="rounded accent-emerald-500 cursor-pointer"
+                />
+                <span>Confirm recording these {stagedEntries.length} checked paper(s) into Article Library</span>
+              </label>
+              <button
+                type="button"
+                disabled={!confirmCheckboxChecked || isBatchImporting}
+                onClick={() => void handleConfirmAndRecordStaged(false)}
+                className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
+              >
+                {isBatchImporting ? 'Recording...' : `Record (${stagedEntries.length}) to Library`}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1362,73 +1531,191 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
               </div>
             </div>
 
-            {/* Batch Select & Import Actions */}
+            {/* Batch Select & Explicit Checkbox Confirmation Actions */}
             <div className="flex flex-wrap items-center gap-1.5 shrink-0">
               <button
                 type="button"
-                onClick={() => setSelectedIds(new Set(filteredResults.map((r) => r.id)))}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold cursor-pointer"
+                onClick={() => handleSelectItemsBatch(filteredResults)}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
               >
                 Select All ({filteredResults.length})
               </button>
               <button
                 type="button"
                 onClick={() =>
-                  setSelectedIds(
-                    new Set(results.filter((r) => r.accessStatus === 'downloadable').map((r) => r.id))
-                  )
+                  handleSelectItemsBatch(results.filter((r) => r.accessStatus === 'downloadable'))
                 }
-                className="px-2.5 py-1 rounded-lg bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 text-[11px] font-semibold cursor-pointer"
+                className="px-2.5 py-1 rounded-lg bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60 text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
               >
                 Select Downloadable ({accessCounts.downloadable})
               </button>
-              {selectedIds.size > 0 && (
+              {currentSearchCheckedCount > 0 && (
                 <button
                   type="button"
-                  onClick={() => setSelectedIds(new Set())}
-                  className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 text-[11px] cursor-pointer"
+                  onClick={handleClearCurrentSearchSelection}
+                  className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 text-[11px] cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  Clear ({selectedIds.size})
+                  Uncheck Current ({currentSearchCheckedCount})
+                </button>
+              )}
+              {stagedEntries.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setStagedCheckedMap({});
+                    setPendingConfirmMode('none');
+                    setConfirmCheckboxChecked(false);
+                  }}
+                  className="px-2 py-1 rounded-lg bg-slate-900 hover:bg-rose-950/60 text-rose-300 border border-rose-800/50 text-[11px] cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Clear All Checked ({stagedEntries.length})
                 </button>
               )}
               <button
                 type="button"
-                disabled={results.length === 0 || isBatchImporting}
-                onClick={handleAddAllResultsToLibrary}
-                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-sm"
-                title="Add every paper found in the search results (including related articles across all databases and access statuses) directly to the Article Library"
+                disabled={stagedEntries.length === 0 || isBatchImporting}
+                onClick={() => {
+                  setPendingConfirmMode('record');
+                  setConfirmCheckboxChecked(false);
+                }}
+                className="px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 transition shadow-sm"
+                title="Review all selected checkboxes across searches and confirm before recording to Article Library"
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add All Results ({results.length}) to Library</span>
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Confirm Selected ({stagedEntries.length}) to Library</span>
               </button>
               <button
                 type="button"
-                disabled={selectedIds.size === 0 || isBatchImporting}
-                onClick={() => handleBatchAddSelected(false)}
-                className="px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add Selected ({selectedIds.size}) to Library</span>
-              </button>
-              <button
-                type="button"
-                disabled={selectedIds.size === 0 || isBatchImporting}
-                onClick={() => handleBatchAddSelected(true)}
-                className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 disabled:opacity-40 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer transition"
-                title="Verify & extract full text for downloadable PDFs and record institutional/not-accessible status for PRISMA"
+                disabled={stagedEntries.length === 0 || isBatchImporting}
+                onClick={() => {
+                  setPendingConfirmMode('verify_pdf');
+                  setConfirmCheckboxChecked(false);
+                }}
+                className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 disabled:opacity-40 text-white text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0 transition"
+                title="Review selected checkboxes, verify & extract PDF full text, and confirm adding to Library & PRISMA"
               >
                 <Download className={`w-3.5 h-3.5 ${isBatchImporting ? 'animate-bounce' : ''}`} />
-                <span>{isBatchImporting ? 'Retrieving...' : 'Verify PDFs & Import'}</span>
+                <span>{isBatchImporting ? 'Retrieving...' : `Verify PDFs & Confirm (${stagedEntries.length})`}</span>
               </button>
             </div>
           </div>
 
+          {/* Explicit Selected-Checkbox Final Output Confirmation Panel */}
+          {pendingConfirmMode !== 'none' && stagedEntries.length > 0 && (() => {
+            const previouslyDeletedSelected = stagedEntries.filter((e) => isPreviouslyDeletedOnline(e.item));
+            const finalToCommit = stagedEntries.filter((e) =>
+              skipPreviouslyDeletedInConfirm ? !isPreviouslyDeletedOnline(e.item) : true
+            );
+            const dbBreakdown: Record<string, number> = {};
+            finalToCommit.forEach((e) => {
+              const db = e.item.sourceDatabase || 'Other';
+              dbBreakdown[db] = (dbBreakdown[db] || 0) + 1;
+            });
+            return (
+              <div className="bg-indigo-950/40 border border-indigo-500/60 rounded-xl p-4 space-y-3 text-xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-teal-400 shrink-0" />
+                    <h4 className="font-bold text-white">
+                      Selected Checkbox Final Output Confirmation ({stagedEntries.length} Checked Across Searches)
+                    </h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setPendingConfirmMode('none')}
+                    className="text-slate-400 hover:text-white text-[11px] self-end sm:self-auto cursor-pointer"
+                  >
+                    Continue Searching
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-300">
+                  {Object.entries(dbBreakdown).map(([db, cnt]) => (
+                    <span
+                      key={db}
+                      className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono tabular-nums"
+                    >
+                      {db}: {cnt}
+                    </span>
+                  ))}
+                  <span className="text-slate-400">
+                    · Mode:{' '}
+                    <strong className="text-teal-300">
+                      {pendingConfirmMode === 'verify_pdf'
+                        ? 'Verify PDFs, Extract Full Text & Record'
+                        : 'Record Selected Metadata & PRISMA Status'}
+                    </strong>
+                  </span>
+                </div>
+
+                {previouslyDeletedSelected.length > 0 && (
+                  <div className="p-2.5 rounded-lg bg-amber-950/50 border border-amber-700/60 text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
+                    <span>
+                      <strong>{previouslyDeletedSelected.length}</strong> checked item(s) match previously{' '}
+                      <strong>deleted online database files</strong> (no auto-recovery).
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer select-none font-semibold">
+                      <input
+                        type="checkbox"
+                        checked={skipPreviouslyDeletedInConfirm}
+                        onChange={(e) => setSkipPreviouslyDeletedInConfirm(e.target.checked)}
+                        className="rounded accent-amber-500 cursor-pointer"
+                      />
+                      <span>Skip previously deleted files (recommended)</span>
+                    </label>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1 border-t border-indigo-900/60">
+                  <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer select-none font-medium">
+                    <input
+                      type="checkbox"
+                      checked={confirmCheckboxChecked}
+                      onChange={(e) => setConfirmCheckboxChecked(e.target.checked)}
+                      className="rounded accent-emerald-500 cursor-pointer"
+                    />
+                    <span>
+                      I confirm recording <strong>{finalToCommit.length}</strong> checked paper(s) into the active{' '}
+                      <strong>Article Library</strong> &amp; PRISMA record.
+                    </span>
+                  </label>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setPendingConfirmMode('none')}
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!confirmCheckboxChecked || finalToCommit.length === 0 || isBatchImporting}
+                      onClick={() =>
+                        void handleConfirmAndRecordStaged(pendingConfirmMode === 'verify_pdf')
+                      }
+                      className="px-4 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>
+                        {isBatchImporting
+                          ? 'Recording...'
+                          : `Confirm & Record (${finalToCommit.length}) to Library`}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Results List (smooth slice rendering for large datasets while All Actions operate on full loaded set) */}
           <div className={`${compact ? 'max-h-80' : 'max-h-[440px]'} overflow-y-auto space-y-2 pr-1`}>
             {filteredResults.slice(0, visibleDisplayLimit).map((item) => {
-              const isSelected = selectedIds.has(item.id);
+              const isSelected = stagedIdsSet.has(item.id);
               const existingLibMatch = findExistingMatch(item);
               const inLibrary = isAlreadyInLibrary(item);
+              const wasPreviouslyDeleted = isPreviouslyDeletedOnline(item);
               const isCrossDbOverlapWithLibrary =
                 Boolean(existingLibMatch) &&
                 (existingLibMatch?.sourceDatabase || '').toLowerCase() !==
@@ -1449,14 +1736,7 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
                     <input
                       type="checkbox"
                       checked={isSelected}
-                      onChange={() => {
-                        setSelectedIds((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(item.id)) next.delete(item.id);
-                          else next.add(item.id);
-                          return next;
-                        });
-                      }}
+                      onChange={() => handleToggleItemSelection(item)}
                       className="mt-1 rounded accent-teal-500 cursor-pointer shrink-0"
                     />
 
@@ -1527,6 +1807,15 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
                         {inLibrary && !isCrossDbOverlapWithLibrary && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-teal-500/20 text-teal-300 border border-teal-500/30">
                             <CheckCircle2 className="w-3 h-3" /> In Library
+                          </span>
+                        )}
+
+                        {wasPreviouslyDeleted && !inLibrary && (
+                          <span
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                            title="Previously deleted from Article Library — kept outside library & Fast Batch Screener unless restored in Deleted Online Files"
+                          >
+                            <ArchiveRestore className="w-3 h-3" /> Previously Deleted (Archived)
                           </span>
                         )}
                       </div>

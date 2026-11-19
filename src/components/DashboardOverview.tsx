@@ -1,5 +1,6 @@
 import React from 'react';
-import { ReviewProject, Article } from '../types';
+import { ModuleQaRescanRecord, ReviewProject, WorkbenchModuleId } from '../types';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 import {
   Compass,
   FileSearch,
@@ -25,6 +26,9 @@ import {
   Radio,
   FileSpreadsheet,
   Plus,
+  HardDriveDownload,
+  Upload,
+  Check,
 } from 'lucide-react';
 
 interface DashboardOverviewProps {
@@ -36,6 +40,25 @@ interface DashboardOverviewProps {
   onCreateNewReview?: () => void;
   onOpenManualPaperModal?: () => void;
   onOpenResearchSuite?: () => void;
+  onOpenFastBatchScreener?: () => void;
+  onBackupProject?: () => void;
+  onRestoreProject?: (restored: ReviewProject) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
 }
 
 export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
@@ -47,7 +70,16 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   onCreateNewReview,
   onOpenManualPaperModal,
   onOpenResearchSuite,
+  onOpenFastBatchScreener,
+  onBackupProject,
+  onRestoreProject,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
 }) => {
+  const [backupBanner, setBackupBanner] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const articles = project.articles || [];
   const totalIdentified = articles.length;
   const duplicatesCount = articles.filter((a) => a.isDuplicate).length;
@@ -137,11 +169,11 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
     },
     {
       id: 'briefing',
-      label: 'NotebookLM-Style Research Briefing',
-      desc: 'Audio overview podcast dialogue & grounded source Q&A',
+      label: 'NotebookLM Studio & Audio Briefing',
+      desc: 'Export original PDFs to notebook.google.com, unconstrained cited chat & two-host audio overview',
       icon: Radio,
-      color: 'from-indigo-600 to-fuchsia-600',
-      badge: 'Audio & Q&A',
+      color: 'from-indigo-600 to-teal-600',
+      badge: 'Studio + Audio',
     },
     {
       id: 'proposal',
@@ -168,9 +200,23 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
         <div className="absolute right-0 top-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
           <div className="space-y-1.5 max-w-2xl">
-            <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-              <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Systematic Literature Review (SLR) Command Center</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Systematic Literature Review (SLR) Command Center</span>
+              </div>
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-950/70 text-emerald-300 border border-emerald-700/50 tabular-nums">
+                <Check className="w-3 h-3 text-emerald-400" />
+                <span>
+                  {autoSaveStatus?.state === 'saving'
+                    ? 'Auto-Saving...'
+                    : autoSaveStatus?.lastSavedAt
+                    ? `Auto-Saved ${new Date(autoSaveStatus.lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                    : project.workbenchState?.lastAutoSavedAt
+                    ? `Saved ${new Date(project.workbenchState.lastAutoSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                    : 'Auto-Save Ready'}
+                </span>
+              </span>
             </div>
             <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
               {project.title}
@@ -223,13 +269,103 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             </button>
             <button
               onClick={() => onNavigateTab('title_screening')}
-              className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition inline-flex items-center gap-1.5 cursor-pointer"
+              className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
             >
               <Eye className="w-4 h-4 text-indigo-400" />
-              <span>Fast Screening</span>
+              <span>Title Screening</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (onOpenFastBatchScreener) onOpenFastBatchScreener();
+                else onNavigateTab('library');
+              }}
+              className="px-3.5 py-2.5 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 text-white text-xs font-bold rounded-xl shadow-md transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              title="Open High-Throughput Fast Batch Screener on active Article Library (excludes deleted online DB files)"
+            >
+              <Zap className="w-4 h-4" />
+              <span>Fast Batch Screener</span>
+            </button>
+
+            {onBackupProject && (
+              <button
+                type="button"
+                onClick={() => {
+                  onBackupProject();
+                  setBackupBanner({
+                    type: 'success',
+                    text: `Saved folder to disk & downloaded portable backup for "${project.title.slice(0, 40)}" (${articles.length} articles).`,
+                  });
+                  setTimeout(() => setBackupBanner(null), 5000);
+                }}
+                className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-md transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                title="Save all review changes to disk and download a complete portable SLR backup (.json)"
+              >
+                <HardDriveDownload className="w-4 h-4" />
+                <span>Backup Review (.json)</span>
+              </button>
+            )}
+
+            {onRestoreProject && (
+              <label
+                className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-xl border border-slate-700 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                title="Restore a previously saved ResearchMate SLR backup (.json)"
+              >
+                <Upload className="w-3.5 h-3.5 text-teal-400" />
+                <span>Restore Backup</span>
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                      try {
+                        const parsed = JSON.parse(String(ev.target?.result || ''));
+                        const restoredProj = parsed.project || (parsed.articles && parsed.id ? parsed : null);
+                        if (!restoredProj || !Array.isArray(restoredProj.articles)) {
+                          throw new Error('Invalid SLR backup file format.');
+                        }
+                        onRestoreProject(restoredProj);
+                        setBackupBanner({
+                          type: 'success',
+                          text: `Restored "${restoredProj.title}" (${restoredProj.articles.length} articles).`,
+                        });
+                      } catch (err: any) {
+                        setBackupBanner({
+                          type: 'error',
+                          text: `Restore failed: ${err?.message || 'Corrupted backup JSON.'}`,
+                        });
+                      }
+                    };
+                    reader.readAsText(file);
+                    e.target.value = '';
+                  }}
+                />
+              </label>
+            )}
           </div>
         </div>
+
+        {backupBanner && (
+          <div
+            className={`mt-3 relative z-10 px-3.5 py-2 rounded-xl border text-xs flex items-center gap-2 ${
+              backupBanner.type === 'success'
+                ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-200'
+                : 'bg-rose-950/60 border-rose-700/60 text-rose-200'
+            }`}
+          >
+            {backupBanner.type === 'success' ? (
+              <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+            )}
+            <span>{backupBanner.text}</span>
+          </div>
+        )}
       </div>
 
       {/* KPI Cards Grid */}
@@ -438,17 +574,41 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
       {/* Systematic Workflow Navigation Hub (Requested explicitly by user) */}
       <div className="space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <Compass className="w-4 h-4 text-teal-400" />
-            <span>Core SLR Workflow Stages & Scientific Workbench Modules</span>
+            <span>Core SLR Workflow Stages &amp; Scientific Workbench Modules</span>
           </h3>
-          <span className="text-xs text-slate-400">11 Integrated Systematic Review Modules</span>
+          <span className="text-xs text-slate-400">
+            11 Integrated Systematic Review Modules · Auto-Saved Per Module
+          </span>
         </div>
+
+        <ModuleWorkbenchControls
+          project={project}
+          moduleId="screening"
+          moduleLabel="Core SLR Workbench"
+          autoSaveStatus={autoSaveStatus}
+          compact
+          resetFieldsLabel="Reset All Decisions -> Unscreened"
+          deleteModes={['excluded', 'uncertain', 'duplicates', 'unscreened']}
+          onResetModule={onResetWorkbenchModule}
+          onAddDataFiles={onDirectAddDataFiles}
+          onOpenBulkImporter={onOpenAddModal}
+          onRescanQueryQA={onRescanWithQueryQA}
+          onDeleteQaEntry={onDeleteQaEntry}
+        />
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {workflowStages.map((stage) => {
             const Icon = stage.icon;
+            const modId = stage.id as WorkbenchModuleId;
+            const modQaCount = project.workbenchState?.qaRescans?.[modId]?.length || 0;
+            const modSavedAt =
+              project.workbenchState?.moduleLastSavedAt?.[modId] ||
+              (modId === 'briefing' ? project.workbenchState?.briefing?.updatedAt : undefined) ||
+              (modId === 'proposal' ? project.workbenchState?.proposal?.updatedAt : undefined) ||
+              (modId === 'export' ? project.workbenchState?.exportConfig?.updatedAt : undefined);
             return (
               <div
                 key={stage.id}
@@ -465,13 +625,25 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                     <h4 className="font-bold text-white text-xs group-hover:text-indigo-300 transition truncate">
                       {stage.label}
                     </h4>
-                    <span className="px-1.5 py-0.2 rounded-md bg-slate-800 text-[10px] font-mono text-slate-300 shrink-0">
+                    <span className="px-1.5 py-0.2 rounded-md bg-slate-800 text-[10px] font-mono text-slate-300 shrink-0 tabular-nums">
                       {stage.badge}
                     </span>
                   </div>
                   <p className="text-[11px] text-slate-400 line-clamp-2 leading-relaxed">
                     {stage.desc}
                   </p>
+                  {(modSavedAt || modQaCount > 0) && (
+                    <div className="flex items-center gap-2 pt-0.5 text-[10px] font-mono text-teal-400/90 tabular-nums">
+                      {modSavedAt && (
+                        <span>
+                          Saved {new Date(modSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      )}
+                      {modQaCount > 0 && (
+                        <span>· {modQaCount} Q&amp;A scan{modQaCount === 1 ? '' : 's'}</span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             );

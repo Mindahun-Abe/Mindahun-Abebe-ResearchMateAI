@@ -1,0 +1,45 @@
+{
+  "id": "rev-1794544112951",
+  "title": "Unmanned Aerial Vehicles and Ultra-High-Resolution Remote Sensing for Real-Time Crop Health Monitoring: A Systematic Review of Sensor Technologies, Flight Planning, and Micro-Scale Stress Detection",
+  "subtitle": "Systematic Literature Review Protocol",
+  "scope": "Unmanned Aerial Vehicles and Ultra-High-Resolution Remote Sensing for Real-Time Crop Health Monitoring: A Systematic Review of Sensor Technologies, Flight Planning, and Micro-Scale Stress Detection synthesis",
+  "discipline": "Interdisciplinary Studies",
+  "publicationYears": "All Years",
+  "articleTypes": "Peer-reviewed empirical studies",
+  "geographicEligibility": "Global",
+  "methodologyFocus": "PRISMA 2020 Systematic Review & Critical Appraisal",
+  "picoc": {
+    "population": "Target subject or problem domain",
+    "intervention": "Technology or intervention under review",
+    "comparison": "Baseline, control, or alternative approach",
+    "outcome": "Synthesized findings and performance metrics",
+    "context": "Operational or empirical research setting"
+  },
+  "researchQuestions": [
+    {
+      "code": "RQ1",
+      "question": "What are the primary methodologies and outcomes in Unmanned Aerial Vehicles and Ultra-High-Resolution Remote Sensing for Real-Time Crop Health Monitoring: A Systematic Review of Sensor Technologies, Flight Planning, and Micro-Scale Stress Detection?",
+      "mainEvidenceToCollect": "Study characteristics, intervention types, and reported metrics"
+    }
+  ],
+  "inclusionCriteria": [
+    {
+      "id": "crit-default-1",
+      "dimension": "Focus",
+      "includeRule": "Directly investigates Unmanned Aerial Vehicles and Ultra-High-Resolution Remote Sensing for Real-Time Crop Health Monitoring: A Systematic Review of Sensor Technologies, Flight Planning, and Micro-Scale Stress Detection",
+      "excludeRule": "Unrelated topic or non-empirical editorial",
+      "category": "inclusion"
+    }
+  ],
+  "standardExclusionReasons": [
+    "Methodology: Non-empirical paper, editorial, opinion, or narrative review without original data",
+    "Intervention: Does not evaluate the primary technology or intervention under review",
+    "Language / Format: Incomplete text, retracted paper, or inaccessible report",
+    "Duplicate / Out of Scope: Outside predefined PICOC boundaries or publication year window"
+  ],
+  "uncertainCasesGuidance": "Flag for second reviewer consensus if title/abstract mentions related methods but lacks explicit performance metrics.",
+  "booleanQuery": "(\"Unmanned Aerial Vehicles\") AND (\"review\" OR \"evaluation\" OR \"analysis\")",
+  "databaseFolderName": "unmanned-aerial-vehicles-and-ultra-high-resolution-remot__rev-1794544112951",
+  "databaseFolderPath": "database/reviews/unmanned-aerial-vehicles-and-ultra-high-resolution-remot__rev-1794544112951",
+  "updatedAt": "2026-11-19T01:15:03.421Z"
+}

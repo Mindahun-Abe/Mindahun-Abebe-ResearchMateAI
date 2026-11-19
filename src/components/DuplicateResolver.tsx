@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Article, ReviewProject } from '../types';
+import { Article, ModuleQaRescanRecord, ReviewProject, WorkbenchModuleId } from '../types';
 import {
   Layers,
   CheckCircle2,
@@ -15,11 +15,29 @@ import {
   ChevronRight,
   Filter,
 } from 'lucide-react';
+import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface DuplicateResolverProps {
   project: ReviewProject;
   onUpdateArticles: (articles: Article[]) => void;
   onNavigateToScreening?: (articleId: string) => void;
+  autoSaveStatus?: AutoSaveStatusInfo;
+  onResetWorkbenchModule?: (params: {
+    target: WorkbenchModuleId;
+    resetArticleFields?: boolean;
+    deleteArticlesMode?: 'none' | 'excluded' | 'uncertain' | 'unscreened' | 'duplicates';
+  }) => Promise<any>;
+  onDirectAddDataFiles?: (
+    files: FileList,
+    options?: { autoScreen?: boolean; rescanQuery?: string; moduleId?: WorkbenchModuleId }
+  ) => Promise<{ addedCount: number }>;
+  onRescanWithQueryQA?: (
+    moduleId: WorkbenchModuleId,
+    query: string,
+    applyScreeningUpdates: boolean
+  ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
+  onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onOpenBulkImporter?: () => void;
 }
 
 interface DuplicatePair {
@@ -34,6 +52,12 @@ export const DuplicateResolver: React.FC<DuplicateResolverProps> = ({
   project,
   onUpdateArticles,
   onNavigateToScreening,
+  autoSaveStatus,
+  onResetWorkbenchModule,
+  onDirectAddDataFiles,
+  onRescanWithQueryQA,
+  onDeleteQaEntry,
+  onOpenBulkImporter,
 }) => {
   const articles = project.articles || [];
 
@@ -193,6 +217,19 @@ export const DuplicateResolver: React.FC<DuplicateResolverProps> = ({
 
   return (
     <div className="space-y-6">
+      <ModuleWorkbenchControls
+        project={project}
+        moduleId="duplicates"
+        moduleLabel="Duplicate Detection & Resolution"
+        autoSaveStatus={autoSaveStatus}
+        resetFieldsLabel="Clear Duplicate Flags"
+        deleteModes={['duplicates', 'excluded']}
+        onResetModule={onResetWorkbenchModule}
+        onAddDataFiles={onDirectAddDataFiles}
+        onOpenBulkImporter={onOpenBulkImporter}
+        onRescanQueryQA={onRescanWithQueryQA}
+        onDeleteQaEntry={onDeleteQaEntry}
+      />
       {/* Header */}
       <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
         <div className="space-y-1">

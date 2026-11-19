@@ -613,6 +613,38 @@ Evidence Note: ${item.notes || 'None recorded'}`
           onDeleteQaEntry={onDeleteQaEntry}
         />
       )}
+      {project?.workbenchState?.protocolBuilder?.activeProtocol?.appraisalPlan &&
+        project.workbenchState.protocolBuilder.activeProtocol.appraisalPlan.length > 0 && (() => {
+          const activeProto = project.workbenchState!.protocolBuilder!.activeProtocol!;
+          return (
+            <div className="bg-indigo-950/35 border border-indigo-500/30 rounded-xl px-4 py-3 text-xs space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold text-[10px] whitespace-nowrap shrink-0">
+                    Active Protocol v{activeProto.versionNumber}
+                  </span>
+                  <span className="text-slate-200 font-semibold">
+                    Design-Specific Quality Appraisal Plan ({activeProto.appraisalPlan.length} study design profiles)
+                  </span>
+                </div>
+                <span className="text-[11px] text-slate-400">
+                  Conduct: {activeProto.reviewMethodRecommendation.methodologicalGuidance}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {activeProto.appraisalPlan.slice(0, 4).map((plan) => (
+                  <div
+                    key={plan.id}
+                    className="px-2.5 py-1 rounded-lg bg-slate-900/90 border border-slate-800 text-[11px] text-slate-300"
+                  >
+                    <span className="font-semibold text-teal-300">{plan.studyDesign}:</span>{' '}
+                    <span>{plan.recommendedInstrument}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
       {/* Top Header Card */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">

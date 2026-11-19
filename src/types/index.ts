@@ -210,6 +210,7 @@ export interface ReviewProject {
 export type WorkbenchModuleId =
   | 'batch_screener'
   | 'picoc'
+  | 'protocol_builder'
   | 'duplicates'
   | 'title_screening'
   | 'screening'
@@ -629,9 +630,300 @@ export interface WorkbenchState {
   proposal?: ProposalSavedState;
   exportConfig?: ExportConfigSavedState;
   quantSynthesis?: QuantSynthesisSavedState;
+  protocolBuilder?: ProtocolBuilderSavedState;
   moduleNotes?: Record<string, string>;
   moduleLastSavedAt?: Record<string, string>;
   qaRescans?: Partial<Record<WorkbenchModuleId, ModuleQaRescanRecord[]>>;
+}
+
+export type ProtocolStatus =
+  | 'draft'
+  | 'under_review'
+  | 'needs_revision'
+  | 'approved'
+  | 'superseded'
+  | 'archived';
+
+export type ProtocolValidationStatus =
+  | 'passed'
+  | 'warning'
+  | 'needs_revision'
+  | 'not_assessed';
+
+export interface ProtocolTopicAnalysis {
+  initialTopicInput: string;
+  proposedTitle: string;
+  discipline: string;
+  domain: string;
+  subdomain: string;
+  focusAndScope: string;
+  theoreticalMotivation: string;
+  researchProblem: string;
+  knowledgeGaps: string;
+  knowledgeGapVerifiedByEvidence: boolean;
+  geographicEligibility: string;
+  publicationYearEligibility: string;
+  eligibleStudyDesigns: string;
+  eligiblePublicationTypes: string;
+  targetPopulation: string;
+  interventionOrFocus: string;
+  comparisonBaseline: string;
+  measurableOutcomes: string;
+  contextAndConstraints: string;
+  isPreliminaryAiSuggestion: boolean;
+  approvedByResearcher: boolean;
+}
+
+export interface ProtocolReviewMethodAlternative {
+  reviewType: LiteratureReviewTypeId;
+  name: string;
+  methodologicalGuidance: string;
+  reportingGuideline: string;
+  suitabilitySummary: string;
+}
+
+export interface ProtocolReviewMethodRecommendation {
+  recommendedReviewType: LiteratureReviewTypeId;
+  recommendedPrimaryFramework: ReviewFrameworkType;
+  complementaryFrameworks: ReviewFrameworkType[];
+  methodologicalGuidance: string;
+  reportingGuideline: string;
+  recommendedAppraisalRoleNote: string;
+  justification: string;
+  alternatives: ProtocolReviewMethodAlternative[];
+  approvedByResearcher: boolean;
+}
+
+export interface ProtocolFrameworkComponentItem {
+  id: string;
+  frameworkId: ReviewFrameworkType;
+  componentCode: string;
+  componentName: string;
+  definition: string;
+  proposedContent: string;
+  keywords: string[];
+  synonyms: string[];
+  inclusionImplications: string;
+  exclusionImplications: string;
+  correspondingRqCodes: string[];
+  dataExtractionRequirements: string[];
+  consistencyNotes: string[];
+  status: 'pending' | 'approved' | 'locked';
+}
+
+export interface ProtocolObjectiveItem {
+  code: string;
+  statement: string;
+  mappedRqCodes: string[];
+  status: 'pending' | 'approved' | 'locked';
+}
+
+export interface ProtocolRqMapping {
+  code: string;
+  question: string;
+  mappedFrameworkComponents: string[];
+  mappedObjectives: string[];
+  searchConcepts: string[];
+  eligibilityRequirements: string;
+  requiredExtractionVariables: string[];
+  evidenceType: string;
+  proposedSynthesisMethod: string;
+  consistencyIssues: string[];
+  status: 'pending' | 'approved' | 'locked';
+}
+
+export interface ProtocolEligibilityRow {
+  id: string;
+  criterion: string;
+  inclusionRequirement: string;
+  exclusionRequirement: string;
+  guidance: string;
+  status: 'pending' | 'approved' | 'locked';
+}
+
+export interface ProtocolDatabaseSearchStrategy {
+  id: string;
+  databaseName: string;
+  searchPlatform: string;
+  exactSearchString: string;
+  searchFields: string;
+  keywordsAndSynonyms: string[];
+  searchFilters: string;
+  publicationYearRestrictions: string;
+  languageRestrictions: string;
+  executionDate: string;
+  actualRetrievalCount: number | null;
+  strategyVersion: string;
+  verificationStatus: 'draft' | 'validated' | 'verified_by_researcher';
+  syntaxIssues: string[];
+  alternativeStrategy: string;
+  executedByResearcher: boolean;
+}
+
+export interface ProtocolMethodologySection {
+  number: number;
+  key: string;
+  title: string;
+  proposedContent: string;
+  methodologicalJustification: string;
+  requiredResearcherDecisions: string[];
+  supportingReferences: string[];
+  completionStatus: 'draft' | 'complete';
+  approvalStatus: 'pending' | 'approved' | 'locked';
+}
+
+export interface ProtocolExtractionVariablePlan {
+  id: string;
+  rqCode: string;
+  relatedObjective: string;
+  variableName: string;
+  definition: string;
+  dataType: 'categorical' | 'numeric' | 'continuous' | 'binary' | 'text' | 'date';
+  measurementUnits: string;
+  expectedEvidenceSource: string;
+  suggestedExtractionMethod: string;
+  proposedSynthesisApproach: string;
+  approved: boolean;
+}
+
+export interface ProtocolAppraisalPlanItem {
+  id: string;
+  studyDesign: string;
+  recommendedInstrument: string;
+  appraisalDomains: string[];
+  assessmentCriteria: string[];
+  scoringApproach: string;
+  verificationStatus: 'planned' | 'verified_by_researcher';
+  methodologicalJustification: string;
+}
+
+export interface ProtocolSynthesisPlan {
+  qualitativeMethods: string[];
+  quantitativeMethods: string[];
+  metaAnalysisFeasibility: 'feasible' | 'conditional' | 'not_feasible';
+  feasibilityChecks: {
+    studyDesignCompatibility: string;
+    outcomeComparability: string;
+    effectSizeAvailability: string;
+    statisticalDataAvailability: string;
+    measurementConsistency: string;
+    heterogeneityExpectation: string;
+    expectedEligibleStudies: string;
+    varianceAvailability: string;
+  };
+  feasibilityRationale: string;
+  recommendedAlternatives: string[];
+  narrativeSummary: string;
+  approvedByResearcher: boolean;
+}
+
+export interface ProtocolPrismaChecklistItem {
+  id: string;
+  standard: 'PRISMA-2020' | 'PRISMA-S' | 'PRISMA-ScR';
+  itemNumber: string;
+  section: string;
+  requirement: string;
+  plannedProcedure: string;
+  status: 'complete' | 'partial' | 'missing';
+  warningNote: string;
+}
+
+export interface ProtocolValidationIssue {
+  issueId: string;
+  description: string;
+  affectedSection: string;
+  severity: 'high' | 'medium' | 'low';
+  explanation: string;
+  recommendedCorrection: string;
+  potentialImpact: string;
+  researcherDecision: 'pending' | 'accepted' | 'overridden' | 'deferred';
+  resolutionStatus: ProtocolValidationStatus;
+}
+
+export interface ProtocolAmendmentRecord {
+  id: string;
+  versionNumber: string;
+  modifiedSection: string;
+  previousContent: string;
+  revisedContent: string;
+  reason: string;
+  modifiedAt: string;
+  responsibleUser: string;
+  approvalStatus: 'pending_review' | 'approved';
+  affectedArticleCount?: number;
+}
+
+export interface ProtocolVersionSnapshot {
+  versionId: string;
+  versionNumber: string;
+  status: ProtocolStatus;
+  createdAt: string;
+  modifiedAt: string;
+  author: string;
+  frameworkType: ReviewFrameworkType;
+  changeSummary: string;
+  protocolData: Omit<SystematicReviewProtocol, 'versionHistory' | 'amendments'>;
+}
+
+export interface SystematicReviewProtocol {
+  id: string;
+  projectId: string;
+  versionNumber: string;
+  status: ProtocolStatus;
+  activeStep: number;
+  createdAt: string;
+  updatedAt: string;
+  author: string;
+  changeSummary: string;
+  lockedSections: string[];
+  topicAnalysis: ProtocolTopicAnalysis;
+  reviewMethodRecommendation: ProtocolReviewMethodRecommendation;
+  frameworkComponents: ProtocolFrameworkComponentItem[];
+  generalObjective: string;
+  specificObjectives: ProtocolObjectiveItem[];
+  rqMappings: ProtocolRqMapping[];
+  eligibilityMatrix: ProtocolEligibilityRow[];
+  standardizedExclusionReasons: string[];
+  databaseSearchStrategies: ProtocolDatabaseSearchStrategy[];
+  methodologySections: ProtocolMethodologySection[];
+  extractionPlan: ProtocolExtractionVariablePlan[];
+  appraisalPlan: ProtocolAppraisalPlanItem[];
+  synthesisPlan: ProtocolSynthesisPlan;
+  prismaChecklist: ProtocolPrismaChecklistItem[];
+  validationIssues: ProtocolValidationIssue[];
+  validationSummary: {
+    status: ProtocolValidationStatus;
+    consistencyRatio: number;
+    passedCount: number;
+    warningCount: number;
+    needsRevisionCount: number;
+    disclaimer: string;
+    assessedAt: string;
+  };
+  downstreamImpactWarning?: {
+    hasScreenedArticles: boolean;
+    screenedCount: number;
+    extractedCount: number;
+    message: string;
+    requiresResearcherReview: boolean;
+    affectedRecords?: Array<{
+      id: string;
+      title: string;
+      year?: number;
+      decision?: string;
+      reason: string;
+    }>;
+  };
+  activatedAt?: string;
+  activatedVersion?: string;
+  versionHistory: ProtocolVersionSnapshot[];
+  amendments: ProtocolAmendmentRecord[];
+}
+
+export interface ProtocolBuilderSavedState {
+  activeProtocol?: SystematicReviewProtocol | null;
+  lastValidatedAt?: string;
+  updatedAt?: string;
 }
 
 export interface PrismaNumbers {

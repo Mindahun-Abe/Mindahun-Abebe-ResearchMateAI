@@ -120,6 +120,15 @@ export const Navbar: React.FC<NavbarProps> = ({
       icon: Compass,
     },
     {
+      id: 'protocol_builder',
+      label: '16-Step Protocol',
+      icon: Sparkles,
+      badge: currentProject?.workbenchState?.protocolBuilder?.activeProtocol?.versionNumber
+        ? `v${currentProject.workbenchState.protocolBuilder.activeProtocol.versionNumber}`
+        : 'AI',
+      badgeColor: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
+    },
+    {
       id: 'library',
       label: 'Article Library',
       icon: BookOpen,
@@ -165,6 +174,15 @@ export const Navbar: React.FC<NavbarProps> = ({
       icon: TrendingUp,
       badge: includedCount > 0 ? `${includedCount}` : undefined,
       badgeColor: 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30',
+    },
+    {
+      id: 'quant_synthesis',
+      label: 'Quant / Meta-Analysis',
+      icon: TrendingUp,
+      badge: currentProject?.workbenchState?.quantSynthesis?.lastMetaAnalysis?.pooledAvailable
+        ? `k=${currentProject.workbenchState.quantSynthesis.lastMetaAnalysis.k}`
+        : 'Stats',
+      badgeColor: 'bg-teal-500/20 text-teal-300 border border-teal-500/30',
     },
     {
       id: 'briefing',

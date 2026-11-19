@@ -244,6 +244,45 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
         onRescanQueryQA={onRescanWithQueryQA}
         onDeleteQaEntry={onDeleteQaEntry}
       />
+      {project.workbenchState?.protocolBuilder?.activeProtocol && (() => {
+        const activeProto = project.workbenchState.protocolBuilder!.activeProtocol!;
+        return (
+          <div className="bg-indigo-950/35 border border-indigo-500/30 rounded-xl px-4 py-2.5 text-xs space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-bold text-[10px] whitespace-nowrap shrink-0">
+                  Active Protocol v{activeProto.versionNumber} ({activeProto.status})
+                </span>
+                <span className="text-slate-200 font-semibold">
+                  {activeProto.reviewMethodRecommendation.recommendedPrimaryFramework} Eligibility Guidance
+                </span>
+              </div>
+              <span className="text-[11px] text-slate-400 tabular-nums">
+                {activeProto.eligibilityMatrix.length} rules · {activeProto.standardizedExclusionReasons.length} standardized exclusion reasons
+              </span>
+            </div>
+            {activeProto.standardizedExclusionReasons.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[10px] text-slate-400 font-semibold">Quick-Select Exclusion Reason:</span>
+                {activeProto.standardizedExclusionReasons.slice(0, 6).map((reason) => (
+                  <button
+                    key={reason}
+                    type="button"
+                    onClick={() => setSelectedReason(reason)}
+                    className={`px-2 py-0.5 rounded text-[10px] border transition cursor-pointer ${
+                      selectedReason === reason
+                        ? 'bg-rose-500/20 text-rose-200 border-rose-500/40 font-semibold'
+                        : 'bg-slate-900 text-slate-300 border-slate-700 hover:border-slate-500'
+                    }`}
+                  >
+                    {reason}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {/* Top Navigation & Status Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2">

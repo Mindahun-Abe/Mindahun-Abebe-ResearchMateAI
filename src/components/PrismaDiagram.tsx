@@ -32,6 +32,7 @@ import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchCo
 interface PrismaDiagramProps {
   project: ReviewProject;
   onUpdateArticle?: (article: Article) => void;
+  onOpenSynthesis?: (mode: 'qualitative' | 'quantitative') => void;
   autoSaveStatus?: AutoSaveStatusInfo;
   onResetWorkbenchModule?: (params: {
     target: WorkbenchModuleId;
@@ -54,6 +55,7 @@ interface PrismaDiagramProps {
 export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
   project,
   onUpdateArticle,
+  onOpenSynthesis,
   autoSaveStatus,
   onResetWorkbenchModule,
   onDirectAddDataFiles,
@@ -476,6 +478,27 @@ Total included studies: n = ${liveCounts.includedCount}
         onRescanQueryQA={onRescanWithQueryQA}
         onDeleteQaEntry={onDeleteQaEntry}
       />
+      {project.workbenchState?.protocolBuilder?.activeProtocol && (() => {
+        const activeProto = project.workbenchState.protocolBuilder!.activeProtocol!;
+        const executedCount = (activeProto.databaseSearchStrategies || []).filter((s) => s.executedByResearcher).length;
+        return (
+          <div className="bg-indigo-950/60 border border-indigo-500/30 rounded-xl px-4 py-3 text-xs text-indigo-100 flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <span className="font-bold text-white">
+                Protocol v{activeProto.versionNumber} ({activeProto.reviewMethodRecommendation.reportingGuideline})
+              </span>
+              <span className="mx-2 text-indigo-300">·</span>
+              <span>
+                Planned Search Databases: {(activeProto.databaseSearchStrategies || []).length} ({executedCount} researcher-executed)
+              </span>
+              <span className="mx-2 text-indigo-300">·</span>
+              <span className="text-indigo-200">
+                PRISMA flow counts below strictly reflect actual screened library records (never inferred from protocol).
+              </span>
+            </div>
+          </div>
+        );
+      })()}
       {/* Top Banner */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
@@ -760,23 +783,37 @@ Total included studies: n = ${liveCounts.includedCount}
                 </div>
               </div>
 
-              <div className="bg-slate-950/80 p-3 rounded-lg border border-emerald-900/40">
+              <div
+                onClick={() => onOpenSynthesis?.('qualitative')}
+                className={`bg-slate-950/80 p-3 rounded-lg border border-emerald-900/40 ${
+                  onOpenSynthesis ? 'cursor-pointer hover:border-indigo-400/60 transition' : ''
+                }`}
+              >
                 <span className="text-slate-400 block text-[11px]">Qualitative Synthesis</span>
                 <span className="text-sm font-bold text-white font-mono">
                   n = {liveCounts.includedCount} Studies
                 </span>
                 <p className="text-[10px] text-slate-500 mt-0.5">
-                  Extracted into evidence tables &amp; critical appraisal matrix.
+                  Extracted into evidence tables &amp; thematic matrix.
                 </p>
               </div>
 
-              <div className="bg-slate-950/80 p-3 rounded-lg border border-emerald-900/40">
+              <div
+                onClick={() => onOpenSynthesis?.('quantitative')}
+                className={`bg-slate-950/80 p-3 rounded-lg border border-emerald-900/40 ${
+                  onOpenSynthesis ? 'cursor-pointer hover:border-teal-400/60 transition' : ''
+                }`}
+              >
                 <span className="text-slate-400 block text-[11px]">Quantitative Synthesis / Meta-Analysis</span>
                 <span className="text-sm font-bold text-white font-mono">
-                  n = {project.articles.filter((a) => a.includedInQuantitativeSynthesis).length} Studies
+                  n = {
+                    project.workbenchState?.quantSynthesis?.lastMetaAnalysis?.pooledAvailable
+                      ? project.workbenchState.quantSynthesis.lastMetaAnalysis.k
+                      : project.articles.filter((a) => a.includedInQuantitativeSynthesis).length
+                  } Studies
                 </span>
                 <p className="text-[10px] text-slate-500 mt-0.5">
-                  Comparable empirical metrics &amp; benchmarks.
+                  Comparable empirical metrics, forest/funnel plots &amp; FE/RE pooling.
                 </p>
               </div>
             </div>

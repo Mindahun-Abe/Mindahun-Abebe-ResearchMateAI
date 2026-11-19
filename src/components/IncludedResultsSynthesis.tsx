@@ -27,6 +27,7 @@ interface IncludedResultsSynthesisProps {
   articles: Article[];
   onNavigateToBriefing?: () => void;
   onNavigateToProposal?: () => void;
+  onNavigateToSynthesis?: (mode: 'qualitative' | 'quantitative') => void;
   onSelectArticle?: (articleId: string) => void;
   autoSaveStatus?: AutoSaveStatusInfo;
   onResetWorkbenchModule?: (params: {
@@ -93,6 +94,7 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
   articles,
   onNavigateToBriefing,
   onNavigateToProposal,
+  onNavigateToSynthesis,
   onSelectArticle,
   autoSaveStatus,
   onResetWorkbenchModule,
@@ -811,6 +813,26 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
+            {onNavigateToSynthesis && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onNavigateToSynthesis('qualitative')}
+                  className="px-3.5 py-2 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Qualitative Synthesis</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigateToSynthesis('quantitative')}
+                  className="px-3.5 py-2 bg-teal-600 hover:bg-teal-500 text-white text-xs font-bold rounded-xl shadow-md transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  <span>Quantitative Synthesis / Meta-Analysis</span>
+                </button>
+              </>
+            )}
             {onNavigateToBriefing && (
               <button
                 onClick={onNavigateToBriefing}
@@ -830,6 +852,31 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
             </button>
           </div>
         </div>
+
+        {project.workbenchState?.quantSynthesis?.lastMetaAnalysis?.pooledAvailable &&
+          project.workbenchState.quantSynthesis.lastMetaAnalysis.overall && (
+            <div className="bg-teal-950/50 border border-teal-700/50 rounded-2xl p-3.5 flex flex-wrap items-center justify-between gap-2 text-xs text-teal-100">
+              <span>
+                <b>Active Meta-Analysis ({project.workbenchState.quantSynthesis.lastMetaAnalysis.effectMeasure}):</b>{' '}
+                k = {project.workbenchState.quantSynthesis.lastMetaAnalysis.k} independent study clusters · Pooled ={' '}
+                <span className="font-mono font-bold">
+                  {project.workbenchState.quantSynthesis.lastMetaAnalysis.overall.displayPooledEffect.toFixed(3)}
+                </span>{' '}
+                [95% CI {project.workbenchState.quantSynthesis.lastMetaAnalysis.overall.displayCiLow.toFixed(2)},{' '}
+                {project.workbenchState.quantSynthesis.lastMetaAnalysis.overall.displayCiHigh.toFixed(2)}] · I² ={' '}
+                {project.workbenchState.quantSynthesis.lastMetaAnalysis.overall.heterogeneity.i2.toFixed(1)}%
+              </span>
+              {onNavigateToSynthesis && (
+                <button
+                  type="button"
+                  onClick={() => onNavigateToSynthesis('quantitative')}
+                  className="text-xs font-bold text-teal-300 hover:underline whitespace-nowrap"
+                >
+                  Open Plots &amp; Diagnostics →
+                </button>
+              )}
+            </div>
+          )}
 
         {/* Secondary Additional Direct SLR Exports for Included Studies */}
         <div className="pt-3 border-t border-slate-800/80 flex flex-col gap-2.5">

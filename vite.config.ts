@@ -5,10 +5,34 @@ import { VitePWA } from 'vite-plugin-pwa';
 import { fileURLToPath } from 'url';
 
 export default defineConfig(() => {
+  let isHmrDisabled = process.env.DISABLE_HMR === 'true';
+
   return {
     plugins: [
       react(),
       tailwindcss(),
+      {
+        name: 'vite-pwa-no-hmr-sw-fix',
+        apply: 'serve' as const,
+        enforce: 'pre' as const,
+        configResolved(config) {
+          isHmrDisabled = config.server?.hmr === false || process.env.DISABLE_HMR === 'true';
+        },
+        resolveId(id: string) {
+          if (isHmrDisabled && id === '/@vite-plugin-pwa/pwa-entry-point-loaded') {
+            return '\0/@vite-plugin-pwa/pwa-entry-point-loaded';
+          }
+        },
+        load(id: string) {
+          if (isHmrDisabled && id === '\0/@vite-plugin-pwa/pwa-entry-point-loaded') {
+            return `export default function registerDevSW() {
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/dev-sw.js?dev-sw', { scope: '/', type: 'classic' }).catch(() => {});
+  }
+}`;
+          }
+        },
+      },
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192x192.png', 'pwa-512x512.png'],
@@ -61,7 +85,7 @@ export default defineConfig(() => {
         },
         devOptions: {
           enabled: true,
-          type: 'module',
+          type: 'classic',
         },
       }),
     ],

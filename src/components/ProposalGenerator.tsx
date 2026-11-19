@@ -636,7 +636,21 @@ ${project.researchQuestions
   .map((rq) => `| **${rq.code}** | ${rq.question} | ${rq.mainEvidenceToCollect} |`)
   .join('\n')}`;
 
-  const section5 = isUav
+  const activeProto = project.workbenchState?.protocolBuilder?.activeProtocol;
+  const quantMa = project.workbenchState?.quantSynthesis?.lastMetaAnalysis;
+
+  const metaAnalysisNarrative =
+    quantMa && quantMa.pooledAvailable && quantMa.overall
+      ? `\n\n### Quantitative Meta-Analysis Summary (${quantMa.modelType === 'random' ? 'Random-Effects' : 'Fixed-Effect'} ${quantMa.estimator}, ${quantMa.effectMeasure})\nAcross k = ${quantMa.k} statistically compatible studies, the pooled ${quantMa.effectMeasure} was ${quantMa.overall.displayPooledEffect.toFixed(3)} (95% CI [${quantMa.overall.displayCiLow.toFixed(3)}, ${quantMa.overall.displayCiHigh.toFixed(3)}], p = ${quantMa.overall.pValue.toFixed(4)}). Between-study heterogeneity was I² = ${quantMa.overall.heterogeneity.i2.toFixed(1)}% (τ² = ${quantMa.overall.heterogeneity.tau2.toFixed(4)}, Cochran's Q = ${quantMa.overall.heterogeneity.qStat.toFixed(2)}, p = ${quantMa.overall.heterogeneity.qPvalue.toFixed(4)}).`
+      : quantMa && !quantMa.pooledAvailable && quantMa.reason
+      ? `\n\n### Quantitative Pooling Guardrail\nStatistical meta-analysis pooling was deferred (${quantMa.reason}), and findings are synthesized using structured descriptive and narrative synthesis.`
+      : '';
+
+  const activeProtoNote = activeProto
+    ? `\n\n### Registered Protocol Alignment\n- **Active Protocol:** v${activeProto.versionNumber} (${activeProto.status.toUpperCase()})\n- **Conduct & Reporting:** ${activeProto.reviewMethodRecommendation.methodologicalGuidance} · ${activeProto.reviewMethodRecommendation.reportingGuideline}\n- **Primary Framework:** ${activeProto.reviewMethodRecommendation.recommendedPrimaryFramework}`
+    : '';
+
+  const section5 = (isUav
     ? `Synthesizing the ${includedArticles.length} included empirical studies reveals significant methodological diversity across sensor configurations and analytical pipelines:
 
 Zhang et al. [1] demonstrated an edge-computing UAV system combining a 5-band MicaSense RedEdge-P with a FLIR Tau 2 thermal camera flown at 45 m AGL (GSD 2.8 cm/pixel). Crucially, their pipeline recorded an end-to-end turnaround latency of 18.4 ± 2.1 minutes using an onboard Nvidia Jetson Xavier AGX, showing that near-real-time field mapping is achievable when lightweight shadow-masking and radiometric calibration are executed on the edge.
@@ -648,15 +662,15 @@ Nielsen et al. [7] tackled the critical problem of spatial leakage. When image t
 
 Taye et al. [1] evaluated 380 GPS-inventoried gully heads across the Gumara catchment (1,394 km²), Upper Blue Nile Basin, Ethiopia. Their hybrid XGBoost and 1D-CNN ensemble delivered an AUC-ROC of 0.951, substantially outperforming logistic regression (0.835) and standalone Random Forest (0.924). Topographic Wetness Index (TWI), stream distance, and Vertisol lithology were identified as primary drivers in the Ethiopian highlands.
 
-Global meta-analyses [2] confirmed that gradient-boosted trees and deep neural ensembles consistently outperform bivariate statistical models across 142 global catchments (mean AUC improvement of +0.11), with DEM resolution (12.5 m ALOS PALSAR vs 30 m SRTM) representing the largest contributor to cross-study variance.`;
+Global meta-analyses [2] confirmed that gradient-boosted trees and deep neural ensembles consistently outperform bivariate statistical models across 142 global catchments (mean AUC improvement of +0.11), with DEM resolution (12.5 m ALOS PALSAR vs 30 m SRTM) representing the largest contributor to cross-study variance.`) + metaAnalysisNarrative;
 
   const section6 = `### Protocol and Reporting Guideline
-This review follows the PRISMA 2020 (Preferred Reporting Items for Systematic Reviews and Meta-Analyses) statement. Scoping and protocol boundaries were structured using the PICOC framework (Booth et al., 2016):
+This review follows the ${activeProto?.reviewMethodRecommendation.reportingGuideline || 'PRISMA 2020 (Preferred Reporting Items for Systematic Reviews and Meta-Analyses)'} statement. Scoping and protocol boundaries were structured using the ${project.frameworkType || 'PICOC'} framework:
 - **Population (P):** ${project.picoc.population}
 - **Intervention (I):** ${project.picoc.intervention}
 - **Comparison (C):** ${project.picoc.comparison}
 - **Outcome (O):** ${project.picoc.outcome}
-- **Context (C):** ${project.picoc.context}
+- **Context (C):** ${project.picoc.context}${activeProtoNote}
 
 ### Information Sources and Search Strategy
 Comprehensive electronic searches were conducted across Scopus, Web of Science, IEEE Xplore, ScienceDirect, and Google Scholar using the predefined Boolean query:
@@ -696,7 +710,7 @@ All included studies were evaluated using a 13-point critical appraisal workshee
 
   return {
     title: project.title,
-    executiveSummary: `This systematic review synthesizes ${includedArticles.length} peer-reviewed empirical studies published between ${project.publicationYears}. The review addresses research questions RQ1 through RQ7 within the PICOC scoping framework (Booth et al., 2016), evaluating platform specifications, sensor fusion, spatial resolution, and operational readiness.`,
+    executiveSummary: `This systematic review synthesizes ${includedArticles.length} peer-reviewed empirical studies published between ${project.publicationYears}. The review addresses research questions RQ1 through RQ7 within the ${project.frameworkType || 'PICOC'} scoping framework${activeProto ? ` (Protocol v${activeProto.versionNumber}, ${activeProto.status})` : ''}, evaluating platform specifications, sensor fusion, spatial resolution, and operational readiness.${quantMa && quantMa.pooledAvailable && quantMa.overall ? ` Pooled ${quantMa.effectMeasure} across k = ${quantMa.k} eligible studies: ${quantMa.overall.displayPooledEffect.toFixed(3)} (95% CI [${quantMa.overall.displayCiLow.toFixed(3)}, ${quantMa.overall.displayCiHigh.toFixed(3)}], I² = ${quantMa.overall.heterogeneity.i2.toFixed(1)}%).` : ''}`,
     keyTakeaways: [
       'Spatial resolution below 5 cm GSD is essential for isolating canopy micro-dynamics from background soil.',
       'Operational turnaround latency remains under-reported: edge-computing pipelines achieve 11–18 min delivery, whereas conventional photogrammetry requires 3–24 hours.',

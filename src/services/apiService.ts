@@ -8,6 +8,16 @@ import {
   WorkbenchModuleId,
   WorkbenchState,
   ModuleQaRescanRecord,
+  QuantAnalysisResponse,
+  QuantEffectMeasure,
+  QuantMetaConfig,
+  QuantStudyExtractionRecord,
+  LiteratureReviewTypeId,
+  ReviewFrameworkType,
+  SystematicReviewProtocol,
+  ProtocolValidationIssue,
+  ProtocolAmendmentRecord,
+  ProtocolVersionSnapshot,
 } from '../types';
 import { getActiveFrameworkFieldEntries, getFrameworkDefinition } from '../utils/protocolFrameworks';
 
@@ -1155,6 +1165,404 @@ export const apiService = {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err?.error || `Failed to rescan corpus with Query Q&A (${res.status})`);
+    }
+    return res.json();
+  },
+
+  // -------------------------------------------------------------
+  // Quantitative Synthesis & Statistical Meta-Analysis API
+  // -------------------------------------------------------------
+  async loadQuantSynthesisState(projectId: string): Promise<{
+    success: boolean;
+    projectId: string;
+    softwareVersion: string;
+    records: QuantStudyExtractionRecord[];
+    runs: any[];
+    auditLog: any[];
+    migrations: any[];
+  }> {
+    const res = await fetch(`/api/quant-synthesis/${encodeURIComponent(projectId)}/state`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to load quantitative synthesis state (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async runQuantSynthesisAnalysis(params: {
+    projectId: string;
+    project: ReviewProject;
+    articles?: Article[];
+    config: QuantMetaConfig;
+    records?: Partial<QuantStudyExtractionRecord>[];
+    actor?: string;
+  }): Promise<QuantAnalysisResponse> {
+    const res = await fetch(`/api/quant-synthesis/${encodeURIComponent(params.projectId)}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: {
+          id: params.project.id,
+          title: params.project.title,
+          reviewType: params.project.reviewType,
+          frameworkType: params.project.frameworkType,
+          researchQuestions: params.project.researchQuestions,
+          inclusionCriteria: params.project.inclusionCriteria,
+          standardExclusionReasons: params.project.standardExclusionReasons,
+        },
+        articles: params.articles ?? params.project.articles,
+        config: params.config,
+        records: params.records || [],
+        actor: params.actor || 'researcher',
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Quantitative synthesis failed (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async saveQuantStudyRecord(
+    projectId: string,
+    record: Partial<QuantStudyExtractionRecord>,
+    actor = 'researcher'
+  ): Promise<{ success: boolean; records: QuantStudyExtractionRecord[] }> {
+    const res = await fetch(`/api/quant-synthesis/${encodeURIComponent(projectId)}/records`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ record, actor }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to save study record (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async importQuantDataset(
+    projectId: string,
+    records: Partial<QuantStudyExtractionRecord>[],
+    actor = 'researcher'
+  ): Promise<{ success: boolean; importedCount: number; records: QuantStudyExtractionRecord[] }> {
+    const res = await fetch(`/api/quant-synthesis/${encodeURIComponent(projectId)}/import-dataset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ records, actor }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to import quantitative dataset (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async fetchQuantAuditTrail(projectId: string): Promise<{
+    success: boolean;
+    projectId: string;
+    runs: any[];
+    auditLog: any[];
+    migrations: any[];
+  }> {
+    const res = await fetch(`/api/quant-synthesis/${encodeURIComponent(projectId)}/audit`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to load quantitative audit trail (${res.status})`);
+    }
+    return res.json();
+  },
+
+  parseQuantDatasetFile(
+    rawText: string,
+    projectId: string,
+    defaultMeasure: QuantEffectMeasure = 'SMD'
+  ): Partial<QuantStudyExtractionRecord>[] {
+    const trimmed = (rawText || '').trim();
+    if (!trimmed) return [];
+
+    const toNum = (val: any): number | null => {
+      if (val === undefined || val === null || val === '') return null;
+      const n = Number(String(val).trim());
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const normalizeRow = (row: Record<string, any>, idx: number): Partial<QuantStudyExtractionRecord> => {
+      const getField = (...keys: string[]) => {
+        for (const k of keys) {
+          const found = Object.keys(row).find((rk) => rk.toLowerCase().trim() === k.toLowerCase());
+          if (found !== undefined && row[found] !== '' && row[found] !== undefined) return row[found];
+        }
+        return undefined;
+      };
+      const measureRaw = String(getField('effectMeasure', 'effect_measure', 'measure') || defaultMeasure).toUpperCase();
+      const effectMeasure = (['MD', 'SMD', 'OR', 'RR', 'COR', 'PROP'].includes(measureRaw)
+        ? measureRaw
+        : defaultMeasure) as QuantEffectMeasure;
+      const articleId = String(getField('articleId', 'article_id', 'studyId', 'study_id', 'id') || `ext-row-${idx + 1}`);
+      const studyLabel = String(getField('studyLabel', 'study_label', 'study', 'author', 'title') || `Imported Study ${idx + 1}`);
+      const originalData: any = {
+        mean1: toNum(getField('mean1', 'm1')),
+        sd1: toNum(getField('sd1')),
+        n1: toNum(getField('n1')),
+        mean2: toNum(getField('mean2', 'm2')),
+        sd2: toNum(getField('sd2')),
+        n2: toNum(getField('n2')),
+        events1: toNum(getField('events1', 'e1')),
+        total1: toNum(getField('total1', 't1')),
+        events2: toNum(getField('events2', 'e2')),
+        total2: toNum(getField('total2', 't2')),
+        r: toNum(getField('r', 'cor', 'correlation')),
+        n: toNum(getField('n', 'sampleSize', 'sample_size')),
+        events: toNum(getField('events', 'k')),
+        total: toNum(getField('total')),
+        effectSize: toNum(getField('effectSize', 'effect_size', 'yi', 'es')),
+        se: toNum(getField('se', 'std_err', 'standard_error')),
+        variance: toNum(getField('variance', 'vi')),
+        ciLow: toNum(getField('ciLow', 'ci_low', 'ci_lower')),
+        ciHigh: toNum(getField('ciHigh', 'ci_high', 'ci_upper')),
+      };
+      Object.keys(originalData).forEach((k) => {
+        if (originalData[k] === null) delete originalData[k];
+      });
+
+      const hasNumeric = Object.keys(originalData).length > 0;
+      return {
+        id: String(getField('recordId', 'record_id') || `qse-${projectId}-imp-${idx + 1}`),
+        projectId,
+        articleId,
+        studyLabel,
+        title: String(getField('title') || studyLabel),
+        year: toNum(getField('year', 'moderatorYear')) ?? undefined,
+        studyClusterId: String(getField('studyClusterId', 'study_cluster_id', 'cluster') || articleId),
+        outcomeType: String(getField('outcomeType', 'outcome_type') || 'primary_outcome'),
+        outcomeLabel: String(getField('outcomeLabel', 'outcome_label', 'outcome') || 'Primary Outcome'),
+        effectMeasure,
+        subgroup: String(getField('subgroup', 'group', 'category') || 'Imported'),
+        moderatorYear: toNum(getField('moderatorYear', 'year')),
+        moderatorQuality: toNum(getField('moderatorQuality', 'quality')),
+        moderatorSampleSize: toNum(getField('moderatorSampleSize', 'n', 'sampleSize')),
+        studyDesign: String(getField('studyDesign', 'study_design', 'design') || 'Empirical Study'),
+        units: String(getField('units', 'unit') || ''),
+        originalData,
+        extractionStatus: hasNumeric ? 'extracted' : 'awaiting_numerical_entry',
+        verifiedBy: String(getField('verifiedBy', 'verified_by') || ''),
+        pdfPageNumbers: String(getField('pdfPageNumbers', 'pages', 'page') || ''),
+        supportingEvidence: String(getField('supportingEvidence', 'evidence', 'notes') || 'Imported quantitative extraction row'),
+        eligibilityOverride: 'auto',
+      };
+    };
+
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+      const parsed = JSON.parse(trimmed);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed.records) ? parsed.records : [parsed];
+      return arr.map((r: any, idx: number) => normalizeRow(r, idx));
+    }
+
+    const lines = trimmed.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length < 2) return [];
+    const delimiter = lines[0].includes('\t') ? '\t' : ',';
+    const splitCsvLine = (line: string): string[] => {
+      const out: string[] = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (ch === delimiter && !inQuotes) {
+          out.push(cur.trim());
+          cur = '';
+        } else {
+          cur += ch;
+        }
+      }
+      out.push(cur.trim());
+      return out;
+    };
+
+    const headers = splitCsvLine(lines[0]);
+    return lines.slice(1).map((line, idx) => {
+      const cols = splitCsvLine(line);
+      const rowObj: Record<string, string> = {};
+      headers.forEach((h, i) => {
+        rowObj[h] = cols[i] ?? '';
+      });
+      return normalizeRow(rowObj, idx);
+    });
+  },
+
+  // -------------------------------------------------------------
+  // Intelligent Systematic Review Protocol Builder API
+  // -------------------------------------------------------------
+  async loadProtocolState(projectId: string): Promise<{
+    success: boolean;
+    projectId: string;
+    protocol: SystematicReviewProtocol | null;
+    versions: ProtocolVersionSnapshot[];
+    amendments: ProtocolAmendmentRecord[];
+    auditLog: any[];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(projectId)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to load protocol state (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async generateProtocolStep(params: {
+    projectId: string;
+    topicInput?: string;
+    targetStep?: number | 'all';
+    customInstruction?: string;
+    preferredReviewType?: LiteratureReviewTypeId;
+    preferredFramework?: ReviewFrameworkType;
+    protocol?: SystematicReviewProtocol | null;
+    project?: ReviewProject;
+    articles?: Article[];
+    actor?: string;
+  }): Promise<{
+    success: boolean;
+    engine: string;
+    protocol: SystematicReviewProtocol;
+    versions: ProtocolVersionSnapshot[];
+    amendments: ProtocolAmendmentRecord[];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(params.projectId)}/generate-step`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to generate protocol step (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async validateProtocol(
+    projectId: string,
+    protocol: SystematicReviewProtocol,
+    articles?: Article[]
+  ): Promise<{
+    success: boolean;
+    protocol: SystematicReviewProtocol;
+    validationIssues: ProtocolValidationIssue[];
+    validationSummary: SystematicReviewProtocol['validationSummary'];
+    downstreamImpactWarning: SystematicReviewProtocol['downstreamImpactWarning'];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(projectId)}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocol, articles }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to validate protocol (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async saveProtocol(
+    projectId: string,
+    protocol: SystematicReviewProtocol,
+    articles?: Article[],
+    actor = 'Researcher',
+    amendmentInfo?: {
+      modifiedSection: string;
+      previousContent: string;
+      revisedContent: string;
+      reason: string;
+    } | null
+  ): Promise<{
+    success: boolean;
+    protocol: SystematicReviewProtocol;
+    versions: ProtocolVersionSnapshot[];
+    amendments: ProtocolAmendmentRecord[];
+    auditLog: any[];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(projectId)}/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocol, articles, actor, amendmentInfo }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to save protocol (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async approveProtocol(
+    projectId: string,
+    protocol: SystematicReviewProtocol,
+    articles?: Article[],
+    actor = 'Researcher',
+    changeSummary = 'Researcher approved and locked protocol version'
+  ): Promise<{
+    success: boolean;
+    protocol: SystematicReviewProtocol;
+    versions: ProtocolVersionSnapshot[];
+    amendments: ProtocolAmendmentRecord[];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(projectId)}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocol, articles, actor, changeSummary }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to approve protocol (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async restoreProtocolVersion(
+    projectId: string,
+    versionId: string,
+    actor = 'Researcher'
+  ): Promise<{
+    success: boolean;
+    protocol: SystematicReviewProtocol;
+    versions: ProtocolVersionSnapshot[];
+    amendments: ProtocolAmendmentRecord[];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(projectId)}/restore-version`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ versionId, actor }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to restore protocol version (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async activateProtocolInProject(
+    projectId: string,
+    protocol: SystematicReviewProtocol,
+    actor = 'Researcher'
+  ): Promise<{
+    success: boolean;
+    project: ReviewProject;
+    protocol: SystematicReviewProtocol;
+    versions: ProtocolVersionSnapshot[];
+    amendments: ProtocolAmendmentRecord[];
+  }> {
+    const res = await fetch(`/api/protocols/${encodeURIComponent(projectId)}/activate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ protocol, actor }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to activate protocol (${res.status})`);
     }
     return res.json();
   },

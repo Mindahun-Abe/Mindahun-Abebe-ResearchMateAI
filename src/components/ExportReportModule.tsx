@@ -430,6 +430,35 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
       md += `- **Studies Included in Quantitative Synthesis / Meta-Analysis:** n = ${includedArticles.filter((a) => a.includedInQuantitativeSynthesis).length}\n\n`;
     }
 
+    const activeProto = project.workbenchState?.protocolBuilder?.activeProtocol;
+    if (activeProto) {
+      md += `## Active Systematic Review Protocol\n\n`;
+      md += `- **Version & Status:** v${activeProto.versionNumber} (${activeProto.status.toUpperCase()})\n`;
+      md += `- **Review Type & Conduct Methodology:** ${activeProto.reviewMethodRecommendation.recommendedReviewType} · ${activeProto.reviewMethodRecommendation.methodologicalGuidance}\n`;
+      md += `- **Reporting Guideline & Framework:** ${activeProto.reviewMethodRecommendation.reportingGuideline} · ${activeProto.reviewMethodRecommendation.recommendedPrimaryFramework}\n`;
+      if (activeProto.activatedAt) {
+        md += `- **Activated In Project:** ${activeProto.activatedAt}\n`;
+      }
+      md += `\n`;
+    }
+
+    const quantState = project.workbenchState?.quantSynthesis;
+    const quantMa = quantState?.lastMetaAnalysis;
+    if (quantMa) {
+      md += `## Quantitative Synthesis & Meta-Analysis Summary\n\n`;
+      if (quantMa.pooledAvailable && quantMa.overall) {
+        md += `- **Model:** ${quantMa.modelType === 'random' ? 'Random-Effects' : 'Fixed-Effect'} (${quantMa.estimator}) · **Effect Measure:** ${quantMa.effectMeasure} · **Pooled Studies:** k = ${quantMa.k}\n`;
+        md += `- **Pooled Estimate:** ${quantMa.overall.displayPooledEffect.toFixed(3)} (95% CI [${quantMa.overall.displayCiLow.toFixed(3)}, ${quantMa.overall.displayCiHigh.toFixed(3)}], p = ${quantMa.overall.pValue.toFixed(4)})\n`;
+        md += `- **Heterogeneity:** Cochran's Q = ${quantMa.overall.heterogeneity.qStat.toFixed(2)} (p = ${quantMa.overall.heterogeneity.qPvalue.toFixed(4)}), I² = ${quantMa.overall.heterogeneity.i2.toFixed(1)}%, τ² = ${quantMa.overall.heterogeneity.tau2.toFixed(4)}\n`;
+        if (quantMa.overall.predictionInterval) {
+          md += `- **95% Prediction Interval:** [${quantMa.overall.predictionInterval.displayLow.toFixed(3)}, ${quantMa.overall.predictionInterval.displayHigh.toFixed(3)}]\n`;
+        }
+      } else {
+        md += `- **Statistical Pooling Status:** ${quantMa.reason || 'Studies not pooled under quantitative compatibility guardrails.'}\n`;
+      }
+      md += `\n`;
+    }
+
     if (includeExtractionTable && includedArticles.length > 0) {
       md += `## Standardized Data Extraction Matrix\n\n`;
       md += `| ID | Authors & Year | Type (Original/Review) | Database | Platform & Sensor | GSD / Scale | Algorithm | Turnaround Latency | Code / Tools & Metrics | Protocol Alignment | Appraisal |\n`;
@@ -706,6 +735,46 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
                (a) => a.includedInQuantitativeSynthesis
              ).length}</strong></td></tr>
            </table>`
+        : ''
+    }
+
+    ${
+      project.workbenchState?.protocolBuilder?.activeProtocol
+        ? (() => {
+            const p = project.workbenchState!.protocolBuilder!.activeProtocol!;
+            return `<h2>Active Systematic Review Protocol</h2>
+            <table>
+              <tr><th>Protocol Parameter</th><th>Registered Specification</th></tr>
+              <tr><td>Version &amp; Status</td><td><strong>v${p.versionNumber}</strong> (${p.status.toUpperCase()})</td></tr>
+              <tr><td>Conduct Methodology</td><td>${p.reviewMethodRecommendation.methodologicalGuidance}</td></tr>
+              <tr><td>Reporting Guideline &amp; Framework</td><td>${p.reviewMethodRecommendation.reportingGuideline} · ${p.reviewMethodRecommendation.recommendedPrimaryFramework}</td></tr>
+              ${p.activatedAt ? `<tr><td>Activated At</td><td>${p.activatedAt}</td></tr>` : ''}
+            </table>`;
+          })()
+        : ''
+    }
+
+    ${
+      project.workbenchState?.quantSynthesis?.lastMetaAnalysis
+        ? (() => {
+            const ma = project.workbenchState!.quantSynthesis!.lastMetaAnalysis!;
+            if (ma.pooledAvailable && ma.overall) {
+              return `<h2>Quantitative Synthesis &amp; Meta-Analysis Summary</h2>
+              <table>
+                <tr><th>Parameter</th><th>Computed Value</th></tr>
+                <tr><td>Model &amp; Effect Measure</td><td><strong>${ma.modelType === 'random' ? 'Random-Effects' : 'Fixed-Effect'} (${ma.estimator})</strong> · ${ma.effectMeasure} (k = ${ma.k})</td></tr>
+                <tr><td>Pooled Estimate (95% CI)</td><td><strong>${ma.overall.displayPooledEffect.toFixed(3)}</strong> [${ma.overall.displayCiLow.toFixed(3)}, ${ma.overall.displayCiHigh.toFixed(3)}] (p = ${ma.overall.pValue.toFixed(4)})</td></tr>
+                <tr><td>Heterogeneity (Q, I², τ²)</td><td>Q = ${ma.overall.heterogeneity.qStat.toFixed(2)} (p = ${ma.overall.heterogeneity.qPvalue.toFixed(4)}), I² = ${ma.overall.heterogeneity.i2.toFixed(1)}%, τ² = ${ma.overall.heterogeneity.tau2.toFixed(4)}</td></tr>
+                ${
+                  ma.overall.predictionInterval
+                    ? `<tr><td>95% Prediction Interval</td><td>[${ma.overall.predictionInterval.displayLow.toFixed(3)}, ${ma.overall.predictionInterval.displayHigh.toFixed(3)}]</td></tr>`
+                    : ''
+                }
+              </table>`;
+            }
+            return `<h2>Quantitative Synthesis &amp; Meta-Analysis Summary</h2>
+            <p><strong>Pooling Status:</strong> ${ma.reason || 'Statistical pooling deferred under compatibility guardrails.'}</p>`;
+          })()
         : ''
     }
 

@@ -32,6 +32,7 @@ interface EvidenceExtractionMatrixProps {
   onUpdateArticle: (article: Article) => void;
   onBatchUpdateArticles?: (updatedArticles: Article[]) => void;
   onNavigateToScreening?: (articleId: string) => void;
+  onOpenQuantSynthesis?: () => void;
   autoSaveStatus?: AutoSaveStatusInfo;
   onResetWorkbenchModule?: (params: {
     target: WorkbenchModuleId;
@@ -57,6 +58,7 @@ export const EvidenceExtractionMatrix: React.FC<EvidenceExtractionMatrixProps> =
   onUpdateArticle,
   onBatchUpdateArticles,
   onNavigateToScreening,
+  onOpenQuantSynthesis,
   autoSaveStatus,
   onResetWorkbenchModule,
   onDirectAddDataFiles,
@@ -375,6 +377,16 @@ export const EvidenceExtractionMatrix: React.FC<EvidenceExtractionMatrixProps> =
               <Download className="w-4 h-4" />
               <span>Export Matrix CSV</span>
             </button>
+            {onOpenQuantSynthesis && (
+              <button
+                type="button"
+                onClick={onOpenQuantSynthesis}
+                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl shadow-md transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>Quantitative Synthesis / Meta-Analysis</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -417,6 +429,16 @@ export const EvidenceExtractionMatrix: React.FC<EvidenceExtractionMatrixProps> =
               </span>
             ))}
           </div>
+          {project.workbenchState?.protocolBuilder?.activeProtocol?.extractionPlan &&
+            project.workbenchState.protocolBuilder.activeProtocol.extractionPlan.length > 0 && (
+              <div className="pt-1.5 border-t border-slate-800/80 text-[11px] text-teal-300">
+                <b>Active Protocol v{project.workbenchState.protocolBuilder.activeProtocol.versionNumber} Planned Variables:</b>{' '}
+                {project.workbenchState.protocolBuilder.activeProtocol.extractionPlan
+                  .slice(0, 8)
+                  .map((v) => `${v.variableName} (${v.rqCode})`)
+                  .join(' · ')}
+              </div>
+            )}
         </div>
       </div>
 

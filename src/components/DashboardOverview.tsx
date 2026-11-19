@@ -41,6 +41,7 @@ interface DashboardOverviewProps {
   onOpenManualPaperModal?: () => void;
   onOpenResearchSuite?: () => void;
   onOpenFastBatchScreener?: () => void;
+  onOpenQuantSynthesis?: (mode: 'qualitative' | 'quantitative') => void;
   onBackupProject?: () => void;
   onRestoreProject?: (restored: ReviewProject) => void;
   autoSaveStatus?: AutoSaveStatusInfo;
@@ -71,6 +72,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   onOpenManualPaperModal,
   onOpenResearchSuite,
   onOpenFastBatchScreener,
+  onOpenQuantSynthesis,
   onBackupProject,
   onRestoreProject,
   autoSaveStatus,
@@ -110,6 +112,16 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
       icon: Compass,
       color: 'from-blue-600 to-indigo-600',
       badge: `${project.researchQuestions?.length || 6} RQs`,
+    },
+    {
+      id: 'protocol_builder',
+      label: '16-Step Intelligent Protocol Builder',
+      desc: 'Topic analysis, framework matrix, multi-DB syntax check, PRISMA-S & versioning',
+      icon: BookOpen,
+      color: 'from-indigo-600 to-violet-600',
+      badge: project.workbenchState?.protocolBuilder?.activeProtocol?.versionNumber
+        ? `v${project.workbenchState.protocolBuilder.activeProtocol.versionNumber}`
+        : '16 Steps',
     },
     {
       id: 'duplicates',
@@ -166,6 +178,16 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
       icon: TrendingUp,
       color: 'from-amber-500 to-emerald-500',
       badge: `${includedCount} Studies`,
+    },
+    {
+      id: 'quant_synthesis',
+      label: 'Quantitative Synthesis & Meta-Analysis',
+      desc: 'Descriptive statistics, FE/RE models, heterogeneity, 8 SVG plots & SQLite audit',
+      icon: Database,
+      color: 'from-teal-600 to-cyan-600',
+      badge: project.workbenchState?.quantSynthesis?.lastMetaAnalysis?.pooledAvailable
+        ? `k=${project.workbenchState.quantSynthesis.lastMetaAnalysis.k} Pooled`
+        : 'FE / RE Engine',
     },
     {
       id: 'briefing',
@@ -286,6 +308,33 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             >
               <Zap className="w-4 h-4" />
               <span>Fast Batch Screener</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onNavigateTab('protocol_builder')}
+              className="px-3.5 py-2.5 bg-indigo-700 hover:bg-indigo-600 text-white text-xs font-bold rounded-xl shadow-md transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <BookOpen className="w-4 h-4" />
+              <span>16-Step Protocol Builder</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => (onOpenQuantSynthesis ? onOpenQuantSynthesis('qualitative') : onNavigateTab('quant_synthesis'))}
+              className="px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-indigo-300 text-xs font-semibold rounded-xl border border-indigo-500/40 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <Layers className="w-4 h-4" />
+              <span>Qualitative Synthesis</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => (onOpenQuantSynthesis ? onOpenQuantSynthesis('quantitative') : onNavigateTab('quant_synthesis'))}
+              className="px-3.5 py-2.5 bg-teal-700 hover:bg-teal-600 text-white text-xs font-bold rounded-xl shadow-md transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <TrendingUp className="w-4 h-4" />
+              <span>Quantitative Synthesis / Meta-Analysis</span>
             </button>
 
             {onBackupProject && (

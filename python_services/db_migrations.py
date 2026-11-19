@@ -105,6 +105,76 @@ MIGRATIONS = [
         SELECT 1;
         """,
     ),
+    (
+        3,
+        "intelligent_protocol_builder_schema",
+        """
+        CREATE TABLE IF NOT EXISTS review_protocols (
+            protocol_id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            version_number TEXT NOT NULL DEFAULT '1.0',
+            status TEXT NOT NULL DEFAULT 'draft',
+            framework_type TEXT NOT NULL DEFAULT 'PICOC',
+            author TEXT NOT NULL DEFAULT 'Researcher',
+            change_summary TEXT NOT NULL DEFAULT '',
+            activated_at TEXT NOT NULL DEFAULT '',
+            activated_version TEXT NOT NULL DEFAULT '',
+            protocol_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_rp_project
+            ON review_protocols(project_id, updated_at);
+
+        CREATE TABLE IF NOT EXISTS protocol_versions (
+            version_id TEXT PRIMARY KEY,
+            protocol_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            version_number TEXT NOT NULL,
+            status TEXT NOT NULL,
+            framework_type TEXT NOT NULL,
+            author TEXT NOT NULL DEFAULT 'Researcher',
+            change_summary TEXT NOT NULL DEFAULT '',
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pv_project
+            ON protocol_versions(project_id, created_at);
+
+        CREATE TABLE IF NOT EXISTS protocol_amendments (
+            id TEXT PRIMARY KEY,
+            protocol_id TEXT NOT NULL,
+            project_id TEXT NOT NULL,
+            version_number TEXT NOT NULL,
+            modified_section TEXT NOT NULL,
+            previous_content TEXT NOT NULL DEFAULT '',
+            revised_content TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            responsible_user TEXT NOT NULL DEFAULT 'Researcher',
+            approval_status TEXT NOT NULL DEFAULT 'pending_review',
+            affected_article_count INTEGER NOT NULL DEFAULT 0,
+            modified_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pa_project
+            ON protocol_amendments(project_id, modified_at);
+
+        CREATE TABLE IF NOT EXISTS protocol_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL,
+            protocol_id TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            actor TEXT NOT NULL DEFAULT 'researcher',
+            details_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pal_project
+            ON protocol_audit_log(project_id, created_at);
+        """,
+    ),
 ]
 
 

@@ -1,0 +1,830 @@
+# RESEARCHMATE AI
+# ADDITIONAL MASTER DEVELOPMENT SPECIFICATION
+## Intelligent Systematic Review Protocol Builder – AI-Assisted Protocol Design, Validation, Management and Workflow Integration
+
+### 1. DEVELOPMENT OBJECTIVE
+
+Develop and integrate a comprehensive, intelligent, AI-assisted Systematic Review Protocol Builder into the existing ResearchMate AI platform.
+
+The module must transform an initial research topic into a complete, scientifically structured, transparent, reproducible, and editable systematic review protocol.
+
+It must serve as the foundational planning and methodological specification component of the systematic review workflow.
+
+The approved protocol must guide and connect subsequent research activities, including literature searching, reference management, duplicate detection, article screening, eligibility assessment, data extraction, quality appraisal, evidence synthesis, meta-analysis, and PRISMA reporting.
+
+The module must integrate with the existing ResearchMate AI architecture without disrupting existing databases, research projects, application modules, configurations, or established workflows.
+
+**Core development principle:** Generate intelligently, validate scientifically, obtain researcher approval, preserve protocol versions, and implement consistently throughout the research lifecycle.
+
+---
+
+### 2. INTELLIGENT RESEARCH TOPIC ANALYSIS
+
+Develop an AI-assisted research topic analysis engine.
+
+Allow researchers to enter an initial research topic, title, research problem, or preliminary research idea.
+
+The AI should identify and recommend:
+
+1. Proposed research title.
+2. Academic discipline.
+3. Research domain and subdomain.
+4. Research focus and scope.
+5. Theoretical and conceptual motivation.
+6. Research problem.
+7. Knowledge gaps and research justification.
+8. Geographic eligibility.
+9. Publication-year eligibility.
+10. Eligible study designs and publication types.
+11. Target population or research problem.
+12. Intervention, exposure, technology, or methodological focus.
+13. Comparison or baseline conditions.
+14. Outcomes and measurable indicators.
+15. Context, setting, and methodological constraints.
+
+Allow researchers to edit and approve every recommendation.
+
+Do not invent theoretical gaps or claim that a research gap has been established without supporting literature.
+
+Clearly distinguish preliminary AI-generated suggestions from evidence-supported research findings.
+
+---
+
+### 3. REVIEW TYPE AND METHODOLOGICAL FRAMEWORK RECOMMENDATION
+
+Develop an intelligent review-type recommendation engine.
+
+Evaluate the research objective, research questions, evidence type, disciplinary context, and intended synthesis before recommending a review methodology.
+
+Support appropriate review types, including:
+
+- Systematic literature review.
+- Systematic mapping review.
+- Scoping review.
+- Meta-analysis.
+- Qualitative systematic review.
+- Mixed-methods systematic review.
+- Integrative review.
+- Rapid review.
+- Umbrella review.
+- Bibliometric review.
+- Systematic review with bibliometric analysis.
+
+Recommend an appropriate methodological framework based on the actual research purpose.
+
+Support relevant frameworks and guidance, including:
+
+- PRISMA 2020.
+- PRISMA-S.
+- PRISMA-ScR.
+- Cochrane Handbook.
+- JBI methodology.
+- Campbell Collaboration guidance.
+- Other discipline-appropriate standards.
+
+**Important methodological distinction:** PRISMA is primarily a reporting guideline, whereas frameworks such as JBI and Cochrane provide methodological guidance. Quality appraisal instruments are separate tools. Do not treat these categories as interchangeable.
+
+Explain why a particular review type and framework are appropriate.
+
+Allow researchers to compare alternatives and approve the final selection.
+
+---
+
+### 4. RESEARCH FRAMEWORK GENERATION
+
+Implement automatic generation and validation of:
+
+- PICOC.
+- PICO.
+- PECO.
+- SPIDER.
+- SPICE.
+- PCC.
+
+For each selected framework, generate an editable component matrix.
+
+Each component should include:
+
+- Framework component.
+- Definition.
+- Proposed research-specific content.
+- Relevant keywords.
+- Synonyms.
+- Inclusion implications.
+- Exclusion implications.
+- Corresponding research questions.
+- Data extraction requirements.
+
+Allow researchers to select one primary framework and, when justified, additional complementary frameworks.
+
+Do not force all framework components into every review type.
+
+Detect incomplete, overlapping, ambiguous, or inconsistent components.
+
+Provide explanations and recommendations for correcting identified problems.
+
+---
+
+### 5. RESEARCH OBJECTIVES AND QUESTIONS
+
+Develop an intelligent objective and research-question generation engine.
+
+Generate:
+
+**A. General objective**
+
+A concise statement describing the overall purpose of the systematic review.
+
+**B. Specific objectives**
+
+Clearly defined objectives corresponding to the intended research outcomes.
+
+**C. Research questions**
+
+Generate focused, answerable, nonredundant research questions.
+
+Each question must be mapped to:
+
+- Relevant framework components.
+- Specific objectives.
+- Search concepts.
+- Eligibility requirements.
+- Required extraction variables.
+- Appropriate evidence type.
+- Proposed synthesis method.
+
+Implement automated consistency checks.
+
+Detect:
+
+- Objectives without corresponding research questions.
+- Questions that do not support the general objective.
+- Overlapping research questions.
+- Questions that cannot be answered using the proposed evidence.
+- Missing outcome definitions.
+- Questions requiring information not covered by the extraction framework.
+
+Provide suggestions without silently rewriting researcher-approved content.
+
+---
+
+### 6. ELIGIBILITY AND INCLUSION/EXCLUSION CRITERIA BUILDER
+
+Develop a standardized eligibility-rule generation engine.
+
+Generate an editable eligibility matrix covering:
+
+| Criterion | Inclusion requirements | Exclusion requirements | Guidance | Status |
+|---|---|---|---|---|
+| Research focus | Topic-relevant evidence | Outside research scope | Define topical boundaries | Pending |
+| Population/problem | Eligible target | Irrelevant target | Follow framework | Pending |
+| Intervention/exposure | Relevant intervention or exposure | Irrelevant intervention | Follow research questions | Pending |
+| Outcomes | Relevant outcomes | Unrelated outcomes | Define measurable indicators | Pending |
+| Geographic scope | Eligible locations | Outside specified scope | Define geographical boundaries | Pending |
+| Publication period | Approved years | Outside period | Record date restrictions | Pending |
+| Study design | Eligible designs | Ineligible designs | Specify study types | Pending |
+| Publication type | Eligible original studies | Excluded publication types | Distinguish original research and reviews | Pending |
+| Language | Approved languages | Unavailable languages | State limitations | Pending |
+| Full-text availability | Applicable access requirements | Unavailable full text, if exclusion is justified | Record reasons | Pending |
+
+The actual criteria must be generated from the research topic and approved methodology, not copied blindly from this example.
+
+Support flexible inclusion and exclusion rules.
+
+Generate standardized full-text exclusion reasons compatible with PRISMA reporting.
+
+Examples include:
+
+- Wrong research focus.
+- Ineligible population or study area.
+- Ineligible intervention or exposure.
+- Irrelevant outcome.
+- Ineligible study design.
+- Wrong publication type.
+- Outside publication period.
+- Duplicate publication.
+- Full text unavailable, where justified by the protocol.
+
+Preserve the specific exclusion reason for each excluded full-text report.
+
+---
+
+### 7. DATABASE-SPECIFIC SEARCH STRATEGY GENERATION
+
+Develop an intelligent multi-database search strategy builder.
+
+Support:
+
+- Scopus.
+- Web of Science.
+- PubMed.
+- ScienceDirect.
+- IEEE Xplore.
+- GeoRef.
+- Google Scholar.
+- Crossref.
+- Other supported bibliographic databases and scholarly sources.
+
+Generate database-specific search strings based on approved research questions and framework concepts.
+
+Support:
+
+- Boolean operators.
+- AND, OR, NOT.
+- Phrase searching.
+- Truncation.
+- Wildcards.
+- Field-specific searching.
+- Controlled vocabulary where applicable.
+- Synonym expansion.
+- Search filters.
+- Publication-year restrictions.
+- Language restrictions.
+
+For each database, store:
+
+1. Database name.
+2. Search platform.
+3. Exact search string.
+4. Search fields.
+5. Keywords and synonyms.
+6. Search filters.
+7. Publication-year restrictions.
+8. Language restrictions.
+9. Search execution date.
+10. Actual retrieval count, if executed.
+11. Search strategy version.
+12. Researcher verification status.
+
+Implement syntax validation specific to each database.
+
+Identify:
+
+- Missing synonyms.
+- Incorrect field codes.
+- Unsupported operators.
+- Unbalanced parentheses.
+- Overly restrictive combinations.
+- Excessively broad searches.
+- Unnecessary duplicated terms.
+- Potentially missing research concepts.
+
+Generate alternative search strategies for comparison.
+
+**Critical requirement:** Distinguish between generated search strategies and executed searches. Never fabricate database retrieval counts, search dates, or search results.
+
+If a database cannot be accessed automatically, provide the validated search string for manual execution and allow the researcher to record the actual results.
+
+---
+
+### 8. METHODOLOGY AND REVIEW WORKFLOW DEVELOPMENT
+
+Generate a complete methodology plan based on the approved research protocol.
+
+Support structured methodology sections:
+
+1. Review design and methodological approach.
+2. Protocol development.
+3. Reporting standards.
+4. Research framework.
+5. Literature search strategy.
+6. Information sources.
+7. Eligibility criteria.
+8. Study selection process.
+9. Duplicate detection.
+10. Title and abstract screening.
+11. Full-text screening.
+12. Data extraction.
+13. Quality appraisal.
+14. Qualitative synthesis.
+15. Quantitative synthesis.
+16. Statistical meta-analysis, where appropriate.
+17. PRISMA reporting.
+18. Limitations and methodological considerations.
+
+For every section, provide:
+
+- Proposed content.
+- Methodological justification.
+- Required researcher decisions.
+- Relevant supporting references, when verified.
+- Completion status.
+- Approval status.
+
+Allow section-by-section editing and approval.
+
+Do not fabricate methodological references or claim compliance with a standard that has not been verified.
+
+---
+
+### 9. RESEARCH QUESTION-TO-EXTRACTION MAPPING
+
+Implement an intelligent extraction planning engine.
+
+Automatically map each approved research question and specific objective to the data required to answer it.
+
+For each research question, generate:
+
+- Research question identifier.
+- Related objective.
+- Evidence requirements.
+- Required extraction variables.
+- Variable definitions.
+- Data type.
+- Measurement units, where applicable.
+- Expected evidence source.
+- Suggested extraction method.
+- Proposed synthesis approach.
+
+Detect missing extraction variables and questions without sufficient evidence requirements.
+
+Integrate the generated extraction framework with the existing Standardized Data Extraction Matrix.
+
+Ensure the approved extraction structure is available when researchers begin extracting included studies.
+
+Allow researchers to customize extraction fields without losing existing records.
+
+---
+
+### 10. QUALITY APPRAISAL FRAMEWORK GENERATION
+
+Develop an AI-assisted quality appraisal planning engine.
+
+Recommend appropriate appraisal instruments based on:
+
+- Research design.
+- Study type.
+- Disciplinary context.
+- Evidence characteristics.
+- Review objectives.
+
+Support appropriate instruments, including relevant JBI tools, CASP, MMAT, ROBINS-I, RoB 2, and other suitable tools.
+
+Do not apply one appraisal instrument indiscriminately to all study designs.
+
+Generate an appraisal planning matrix containing:
+
+- Study design.
+- Recommended appraisal instrument.
+- Appraisal domains.
+- Assessment criteria.
+- Scoring or judgment approach.
+- Researcher verification status.
+- Methodological justification.
+
+Distinguish between appraisal planning and completed study-level appraisal.
+
+The AI may assist with appraisal but must not automatically present unverified judgments as final researcher assessments.
+
+---
+
+### 11. QUALITATIVE AND QUANTITATIVE SYNTHESIS PLANNING
+
+Develop an evidence synthesis planning engine.
+
+Assess whether the expected evidence is suitable for:
+
+**Qualitative synthesis**
+- Thematic synthesis.
+- Narrative synthesis.
+- Content analysis.
+- Evidence mapping.
+- Comparative synthesis.
+
+**Quantitative synthesis**
+- Descriptive statistics.
+- Frequency distributions.
+- Temporal trends.
+- Geographic distributions.
+- Model performance comparisons.
+- Predictor importance comparisons.
+- Effect-size synthesis.
+- Statistical meta-analysis, when justified.
+
+Implement a meta-analysis feasibility assessment considering:
+
+- Compatibility of study designs.
+- Comparability of outcomes.
+- Effect-size availability.
+- Statistical data availability.
+- Measurement consistency.
+- Clinical, methodological, or contextual heterogeneity.
+- Number of eligible studies.
+- Availability of variance or uncertainty estimates.
+
+Clearly distinguish descriptive quantitative synthesis from statistical meta-analysis.
+
+Do not recommend meta-analysis solely because numerical results exist.
+
+When meta-analysis is unsuitable, explain why and recommend an appropriate alternative.
+
+Integrate the planning results with the existing Quantitative Synthesis and Meta-Analysis Module.
+
+---
+
+### 12. PRISMA 2020 AND PRISMA-S REPORTING SUPPORT
+
+Generate protocol-level reporting templates and checklists.
+
+Support relevant PRISMA 2020 items and PRISMA-S search reporting requirements.
+
+Provide:
+
+- Reporting checklist.
+- Protocol completion status.
+- Search documentation.
+- Eligibility documentation.
+- Study selection planning.
+- Planned extraction procedures.
+- Planned synthesis methods.
+- Reporting limitations.
+- Missing information warnings.
+
+Keep protocol-level planned procedures separate from completed review results.
+
+The PRISMA flow diagram must use actual study identification, screening, exclusion, and inclusion records generated during the review.
+
+Do not generate final PRISMA study counts from protocol assumptions.
+
+---
+
+### 13. INTELLIGENT PROTOCOL VALIDATION ENGINE
+
+Develop a centralized AI-assisted validation engine.
+
+The engine must understand the relationships among:
+
+Research topic → Review type → Research framework → Objectives → Research questions → Eligibility criteria → Search strategy → Extraction variables → Quality appraisal → Synthesis methods → PRISMA reporting.
+
+Automatically detect:
+
+- Inconsistent research objectives.
+- Overlapping research questions.
+- Missing framework components.
+- Contradictory inclusion and exclusion rules.
+- Incomplete search synonyms.
+- Invalid database search syntax.
+- Overly restrictive search queries.
+- Missing extraction variables.
+- Questions without corresponding evidence requirements.
+- Inappropriate quality appraisal instruments.
+- Unsupported synthesis plans.
+- Inappropriate meta-analysis proposals.
+- Inconsistencies between the protocol and subsequent review activities.
+
+For every detected issue, display:
+
+1. Issue identifier.
+2. Problem description.
+3. Affected protocol section.
+4. Severity.
+5. Explanation.
+6. Recommended correction.
+7. Potential impact.
+8. Researcher decision.
+9. Resolution status.
+
+Use a transparent validation status:
+
+- Passed.
+- Warning.
+- Needs revision.
+- Not assessed.
+
+An optional protocol consistency score may summarize validation results, but must not be presented as a scientific quality score or a substitute for expert judgment.
+
+AI must explain recommendations and never silently alter approved protocol sections.
+
+---
+
+### 14. USER INTERFACE AND INTERACTIVE WORKFLOW
+
+Implement a professional, step-by-step Protocol Builder interface.
+
+Recommended workflow:
+
+**Step 1:** Enter research topic and research background.
+
+**Step 2:** Identify academic discipline, scope, and theoretical motivation.
+
+**Step 3:** Recommend review type and methodological framework.
+
+**Step 4:** Generate PICOC or another appropriate research framework.
+
+**Step 5:** Generate general and specific objectives.
+
+**Step 6:** Generate and validate research questions.
+
+**Step 7:** Develop inclusion and exclusion criteria.
+
+**Step 8:** Generate database-specific search strategies.
+
+**Step 9:** Develop review methodology and workflow.
+
+**Step 10:** Generate extraction framework.
+
+**Step 11:** Recommend quality appraisal instruments.
+
+**Step 12:** Plan qualitative and quantitative synthesis.
+
+**Step 13:** Assess meta-analysis feasibility.
+
+**Step 14:** Validate protocol consistency.
+
+**Step 15:** Researcher approval and protocol registration or documentation.
+
+**Step 16:** Activate the approved protocol in the systematic review project.
+
+All sections must remain editable.
+
+Researchers must be able to:
+
+- Generate a complete protocol.
+- Edit individual sections.
+- Regenerate selected sections.
+- Compare alternative recommendations.
+- Approve or reject AI suggestions.
+- Lock approved sections.
+- Save protocol versions.
+- Compare previous and current versions.
+- Restore earlier versions.
+- Export the protocol.
+- Reopen and continue protocol development.
+
+Regenerating one section must not overwrite unrelated approved sections.
+
+---
+
+### 15. PROTOCOL VERSIONING, APPROVAL AND CHANGE MANAGEMENT
+
+Implement a formal protocol version management system.
+
+Every protocol must have:
+
+- Unique protocol identifier.
+- Associated research project.
+- Version number.
+- Creation date.
+- Last modification date.
+- Author or responsible researcher.
+- Approval status.
+- Methodological framework.
+- Version history.
+- Change summary.
+
+Support protocol statuses:
+
+- Draft.
+- Under review.
+- Needs revision.
+- Approved.
+- Superseded.
+- Archived.
+
+After approval, protocol modifications must create a new version rather than silently changing the approved version.
+
+Record:
+
+- Modified section.
+- Previous content.
+- Revised content.
+- Reason for modification.
+- Modification date.
+- Responsible user.
+- Approval status.
+
+Where appropriate, record the date and justification of protocol amendments.
+
+Preserve the original approved protocol for auditability and reproducibility.
+
+---
+
+### 16. INTEGRATION WITH EXISTING RESEARCHMATE AI MODULES
+
+The Protocol Builder must integrate with:
+
+1. Research project management.
+2. Literature search and reference management.
+3. DOI and Crossref metadata retrieval.
+4. Duplicate detection.
+5. Title and abstract screening.
+6. Full-text screening.
+7. Original research versus review classification.
+8. Standardized data extraction.
+9. Quality appraisal.
+10. Qualitative synthesis.
+11. Descriptive quantitative synthesis.
+12. Statistical meta-analysis.
+13. PRISMA flow diagram.
+14. Research gap identification.
+15. Manuscript and report generation.
+
+The approved protocol becomes the reference specification for subsequent review activities.
+
+Implement protocol-aware validation in downstream modules.
+
+Examples:
+
+- Screening must follow the approved eligibility criteria.
+- Extraction must follow the approved extraction framework.
+- Appraisal must use the approved appraisal plan.
+- Synthesis must follow the approved synthesis strategy.
+- PRISMA reporting must reflect actual review records.
+
+If a researcher changes the protocol after screening or extraction has begun, identify potentially affected records and workflows.
+
+Do not automatically reverse previous screening or extraction decisions.
+
+Require researcher review before applying protocol changes to ongoing work.
+
+---
+
+### 17. EXPORT AND REPORTING
+
+Support complete protocol export to:
+
+- Microsoft Word (DOCX).
+- PDF.
+- Excel (XLSX).
+- CSV.
+- JSON.
+
+Generate a professionally structured protocol document containing:
+
+1. Title.
+2. Abstract or protocol summary, where appropriate.
+3. Introduction and rationale.
+4. Objectives.
+5. Research questions.
+6. Research framework.
+7. Eligibility criteria.
+8. Search strategy.
+9. Information sources.
+10. Study selection process.
+11. Data extraction plan.
+12. Quality appraisal plan.
+13. Evidence synthesis plan.
+14. Meta-analysis feasibility assessment.
+15. Reporting standards.
+16. Methodological limitations.
+17. References.
+18. Protocol version and approval information.
+
+Provide separate exports for eligibility matrices, database search strings, research question mappings, and extraction frameworks.
+
+Preserve formatting, tables, references, and version information.
+
+---
+
+### 18. DATABASE AND TECHNICAL ARCHITECTURE
+
+Before development, inspect the existing application architecture.
+
+Integrate the new module using reusable services and existing project structures.
+
+Recommended components:
+
+- Protocol management service.
+- Research topic analysis service.
+- Framework generation service.
+- Objective and question generation service.
+- Eligibility validation service.
+- Search strategy generation service.
+- Methodology planning service.
+- Extraction mapping service.
+- Quality appraisal planning service.
+- Synthesis planning service.
+- Protocol consistency validation service.
+- Protocol version management service.
+- Export and reporting service.
+
+Use the existing database where appropriate and introduce version-controlled migrations only when required.
+
+Use stable identifiers and relationships between projects, protocols, sections, and downstream research records.
+
+Avoid duplicate databases, duplicate article records, and unnecessary dependencies.
+
+Document all new APIs and database changes.
+
+---
+
+### 19. DEVELOPMENT AND TESTING REQUIREMENTS
+
+Implement the module incrementally.
+
+Before integration:
+
+- Inspect existing source code.
+- Inspect database structure.
+- Inspect dependencies.
+- Inspect APIs.
+- Inspect existing user interfaces.
+- Establish a verified backup.
+- Identify potential integration conflicts.
+
+Develop automated tests for:
+
+1. Research topic analysis.
+2. Review type recommendation.
+3. Framework generation.
+4. PICOC component completeness.
+5. Objective and question consistency.
+6. Eligibility-rule validation.
+7. Inclusion and exclusion consistency.
+8. Boolean syntax validation.
+9. Database-specific query generation.
+10. Search strategy versioning.
+11. Extraction mapping.
+12. Quality appraisal recommendations.
+13. Meta-analysis feasibility assessment.
+14. Protocol consistency validation.
+15. Protocol saving and retrieval.
+16. Protocol version management.
+17. Section-level regeneration.
+18. Approval and locking.
+19. DOCX export.
+20. PDF export.
+21. Excel export.
+22. Integration with screening.
+23. Integration with extraction.
+24. Integration with PRISMA reporting.
+25. Database migration and backward compatibility.
+
+Test both successful and unsuccessful scenarios.
+
+Use representative research topics from different disciplines to evaluate whether the module can generate appropriately different protocols.
+
+Measure processing time, validation accuracy, failure rates, and user-editing requirements.
+
+Do not mark a capability complete merely because its interface has been implemented.
+
+---
+
+### 20. ACCEPTANCE CRITERIA
+
+The module is considered complete when a researcher can:
+
+1. Enter an initial research topic.
+2. Identify the research discipline and scope.
+3. Receive appropriate review type recommendations.
+4. Generate and edit an appropriate research framework.
+5. Generate general and specific objectives.
+6. Generate and validate research questions.
+7. Create comprehensive eligibility criteria.
+8. Generate database-specific search strategies.
+9. Develop a structured methodology.
+10. Map research questions to extraction variables.
+11. Select appropriate quality appraisal instruments.
+12. Plan qualitative and quantitative synthesis.
+13. Assess meta-analysis feasibility.
+14. Validate protocol consistency.
+15. Approve and lock a protocol version.
+16. Save the approved protocol to a research project.
+17. Export the complete protocol.
+18. Use the protocol throughout the existing systematic review workflow.
+19. Track amendments without losing previous approved versions.
+
+All generated content must remain editable, reproducible, traceable, and subject to researcher approval.
+
+---
+
+### 21. STRICT DEVELOPMENT RULES
+
+1. Do not replace existing functional components unnecessarily.
+2. Do not disrupt existing research projects or databases.
+3. Do not silently modify approved protocol sections.
+4. Do not fabricate references, DOI numbers, search results, or publication statistics.
+5. Do not fabricate database retrieval counts.
+6. Do not confuse generated search strategies with executed searches.
+7. Do not treat PRISMA reporting guidelines as review conduct methodologies.
+8. Do not treat quality appraisal instruments as reporting guidelines.
+9. Do not recommend statistical meta-analysis without evaluating feasibility.
+10. Do not present AI-generated recommendations as researcher-approved decisions.
+11. Do not automatically apply protocol amendments to previous screening decisions.
+12. Do not claim validation or testing without evidence.
+13. Maintain backward compatibility with existing modules.
+14. Preserve protocol history and research audit trails.
+
+---
+
+### 22. FINAL IMPLEMENTATION COMMAND
+
+Begin by auditing the existing ResearchMate AI architecture and identifying the appropriate integration points for the Intelligent Systematic Review Protocol Builder.
+
+Develop the module as an integrated foundational component of ResearchMate AI.
+
+Implement topic analysis, review methodology recommendation, research framework generation, objectives, research questions, eligibility criteria, database-specific search strategies, methodology development, extraction mapping, quality appraisal planning, synthesis planning, and protocol consistency validation.
+
+Establish researcher approval, version control, amendment tracking, and complete integration with existing research workflows.
+
+Test each capability incrementally and verify that the approved protocol guides subsequent systematic review activities.
+
+Provide functioning software, database migrations, automated tests, documentation, and an implementation report.
+
+**FINAL DEVELOPMENT PRINCIPLE**
+
+The Intelligent Systematic Review Protocol Builder must not simply generate text.
+
+It must help researchers design, evaluate, validate, document, approve, and implement scientifically defensible systematic review protocols.
+
+Its success must be measured by methodological consistency, scientific accuracy, transparency, reproducibility, practical usefulness, and seamless integration with the complete ResearchMate AI platform.

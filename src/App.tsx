@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { ReviewProject, Article, WorkbenchModuleId, WorkbenchState } from './types';
+import { ReviewProject, Article, WorkbenchModuleId, WorkbenchState, SystematicReviewProtocol } from './types';
 import { Navbar } from './components/Navbar';
 import { ProjectInfoBanner } from './components/ProjectInfoBanner';
 import { DashboardOverview } from './components/DashboardOverview';
@@ -15,6 +15,8 @@ import { IncludedResultsSynthesis } from './components/IncludedResultsSynthesis'
 import { ResearchBriefingModule } from './components/ResearchBriefingModule';
 import { ProposalGenerator } from './components/ProposalGenerator';
 import { ExportReportModule } from './components/ExportReportModule';
+import { ProtocolBuilderWorkspace } from './components/ProtocolBuilderWorkspace';
+import { QuantitativeSynthesisWorkspace } from './components/QuantitativeSynthesisWorkspace';
 import { CrossrefLookupModal } from './components/CrossrefLookupModal';
 import { AddArticleModal } from './components/AddArticleModal';
 import { CreateReviewModal } from './components/CreateReviewModal';
@@ -84,6 +86,7 @@ export default function App() {
   const [mapsQuotaExceeded, setMapsQuotaExceeded] = useState<boolean>(false);
   const [addModalInitialTab, setAddModalInitialTab] = useState<'manual' | 'bulk_local' | 'online'>('manual');
   const [openBatchScreenerOnLibrary, setOpenBatchScreenerOnLibrary] = useState<boolean>(false);
+  const [quantSynthesisMode, setQuantSynthesisMode] = useState<'qualitative' | 'quantitative'>('quantitative');
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatusInfo>({ state: 'idle' });
   const workbenchDebounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const pendingWorkbenchPayloadsRef = useRef<Map<string, WorkbenchState>>(new Map());
@@ -1085,6 +1088,45 @@ export default function App() {
     return { addedCount: finalArticles.length };
   };
 
+  const handleOpenQuantSynthesis = useCallback((mode: 'qualitative' | 'quantitative' = 'quantitative') => {
+    setQuantSynthesisMode(mode);
+    setCurrentTab('quant_synthesis');
+  }, []);
+
+  const handleActivateProtocolInProject = useCallback(
+    (updatedProject: ReviewProject, protocol: SystematicReviewProtocol) => {
+      setProjects((prev) => {
+        const next = prev.map((p) => {
+          if (p.id !== updatedProject.id) return p;
+          const nextWs: WorkbenchState = {
+            ...(p.workbenchState || {}),
+            ...(updatedProject.workbenchState || {}),
+            protocolBuilder: {
+              ...(p.workbenchState?.protocolBuilder || {}),
+              ...(updatedProject.workbenchState?.protocolBuilder || {}),
+              activeProtocol: protocol,
+              updatedAt: new Date().toISOString(),
+            },
+          };
+          return {
+            ...p,
+            ...updatedProject,
+            articles: p.articles,
+            workbenchState: nextWs,
+          };
+        });
+        cacheProjectsOffline(next);
+        return next;
+      });
+      setAutoSaveStatus({
+        state: 'saved',
+        lastSavedAt: new Date().toISOString(),
+        label: `Protocol v${protocol.versionNumber} Activated`,
+      });
+    },
+    []
+  );
+
   const handleSelectArticleForScreening = (artId: string) => {
     setSelectedArticleId(artId);
     setCurrentTab('screening');
@@ -1461,6 +1503,7 @@ export default function App() {
                         setOpenBatchScreenerOnLibrary(true);
                         setCurrentTab('library');
                       }}
+                      onOpenQuantSynthesis={handleOpenQuantSynthesis}
                       onBackupProject={handleDownloadProjectBackup}
                       onRestoreProject={handleRestoreProject}
                       autoSaveStatus={autoSaveStatus}
@@ -1533,6 +1576,7 @@ export default function App() {
                       project={isolatedCurrentProject}
                       onUpdateProject={handleUpdateProject}
                       onAutoSyncScreening={handleAutoSyncScreeningCriteria}
+                      onOpenProtocolBuilder={() => setCurrentTab('protocol_builder')}
                       autoSaveStatus={autoSaveStatus}
                       onResetWorkbenchModule={(params) =>
                         handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -1662,6 +1706,7 @@ export default function App() {
                       onUpdateArticle={handleUpdateArticle}
                       onBatchUpdateArticles={handleUpdateArticles}
                       onNavigateToScreening={handleSelectArticleForScreening}
+                      onOpenQuantSynthesis={() => handleOpenQuantSynthesis('quantitative')}
                       autoSaveStatus={autoSaveStatus}
                       onResetWorkbenchModule={(params) =>
                         handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -1705,6 +1750,7 @@ export default function App() {
                     <PrismaDiagram
                       project={isolatedCurrentProject}
                       onUpdateArticle={handleUpdateArticle}
+                      onOpenSynthesis={handleOpenQuantSynthesis}
                       autoSaveStatus={autoSaveStatus}
                       onResetWorkbenchModule={(params) =>
                         handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -1727,6 +1773,7 @@ export default function App() {
                       articles={isolatedCurrentProject.articles}
                       onNavigateToBriefing={() => setCurrentTab('briefing')}
                       onNavigateToProposal={() => setCurrentTab('proposal')}
+                      onNavigateToSynthesis={handleOpenQuantSynthesis}
                       onSelectArticle={handleSelectArticleForScreening}
                       autoSaveStatus={autoSaveStatus}
                       onResetWorkbenchModule={(params) =>
@@ -1825,6 +1872,58 @@ export default function App() {
                       onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
                     />
                   )}
+                  {currentTab === 'protocol_builder' && (
+                    <ProtocolBuilderWorkspace
+                      project={isolatedCurrentProject}
+                      articles={isolatedCurrentProject.articles}
+                      onActivateProtocolInProject={handleActivateProtocolInProject}
+                      onNavigateToModule={setCurrentTab}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                    />
+                  )}
+                  {currentTab === 'quant_synthesis' && (
+                    <QuantitativeSynthesisWorkspace
+                      project={isolatedCurrentProject}
+                      articles={isolatedCurrentProject.articles}
+                      initialMode={quantSynthesisMode}
+                      onUpdateWorkbenchState={(patch, moduleId) =>
+                        handleUpdateWorkbenchState(isolatedCurrentProject.id, patch, {
+                          immediate: true,
+                          moduleId: moduleId || 'quant_synthesis',
+                          label: 'Quantitative Synthesis & Meta-Analysis',
+                        })
+                      }
+                      onSelectArticle={handleSelectArticleForScreening}
+                      onNavigateToModule={setCurrentTab}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onDirectAddDataFiles={(files, opts) =>
+                        handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                      }
+                      onRescanWithQueryQA={(modId, q, apply) =>
+                        handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                      }
+                      onDeleteQaEntry={(modId, recId) =>
+                        handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                      }
+                      onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                    />
+                  )}
                 </div>
               </div>
 
@@ -1860,6 +1959,7 @@ export default function App() {
                     setOpenBatchScreenerOnLibrary(true);
                     setCurrentTab('library');
                   }}
+                  onOpenQuantSynthesis={handleOpenQuantSynthesis}
                   onBackupProject={handleDownloadProjectBackup}
                   onRestoreProject={handleRestoreProject}
                   autoSaveStatus={autoSaveStatus}
@@ -1935,6 +2035,7 @@ export default function App() {
                   project={isolatedCurrentProject}
                   onUpdateProject={handleUpdateProject}
                   onAutoSyncScreening={handleAutoSyncScreeningCriteria}
+                  onOpenProtocolBuilder={() => setCurrentTab('protocol_builder')}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -2069,6 +2170,7 @@ export default function App() {
                   onUpdateArticle={handleUpdateArticle}
                   onBatchUpdateArticles={handleUpdateArticles}
                   onNavigateToScreening={handleSelectArticleForScreening}
+                  onOpenQuantSynthesis={() => handleOpenQuantSynthesis('quantitative')}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -2114,6 +2216,7 @@ export default function App() {
                 <PrismaDiagram
                   project={isolatedCurrentProject}
                   onUpdateArticle={handleUpdateArticle}
+                  onOpenSynthesis={handleOpenQuantSynthesis}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -2137,6 +2240,7 @@ export default function App() {
                   articles={isolatedCurrentProject.articles}
                   onNavigateToBriefing={() => setCurrentTab('briefing')}
                   onNavigateToProposal={() => setCurrentTab('proposal')}
+                  onNavigateToSynthesis={handleOpenQuantSynthesis}
                   onSelectArticle={handleSelectArticleForScreening}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
@@ -2223,6 +2327,60 @@ export default function App() {
                       { immediate, moduleId: 'export', label: 'Export Hub Config' }
                     )
                   }
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                />
+              )}
+
+              {currentTab === 'protocol_builder' && (
+                <ProtocolBuilderWorkspace
+                  project={isolatedCurrentProject}
+                  articles={isolatedCurrentProject.articles}
+                  onActivateProtocolInProject={handleActivateProtocolInProject}
+                  onNavigateToModule={setCurrentTab}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onDirectAddDataFiles={(files, opts) =>
+                    handleDirectAddDataFiles(isolatedCurrentProject.id, files, opts)
+                  }
+                  onRescanWithQueryQA={(modId, q, apply) =>
+                    handleRescanWithQueryQA(isolatedCurrentProject.id, modId, q, apply)
+                  }
+                  onDeleteQaEntry={(modId, recId) =>
+                    handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
+                  }
+                  onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                />
+              )}
+
+              {currentTab === 'quant_synthesis' && (
+                <QuantitativeSynthesisWorkspace
+                  project={isolatedCurrentProject}
+                  articles={isolatedCurrentProject.articles}
+                  initialMode={quantSynthesisMode}
+                  onUpdateWorkbenchState={(patch, moduleId) =>
+                    handleUpdateWorkbenchState(isolatedCurrentProject.id, patch, {
+                      immediate: true,
+                      moduleId: moduleId || 'quant_synthesis',
+                      label: 'Quantitative Synthesis & Meta-Analysis',
+                    })
+                  }
+                  onSelectArticle={handleSelectArticleForScreening}
+                  onNavigateToModule={setCurrentTab}
+                  autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)
                   }

@@ -37,6 +37,7 @@ interface PicocRulesManagerProps {
   project: ReviewProject;
   onUpdateProject: (updated: ReviewProject) => void;
   onAutoSyncScreening?: () => void;
+  onOpenProtocolBuilder?: () => void;
   autoSaveStatus?: AutoSaveStatusInfo;
   onResetWorkbenchModule?: (params: {
     target: WorkbenchModuleId;
@@ -60,6 +61,7 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
   project,
   onUpdateProject,
   onAutoSyncScreening,
+  onOpenProtocolBuilder,
   autoSaveStatus,
   onResetWorkbenchModule,
   onDirectAddDataFiles,
@@ -254,10 +256,26 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
             </p>
           </div>
 
-          {onAutoSyncScreening && (
-            <button
-              onClick={() => {
-                onAutoSyncScreening();
+          <div className="flex flex-wrap items-center gap-2">
+            {onOpenProtocolBuilder && (
+              <button
+                type="button"
+                onClick={onOpenProtocolBuilder}
+                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>
+                  16-Step Intelligent Protocol Builder
+                  {project.workbenchState?.protocolBuilder?.activeProtocol?.versionNumber
+                    ? ` (v${project.workbenchState.protocolBuilder.activeProtocol.versionNumber})`
+                    : ''}
+                </span>
+              </button>
+            )}
+            {onAutoSyncScreening && (
+              <button
+                onClick={() => {
+                  onAutoSyncScreening();
                 setSyncFeedback(
                   `Successfully auto-screened ${project.articles.length} articles against ${activeFramework.name} (${activeReviewType.name}) criteria!`
                 );
@@ -269,6 +287,7 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
               <span>Auto-Sync Screening with Criteria</span>
             </button>
           )}
+          </div>
         </div>
 
         {/* 2 Primary Dropdowns: Framework Type & Review Type */}

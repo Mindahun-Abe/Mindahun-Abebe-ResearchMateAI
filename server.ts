@@ -19,6 +19,10 @@ import {
 } from './src/db/users.ts';
 import { commercialRouter } from './src/server/commercialRoutes.ts';
 import { consumeAiCredits } from './src/db/commercial.ts';
+import {
+  buildDeterministicProtocol,
+  enrichProtocolStepWithAi,
+} from './src/server/protocolBuilderService.ts';
 
 dotenv.config();
 
@@ -1283,6 +1287,12 @@ app.post('/api/projects/:id/workbench-reset', (req: Request, res: Response) => {
         qualitativeThemes: [],
         updatedAt: savedAt,
       };
+    } else if (target === 'protocol_builder') {
+      nextWb.protocolBuilder = {
+        activeProtocol: null,
+        lastValidatedAt: undefined,
+        updatedAt: savedAt,
+      };
     }
 
     writeWorkbenchStateFile(folderPath, nextWb);
@@ -1594,6 +1604,284 @@ app.get('/api/quant-synthesis/:projectId/audit', async (req: Request, res: Respo
     return res.json(result);
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to read quantitative audit trail' });
+  }
+});
+
+// -------------------------------------------------------------
+// Intelligent Systematic Review Protocol Builder API (SQLite + AI + Validation)
+// -------------------------------------------------------------
+function syncProtocolToWorkbenchFile(projectId: string, protocol: any) {
+  const folderPath = findFolderForProjectId(projectId);
+  if (!folderPath) return;
+  const savedAt = new Date().toISOString();
+  const currentWb = readWorkbenchStateFile(folderPath);
+  const nextWb = {
+    ...currentWb,
+    moduleLastSavedAt: {
+      ...(currentWb.moduleLastSavedAt || {}),
+      protocol_builder: savedAt,
+    },
+    protocolBuilder: {
+      activeProtocol: protocol,
+      lastValidatedAt: protocol?.validationSummary?.assessedAt || savedAt,
+      updatedAt: savedAt,
+    },
+    lastAutoSavedAt: savedAt,
+    lastSavedModule: 'protocol_builder',
+  };
+  writeWorkbenchStateFile(folderPath, nextWb);
+}
+
+app.get('/api/protocols/:projectId', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const disk = loadProjectSnapshotFromFolder(projectId);
+    const result = await runPythonQuantEngine({ action: 'load_protocol', projectId });
+    let protocol = result.protocol;
+    if (!protocol && disk.project) {
+      const draft = buildDeterministicProtocol(
+        projectId,
+        disk.project.title || disk.project.description || 'Systematic Literature Review',
+        disk.project
+      );
+      const validated = await runPythonQuantEngine({
+        action: 'validate_protocol',
+        projectId,
+        protocol: draft,
+        articles: disk.articles,
+      });
+      protocol = {
+        ...validated.protocol,
+        versionHistory: result.versions || [],
+        amendments: result.amendments || [],
+      };
+    }
+    return res.json({
+      success: true,
+      projectId,
+      protocol,
+      versions: result.versions || [],
+      amendments: result.amendments || [],
+      auditLog: result.auditLog || [],
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to load protocol state' });
+  }
+});
+
+app.post('/api/protocols/:projectId/generate-step', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const body = req.body || {};
+    const disk = loadProjectSnapshotFromFolder(projectId);
+    const project = body.project || disk.project || { id: projectId };
+    const articles = Array.isArray(body.articles) && body.articles.length > 0 ? body.articles : disk.articles;
+    const topicInput = String(
+      body.topicInput || body.protocol?.topicAnalysis?.initialTopicInput || project.title || 'Systematic Literature Review'
+    );
+
+    const baseProtocol =
+      body.protocol && body.protocol.topicAnalysis
+        ? body.protocol
+        : buildDeterministicProtocol(
+            projectId,
+            topicInput,
+            project,
+            body.preferredReviewType,
+            body.preferredFramework
+          );
+
+    const { protocol: enriched, engine } = await enrichProtocolStepWithAi(
+      ai,
+      baseProtocol,
+      body.targetStep ?? 'all',
+      body.customInstruction,
+      project
+    );
+
+    const validated = await runPythonQuantEngine({
+      action: 'validate_protocol',
+      projectId,
+      protocol: enriched,
+      articles,
+    });
+
+    const saved = await runPythonQuantEngine({
+      action: 'save_protocol',
+      projectId,
+      protocol: validated.protocol,
+      articles,
+      actor: body.actor || 'Researcher',
+    });
+
+    syncProtocolToWorkbenchFile(projectId, saved.protocol);
+    return res.json({
+      success: true,
+      engine,
+      ...saved,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to generate protocol step' });
+  }
+});
+
+app.post('/api/protocols/:projectId/validate', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const body = req.body || {};
+    const disk = loadProjectSnapshotFromFolder(projectId);
+    const articles = Array.isArray(body.articles) && body.articles.length > 0 ? body.articles : disk.articles;
+    const result = await runPythonQuantEngine({
+      action: 'validate_protocol',
+      projectId,
+      protocol: body.protocol || {},
+      articles,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to validate protocol' });
+  }
+});
+
+app.post('/api/protocols/:projectId/save', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const body = req.body || {};
+    const disk = loadProjectSnapshotFromFolder(projectId);
+    const articles = Array.isArray(body.articles) && body.articles.length > 0 ? body.articles : disk.articles;
+    const result = await runPythonQuantEngine({
+      action: 'save_protocol',
+      projectId,
+      protocol: body.protocol || {},
+      articles,
+      actor: body.actor || 'Researcher',
+      amendmentInfo: body.amendmentInfo || null,
+    });
+    syncProtocolToWorkbenchFile(projectId, result.protocol);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to save protocol' });
+  }
+});
+
+app.post('/api/protocols/:projectId/approve', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const body = req.body || {};
+    const disk = loadProjectSnapshotFromFolder(projectId);
+    const articles = Array.isArray(body.articles) && body.articles.length > 0 ? body.articles : disk.articles;
+    const result = await runPythonQuantEngine({
+      action: 'approve_protocol',
+      projectId,
+      protocol: body.protocol || {},
+      articles,
+      actor: body.actor || 'Researcher',
+      changeSummary: body.changeSummary || 'Researcher approved and locked protocol version',
+    });
+    syncProtocolToWorkbenchFile(projectId, result.protocol);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to approve protocol' });
+  }
+});
+
+app.post('/api/protocols/:projectId/restore-version', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const { versionId, actor = 'Researcher' } = req.body || {};
+    if (!versionId) {
+      return res.status(400).json({ error: 'versionId is required' });
+    }
+    const result = await runPythonQuantEngine({
+      action: 'restore_protocol_version',
+      projectId,
+      versionId,
+      actor,
+    });
+    syncProtocolToWorkbenchFile(projectId, result.protocol);
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to restore protocol version' });
+  }
+});
+
+app.post('/api/protocols/:projectId/activate', async (req: Request, res: Response) => {
+  try {
+    const { projectId } = req.params;
+    const body = req.body || {};
+    const disk = loadProjectSnapshotFromFolder(projectId);
+    const protocol = body.protocol;
+    if (!protocol) {
+      return res.status(400).json({ error: 'protocol payload is required for activation' });
+    }
+    const now = new Date().toISOString();
+    const activatedProtocol = {
+      ...protocol,
+      activatedAt: now,
+      activatedVersion: protocol.versionNumber || '1.0',
+    };
+
+    const saved = await runPythonQuantEngine({
+      action: 'save_protocol',
+      projectId,
+      protocol: activatedProtocol,
+      articles: disk.articles,
+      actor: body.actor || 'Researcher',
+    });
+
+    syncProtocolToWorkbenchFile(projectId, saved.protocol);
+
+    let updatedProject: any = disk.project || { id: projectId };
+    const fwMap: Record<string, string> = {};
+    for (const item of protocol.frameworkComponents || []) {
+      fwMap[String(item.componentCode || '').toUpperCase()] = item.proposedContent || '';
+    }
+    const inclusionCriteria = (protocol.eligibilityMatrix || [])
+      .map((r: any) => `${r.criterion}: ${r.inclusionRequirement}`)
+      .filter(Boolean);
+    const exclusionCriteria = (protocol.eligibilityMatrix || [])
+      .map((r: any) => `${r.criterion}: ${r.exclusionRequirement}`)
+      .filter(Boolean);
+    const primarySearch = (protocol.databaseSearchStrategies || [])[0]?.exactSearchString;
+
+    updatedProject = {
+      ...updatedProject,
+      title: protocol.topicAnalysis?.proposedTitle || updatedProject.title,
+      reviewType: protocol.reviewMethodRecommendation?.recommendedReviewType || updatedProject.reviewType,
+      frameworkType: protocol.reviewMethodRecommendation?.recommendedPrimaryFramework || updatedProject.frameworkType,
+      picoc: {
+        ...(updatedProject.picoc || {}),
+        population: fwMap.P || fwMap.S || protocol.topicAnalysis?.targetPopulation || updatedProject.picoc?.population || '',
+        intervention: fwMap.I || fwMap.E || fwMap.C || fwMap.PI || protocol.topicAnalysis?.interventionOrFocus || updatedProject.picoc?.intervention || '',
+        comparison: fwMap.C && protocol.reviewMethodRecommendation?.recommendedPrimaryFramework !== 'PCC'
+          ? fwMap.C
+          : protocol.topicAnalysis?.comparisonBaseline || updatedProject.picoc?.comparison || '',
+        outcome: fwMap.O || fwMap.E || protocol.topicAnalysis?.measurableOutcomes || updatedProject.picoc?.outcome || '',
+        context: fwMap.Co || fwMap.S || protocol.topicAnalysis?.contextAndConstraints || updatedProject.picoc?.context || '',
+        frameworkData: fwMap,
+      },
+      researchQuestions: (protocol.rqMappings || []).map((rq: any) => ({
+        code: rq.code,
+        question: rq.question,
+        mainEvidenceToCollect: (rq.requiredExtractionVariables || []).join(', '),
+      })),
+      inclusionCriteria: inclusionCriteria.length > 0 ? inclusionCriteria : updatedProject.inclusionCriteria,
+      exclusionCriteria: exclusionCriteria.length > 0 ? exclusionCriteria : updatedProject.exclusionCriteria,
+      booleanQuery: primarySearch || updatedProject.booleanQuery,
+      updatedAt: now,
+    };
+
+    if (disk.folderPath && fs.existsSync(disk.folderPath)) {
+      fs.writeFileSync(path.join(disk.folderPath, 'project.json'), JSON.stringify(updatedProject, null, 2), 'utf-8');
+    }
+
+    return res.json({
+      success: true,
+      project: updatedProject,
+      ...saved,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to activate protocol in project' });
   }
 });
 

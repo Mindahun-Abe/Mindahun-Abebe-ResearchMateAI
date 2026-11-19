@@ -139,7 +139,7 @@ class TestStatisticalMetaAnalysis(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test_quant.sqlite")
             m1 = migrate_db(db_path)
-            self.assertEqual(m1, [1, 2])
+            self.assertEqual(m1, [1, 2, 3])
             m2 = migrate_db(db_path)
             self.assertEqual(m2, [])
 

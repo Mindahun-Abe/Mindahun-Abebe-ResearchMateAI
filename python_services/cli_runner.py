@@ -15,6 +15,13 @@ from python_services.db_migrations import (
 from python_services.descriptive_synthesis import compute_descriptive_synthesis
 from python_services.eligibility_engine import assess_eligibility_batch
 from python_services.meta_analysis_engine import run_full_meta_analysis
+from python_services.protocol_engine import (
+    approve_and_lock_protocol,
+    load_protocol_state,
+    restore_protocol_version,
+    save_protocol_state,
+    validate_protocol,
+)
 
 
 def _merge_study_records(
@@ -235,6 +242,40 @@ def handle_command(payload: Dict[str, Any]) -> Dict[str, Any]:
             "metaAnalysis": meta_analysis,
             "audit": audit,
         }
+
+    if action == "load_protocol":
+        state = load_protocol_state(project_id, db_path)
+        return {"success": True, "projectId": project_id, **state}
+
+    if action == "validate_protocol":
+        protocol = payload.get("protocol") or {}
+        articles = payload.get("articles") or project.get("articles") or []
+        validated = validate_protocol(protocol, articles)
+        return {"success": True, "projectId": project_id, **validated}
+
+    if action == "save_protocol":
+        protocol = payload.get("protocol") or {}
+        articles = payload.get("articles") or project.get("articles") or []
+        actor = str(payload.get("actor") or "Researcher")
+        amendment_info = payload.get("amendmentInfo")
+        state = save_protocol_state(project_id, protocol, articles, actor, amendment_info, db_path)
+        return {"success": True, "projectId": project_id, **state}
+
+    if action == "approve_protocol":
+        protocol = payload.get("protocol") or {}
+        articles = payload.get("articles") or project.get("articles") or []
+        actor = str(payload.get("actor") or "Researcher")
+        change_summary = str(payload.get("changeSummary") or "Researcher approved and locked protocol version")
+        state = approve_and_lock_protocol(project_id, protocol, articles, actor, change_summary, db_path)
+        return {"success": True, "projectId": project_id, **state}
+
+    if action == "restore_protocol_version":
+        version_id = str(payload.get("versionId") or "")
+        actor = str(payload.get("actor") or "Researcher")
+        if not version_id:
+            return {"success": False, "error": "versionId is required"}
+        state = restore_protocol_version(project_id, version_id, actor, db_path)
+        return {"success": True, "projectId": project_id, **state}
 
     return {"success": False, "error": f"Unknown action '{action}'"}
 

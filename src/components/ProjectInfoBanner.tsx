@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ReviewProject } from '../types';
+import { GeographicScaleTier, ReviewProject } from '../types';
 import { Sparkles, Edit3, Check, Copy, BookOpen, Globe, Calendar, FileText, Cpu, AlertCircle, Database } from 'lucide-react';
 import { apiService } from '../services/apiService';
 import {
@@ -8,6 +8,7 @@ import {
   getProtocolStandardDefinition,
   getReviewTypeDefinition,
 } from '../utils/protocolFrameworks';
+import { GEOGRAPHIC_SCALE_TIERS } from '../utils/geographicSensing';
 
 interface ProjectInfoBannerProps {
   project: ReviewProject;
@@ -39,6 +40,9 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
   const [scope, setScope] = useState(project.scope || '');
   const [methodology, setMethodology] = useState(project.methodologyFocus);
   const [geographic, setGeographic] = useState(project.geographicEligibility);
+  const [geographicScale, setGeographicScale] = useState<GeographicScaleTier | 'any'>(
+    project.geographicTargetScale || 'any'
+  );
   const [years, setYears] = useState(project.publicationYears);
   const [articleTypes, setArticleTypes] = useState(project.articleTypes);
   const [discipline, setDiscipline] = useState(project.discipline);
@@ -50,6 +54,7 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
     setScope(project.scope || '');
     setMethodology(project.methodologyFocus);
     setGeographic(project.geographicEligibility);
+    setGeographicScale(project.geographicTargetScale || 'any');
     setYears(project.publicationYears);
     setArticleTypes(project.articleTypes);
     setDiscipline(project.discipline);
@@ -63,6 +68,7 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
     project.scope,
     project.methodologyFocus,
     project.geographicEligibility,
+    project.geographicTargetScale,
     project.publicationYears,
     project.articleTypes,
     project.discipline,
@@ -75,6 +81,7 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
     setScope('');
     setMethodology('');
     setGeographic('');
+    setGeographicScale('any');
     setYears('');
     setArticleTypes('');
     setDiscipline('');
@@ -110,6 +117,7 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
         scope: scope.trim() || `${title.trim() || 'Review'} synthesis`,
         methodologyFocus: methodology.trim() || 'PRISMA 2020 Systematic Review',
         geographicEligibility: geographic.trim() || 'Global',
+        geographicTargetScale: geographicScale,
         publicationYears: years.trim() || 'All Years',
         articleTypes: articleTypes.trim() || 'Peer-reviewed research',
         discipline: discipline.trim() || 'Interdisciplinary Studies',
@@ -359,14 +367,30 @@ ${project.booleanQuery}
                 />
               </div>
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Geographic Eligibility</label>
-                <input
-                  type="text"
-                  placeholder="e.g., Global, Sub-Saharan Africa, European Union..."
-                  value={geographic}
-                  onChange={(e) => setGeographic(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
-                />
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Geographic Eligibility &amp; Spatial Scale
+                </label>
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    placeholder="e.g., Global, East Africa, Ethiopia, Amhara Region, North Gondar Zone, Mecha Woreda, Debre Mawi Watershed..."
+                    value={geographic}
+                    onChange={(e) => setGeographic(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                  <select
+                    value={geographicScale}
+                    onChange={(e) => setGeographicScale(e.target.value as GeographicScaleTier | 'any')}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[11px] text-teal-300 focus:outline-none focus:border-teal-500 cursor-pointer"
+                  >
+                    <option value="any">Scale: Auto / Hierarchical Containment</option>
+                    {GEOGRAPHIC_SCALE_TIERS.filter((t) => t.tier !== 'unspecified').map((t) => (
+                      <option key={t.tier} value={t.tier}>
+                        Scale: {t.shortLabel}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Publication Years</label>
@@ -444,9 +468,16 @@ ${project.booleanQuery}
               </div>
 
               <div className="bg-slate-800/50 p-2 rounded-lg border border-slate-800">
-                <div className="flex items-center gap-1.5 text-slate-400 font-medium mb-0.5">
-                  <Globe className="w-3.5 h-3.5 text-teal-400" />
-                  <span>Geographic Eligibility</span>
+                <div className="flex items-center justify-between gap-1 text-slate-400 font-medium mb-0.5">
+                  <span className="flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Geographic Eligibility</span>
+                  </span>
+                  {project.geographicTargetScale && project.geographicTargetScale !== 'any' && (
+                    <span className="px-1.5 py-0.5 rounded bg-teal-500/15 text-teal-300 text-[9px] font-mono uppercase">
+                      {project.geographicTargetScale}
+                    </span>
+                  )}
                 </div>
                 <div className="text-slate-200 font-semibold truncate" title={project.geographicEligibility}>
                   {project.geographicEligibility || 'Global studies'}

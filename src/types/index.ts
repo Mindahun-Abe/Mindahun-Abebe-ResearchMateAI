@@ -18,6 +18,50 @@ export interface AppraisalItem {
   notes?: string;
 }
 
+export type GeographicScaleTier =
+  | 'global'
+  | 'continental'
+  | 'country'
+  | 'regional'
+  | 'zonal'
+  | 'woreda'
+  | 'watershed'
+  | 'unspecified';
+
+export type GeographicEligibilityVerdict =
+  | 'eligible_exact_match'
+  | 'eligible_subscale_contained'
+  | 'eligible_global_scope'
+  | 'out_of_area_mismatch'
+  | 'scale_broader_than_target'
+  | 'unspecified_study_area';
+
+export interface ArticleGeographicHierarchy {
+  global?: string[];
+  continental?: string[];
+  country?: string[];
+  regional?: string[];
+  zonal?: string[];
+  woreda?: string[];
+  watershed?: string[];
+}
+
+export interface ArticleGeographicAssessment {
+  detectedScale: GeographicScaleTier;
+  detectedScaleLabel: string;
+  detectedPlaces: string[];
+  primaryPlaceLabel: string;
+  hierarchy: ArticleGeographicHierarchy;
+  targetScale: GeographicScaleTier | 'any';
+  targetTerms: string[];
+  verdict: GeographicEligibilityVerdict;
+  verdictLabel: string;
+  isEligible: boolean;
+  confidence: number;
+  interpretiveSummary: string;
+  evidenceSnippet: string;
+}
+
 export interface ArticleExtractedData {
   platform?: string;
   sensor?: string;
@@ -31,6 +75,10 @@ export interface ArticleExtractedData {
   spatialLeakageAddressed?: boolean;
   metrics?: string;
   geographicRegion?: string;
+  geographicScale?: GeographicScaleTier;
+  geographicVerdict?: GeographicEligibilityVerdict;
+  geographicInterpretation?: string;
+  geographicHierarchy?: ArticleGeographicHierarchy;
   sampleSize?: string;
   studyType?: string;
   keyFindings?: string;
@@ -192,6 +240,7 @@ export interface ReviewProject {
   publicationYears: string;
   articleTypes: string;
   geographicEligibility: string;
+  geographicTargetScale?: GeographicScaleTier | 'any';
   methodologyFocus: string;
   frameworkType?: ReviewFrameworkType;
   frameworkFields?: Record<string, string>;

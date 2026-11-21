@@ -1,5 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { Article, ModuleQaRescanRecord, ReviewProject, WorkbenchModuleId } from '../types';
+import {
+  Article,
+  GeographicScaleTier,
+  ModuleQaRescanRecord,
+  ReviewProject,
+  WorkbenchModuleId,
+} from '../types';
 import {
   analyzeArticleForMatrix,
   ArticleMatrixAnalysis,
@@ -8,6 +14,7 @@ import {
   PRISMA_DIAGNOSTIC_CATEGORIES,
   PrismaDiagnosticCode,
 } from '../utils/slrDetectionEngine';
+import { summarizeProjectGeographicOutcomes } from '../utils/geographicSensing';
 import {
   ArrowDown,
   Building2,
@@ -21,7 +28,9 @@ import {
   FileSpreadsheet,
   Filter,
   GitFork,
+  Globe,
   Lock,
+  MapPin,
   Search,
   ShieldAlert,
   ShieldCheck,
@@ -71,6 +80,9 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
   const [selectedNotPrimarySubFilter, setSelectedNotPrimarySubFilter] = useState<
     'all' | NotPrimarySubType
   >('all');
+  const [selectedGeoTierFilter, setSelectedGeoTierFilter] = useState<
+    'all' | GeographicScaleTier
+  >('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [detailArticleId, setDetailArticleId] = useState<string | null>(null);
 
@@ -87,6 +99,13 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
     }
     return map;
   }, [project]);
+
+  const geoOutcomeSummary = useMemo(() => {
+    const geoMap = new Map(
+      Array.from(analysisMap.entries()).map(([id, analysis]) => [id, analysis.geographicAssessment])
+    );
+    return summarizeProjectGeographicOutcomes(project, geoMap);
+  }, [project, analysisMap]);
 
   // Compute numbers from actual project articles with Original Research vs Review, Database Provenance, and 8 PRISMA Diagnostic checks
   const liveCounts = useMemo(() => {
@@ -284,6 +303,13 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
         }
       }
 
+      if (
+        selectedGeoTierFilter !== 'all' &&
+        analysis.geographicAssessment.detectedScale !== selectedGeoTierFilter
+      ) {
+        return false;
+      }
+
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const hay = [
@@ -294,6 +320,9 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
           analysis.sourceProvenance.database,
           analysis.paperType.category,
           diag.primaryExclusionSummary,
+          analysis.geographicAssessment.primaryPlaceLabel,
+          analysis.geographicAssessment.detectedScaleLabel,
+          analysis.geographicAssessment.interpretiveSummary,
           art.decisionReason || '',
         ]
           .join(' ')
@@ -308,6 +337,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
     analysisMap,
     selectedDiagnosticFilter,
     selectedNotPrimarySubFilter,
+    selectedGeoTierFilter,
     searchQuery,
   ]);
 
@@ -355,6 +385,20 @@ ${PRISMA_DIAGNOSTIC_CATEGORIES.map((cat) => {
   return `  - ${cat.label}: n = ${count}`;
 }).join('\n')}
 Records passing all 8 protocol checks: n = ${liveCounts.cleanPassCount}
+
+3b. MULTI-SCALE GEOGRAPHIC ELIGIBILITY & SPATIAL SCALE REPORT
+Target Scope: ${project.geographicEligibility || 'Global'} (Target Scale: ${project.geographicTargetScale || 'Auto-detected'})
+Interpretive Outcome: ${geoOutcomeSummary.interpretiveHeadline}
+${geoOutcomeSummary.interpretiveNarrative}
+Spatial Scale Distribution (Globally -> Continental -> Country -> Regional -> Zonal -> Woreda -> Watershed):
+${geoOutcomeSummary.tierBreakdown
+  .map(
+    (t) =>
+      `  - ${t.shortLabel}: n = ${t.count} (${t.percentage}%) · Eligible: ${t.eligibleCount}, Flagged: ${t.mismatchCount}${
+        t.topPlaces.length > 0 ? ` | Places: ${t.topPlaces.map((p) => `${p.name} (${p.count})`).join(', ')}` : ''
+      }`
+  )
+  .join('\n')}
 
 4. FULL-TEXT RETRIEVAL & ELIGIBILITY ASSESSMENT
 Reports sought for retrieval: n = ${liveCounts.fullTextAssessed}
@@ -404,6 +448,10 @@ Total included studies: n = ${liveCounts.includedCount}
       'Not Primary Sub-Type',
       'Not-English Language',
       'Wrong Study Area',
+      'Detected Geographic Scale',
+      'Detected Study Place / Hierarchy',
+      'Geographic Eligibility Verdict',
+      'Geographic Interpretive Outcome',
       'Not Accessible Paper',
       'Outside Publication Year',
       'Abstract-Only Paper',
@@ -418,6 +466,7 @@ Total included studies: n = ${liveCounts.includedCount}
       .map((art) => {
         const analysis = analysisMap.get(art.id)!;
         const diag = analysis.prismaDiagnostics;
+        const geo = analysis.geographicAssessment;
         const flagMap = Object.fromEntries(diag.flags.map((f) => [f.code, f.detected ? 'YES' : 'No']));
         const derivedAccessStatus = art.institutionConfirmed
           ? 'downloadable (institution_confirmed)'
@@ -440,6 +489,10 @@ Total included studies: n = ${liveCounts.includedCount}
           csvCell(diag.notPrimarySubLabel || ''),
           csvCell(flagMap.not_english),
           csvCell(flagMap.wrong_study_area),
+          csvCell(geo.detectedScaleLabel),
+          csvCell(geo.primaryPlaceLabel),
+          csvCell(geo.verdictLabel),
+          csvCell(geo.interpretiveSummary),
           csvCell(flagMap.not_accessible),
           csvCell(flagMap.outside_publication_year),
           csvCell(flagMap.abstract_only),
@@ -980,6 +1033,114 @@ Total included studies: n = ${liveCounts.includedCount}
           })}
         </div>
 
+        {/* Multi-Scale Geographic Eligibility & Interpretive PRISMA Outcome Panel */}
+        <div className="bg-slate-950 border border-teal-800/60 rounded-2xl p-4 space-y-3">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <Globe className="w-4 h-4 text-teal-400" />
+                <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                  Multi-Scale Geographic Eligibility Sensing (PRISMA Spatial Report)
+                </h4>
+                <span className="px-2 py-0.5 rounded bg-teal-500/15 text-teal-300 border border-teal-500/30 text-[10px] font-mono">
+                  Target: {project.geographicEligibility || 'Global'}
+                  {project.geographicTargetScale && project.geographicTargetScale !== 'any'
+                    ? ` · ${project.geographicTargetScale.toUpperCase()} tier`
+                    : ''}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                {geoOutcomeSummary.interpretiveNarrative}
+              </p>
+            </div>
+
+            {selectedGeoTierFilter !== 'all' && (
+              <button
+                type="button"
+                onClick={() => setSelectedGeoTierFilter('all')}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-teal-300 border border-slate-700 text-[11px] font-semibold shrink-0 cursor-pointer"
+              >
+                Show All Spatial Scales
+              </button>
+            )}
+          </div>
+
+          {/* Interpretive Verdict Summary Pills */}
+          <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
+            <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300">
+              Eligible Total: n = {geoOutcomeSummary.eligibleCount}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-300">
+              Sub-Scale Contained (Watershed/Woreda/Zonal/Regional): n = {geoOutcomeSummary.subscaleContainedCount}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-indigo-300">
+              Exact / Global Scope: n = {geoOutcomeSummary.exactMatchCount + geoOutcomeSummary.globalScopeCount}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-rose-500/15 border border-rose-500/30 text-rose-300">
+              Out-of-Area / Scale Mismatch: n = {geoOutcomeSummary.outOfAreaCount + geoOutcomeSummary.scaleMismatchCount}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-400">
+              Unspecified Locality: n = {geoOutcomeSummary.unspecifiedCount}
+            </span>
+          </div>
+
+          {/* 8 Spatial Scale Tiers (Globally -> Continental -> Country -> Regional -> Zonal -> Woreda -> Watershed -> Unspecified) */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+            {geoOutcomeSummary.tierBreakdown.map((tierItem) => {
+              const isActive = selectedGeoTierFilter === tierItem.tier;
+              return (
+                <button
+                  key={tierItem.tier}
+                  type="button"
+                  onClick={() =>
+                    setSelectedGeoTierFilter(isActive ? 'all' : tierItem.tier)
+                  }
+                  className={`text-left p-2.5 rounded-xl border transition cursor-pointer flex flex-col justify-between gap-1.5 ${
+                    isActive
+                      ? 'bg-teal-950/60 border-teal-400 ring-1 ring-teal-400/40'
+                      : tierItem.count > 0
+                      ? 'bg-slate-900 border-slate-700 hover:border-teal-500/60'
+                      : 'bg-slate-900/40 border-slate-800/80 opacity-75 hover:opacity-100'
+                  }`}
+                  title={
+                    tierItem.topPlaces.length > 0
+                      ? `Detected ${tierItem.shortLabel} places: ${tierItem.topPlaces.map((p) => `${p.name} (${p.count})`).join(', ')}`
+                      : tierItem.label
+                  }
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[11px] font-bold text-white truncate">
+                      {tierItem.shortLabel}
+                    </span>
+                    <span
+                      className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold ${
+                        tierItem.count > 0
+                          ? 'bg-teal-500/20 text-teal-300'
+                          : 'bg-slate-800 text-slate-500'
+                      }`}
+                    >
+                      {tierItem.count}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-400 truncate">
+                    {tierItem.topPlaces.length > 0
+                      ? tierItem.topPlaces
+                          .slice(0, 2)
+                          .map((p) => p.name)
+                          .join(', ')
+                      : `${tierItem.percentage}% of unique`}
+                  </div>
+                  {tierItem.mismatchCount > 0 && (
+                    <span className="text-[9px] font-mono text-rose-300">
+                      {tierItem.mismatchCount} flagged
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Search & Article Inspection Table */}
         <div className="space-y-3">
           <div className="relative">
@@ -1031,7 +1192,7 @@ Total included studies: n = ${liveCounts.includedCount}
 
                     return (
                       <tr key={art.id} className="hover:bg-slate-950/80 transition">
-                        <td className="py-3 px-3 max-w-[260px]">
+                        <td className="py-3 px-3 max-w-[270px] space-y-1">
                           <p className="font-semibold text-white truncate" title={art.title}>
                             {art.title}
                           </p>
@@ -1039,6 +1200,22 @@ Total included studies: n = ${liveCounts.includedCount}
                             {art.authors?.slice(0, 2).join(', ')} ({art.year}) ·{' '}
                             <span className="italic">{art.journal}</span>
                           </p>
+                          <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                            <span
+                              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono border ${
+                                analysis.geographicAssessment.isEligible
+                                  ? 'bg-teal-500/10 text-teal-300 border-teal-500/30'
+                                  : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                              }`}
+                              title={analysis.geographicAssessment.interpretiveSummary}
+                            >
+                              <MapPin className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate max-w-[190px]">
+                                {analysis.geographicAssessment.detectedScaleLabel}:{' '}
+                                {analysis.geographicAssessment.primaryPlaceLabel}
+                              </span>
+                            </span>
+                          </div>
                         </td>
 
                         <td className="py-3 px-3 whitespace-nowrap">

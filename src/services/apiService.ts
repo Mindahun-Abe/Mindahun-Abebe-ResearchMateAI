@@ -20,6 +20,7 @@ import {
   ProtocolVersionSnapshot,
 } from '../types';
 import { getActiveFrameworkFieldEntries, getFrameworkDefinition } from '../utils/protocolFrameworks';
+import { assessGeographicEligibility } from '../utils/geographicSensing';
 
 export interface CrossrefResult {
   doi: string;
@@ -154,7 +155,10 @@ export function evaluateArticleClient(article: Article, project: ReviewProject):
     };
   }
 
-  // 2. Evaluate explicit Eligibility Criteria Rules & Standard Exclusion Reasons
+  // 2. Multi-Scale Geographic Eligibility Sensing (Globally -> Continental -> Country -> Regional -> Zonal -> Woreda -> Watershed)
+  const geoAssessment = assessGeographicEligibility(article, project);
+
+  // 3. Evaluate explicit Eligibility Criteria Rules & Standard Exclusion Reasons
   const criteria = project?.inclusionCriteria || [];
   const exclusionReasons = project?.standardExclusionReasons || [];
 
@@ -163,12 +167,25 @@ export function evaluateArticleClient(article: Article, project: ReviewProject):
   let inclusionHits = 0;
   let totalInclusionCriteriaChecked = 0;
 
+  if (!geoAssessment.isEligible) {
+    violatedExclusions.push(
+      `Geographic Eligibility (${geoAssessment.detectedScaleLabel}): ${geoAssessment.interpretiveSummary}`
+    );
+  } else if (geoAssessment.detectedScale !== 'unspecified') {
+    metInclusions.push(
+      `Geographic (${geoAssessment.detectedScaleLabel}): ${geoAssessment.primaryPlaceLabel} — ${geoAssessment.verdictLabel}`
+    );
+  }
+
   for (const crit of criteria) {
     const incTerms = extractCriterionTerms(`${crit.dimension} ${crit.includeRule}`);
     const excTerms = extractCriterionTerms(crit.excludeRule);
 
     const matchedInc = incTerms.filter((t) => text.includes(t));
     const matchedExc = excTerms.filter((t) => text.includes(t));
+    const isGeoCrit = /\b(geo|geographic|location|region|area|setting|context|country|zonal|woreda|watershed|catchment)\b/i.test(
+      `${crit.dimension} ${crit.includeRule}`
+    );
 
     if (incTerms.length > 0) {
       totalInclusionCriteriaChecked++;
@@ -176,6 +193,11 @@ export function evaluateArticleClient(article: Article, project: ReviewProject):
         inclusionHits++;
         metInclusions.push(
           `${crit.dimension}: Matches "${matchedInc.slice(0, 3).join(', ')}" (${crit.includeRule.slice(0, 80)})`
+        );
+      } else if (isGeoCrit && geoAssessment.isEligible && geoAssessment.detectedScale !== 'unspecified') {
+        inclusionHits++;
+        metInclusions.push(
+          `${crit.dimension}: ${geoAssessment.verdictLabel} (${geoAssessment.primaryPlaceLabel})`
         );
       }
     }
@@ -213,12 +235,13 @@ export function evaluateArticleClient(article: Article, project: ReviewProject):
 
     // Generic criterion exclusion matching for any custom review rules:
     // Violation triggers if >=2 distinct excludeRule terms appear AND zero includeRule terms for that criterion match
-    if (matchedExc.length >= 2 && matchedInc.length === 0) {
+    if (matchedExc.length >= 2 && matchedInc.length === 0 && !(isGeoCrit && geoAssessment.isEligible)) {
       violatedExclusions.push(`${crit.dimension}: ${crit.excludeRule}`);
     } else if (
       excTerms.length === 1 &&
       matchedExc.length === 1 &&
       matchedInc.length === 0 &&
+      !(isGeoCrit && geoAssessment.isEligible) &&
       !text.includes(`no ${matchedExc[0]}`) &&
       !text.includes(`without ${matchedExc[0]}`)
     ) {
@@ -252,10 +275,10 @@ export function evaluateArticleClient(article: Article, project: ReviewProject):
     }
   }
 
-  // 3. Check Active Framework Domain Alignment (PICOC / PICO / PECO / PCC / SPIDER / SPICE / PICOS / CIMO)
+  // 4. Check Active Framework Domain Alignment (PICOC / PICO / PECO / PCC / SPIDER / SPICE / PICOS / CIMO)
   const activeFramework = getFrameworkDefinition(project?.frameworkType);
   const frameworkDimensions = project
-    ? getActiveFrameworkFieldEntries(project).map((f) => ({ name: f.label, text: f.value }))
+    ? getActiveFrameworkFieldEntries(project).map((f) => ({ key: f.key, name: f.label, text: f.value }))
     : [];
   let picocMatchedCount = 0;
   for (const dim of frameworkDimensions) {
@@ -264,10 +287,19 @@ export function evaluateArticleClient(article: Article, project: ReviewProject):
     if (hits.length > 0) {
       picocMatchedCount++;
       metInclusions.push(`${activeFramework.name} ${dim.name}: "${hits.slice(0, 3).join(', ')}"`);
+    } else if (
+      (dim.key === 'context' || dim.key === 'setting') &&
+      geoAssessment.isEligible &&
+      geoAssessment.detectedScale !== 'unspecified'
+    ) {
+      picocMatchedCount++;
+      metInclusions.push(
+        `${activeFramework.name} ${dim.name}: ${geoAssessment.detectedScaleLabel} (${geoAssessment.primaryPlaceLabel})`
+      );
     }
   }
 
-  // 4. Final Eligibility Decision
+  // 5. Final Eligibility Decision
   if (violatedExclusions.length > 0) {
     const primaryViolation = violatedExclusions[0];
     return {

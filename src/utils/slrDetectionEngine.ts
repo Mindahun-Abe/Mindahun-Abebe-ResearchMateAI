@@ -1,9 +1,10 @@
-import { Article, ArticleExtractedData, ReviewProject } from '../types';
+import { Article, ArticleExtractedData, ArticleGeographicAssessment, ReviewProject } from '../types';
 import {
   getActiveFrameworkFieldEntries,
   getFrameworkDefinition,
   getReviewTypeDefinition,
 } from './protocolFrameworks';
+import { assessGeographicEligibility } from './geographicSensing';
 
 export const DATABASE_PROVENANCE_OPTIONS = [
   'Google Scholar',
@@ -196,6 +197,7 @@ export interface ArticleMatrixAnalysis {
   extracted: ArticleExtractedData;
   codeDetailAnalysis: ArticleCodeDetailAnalysis;
   prismaDiagnostics: PrismaExclusionDiagnostics;
+  geographicAssessment: ArticleGeographicAssessment;
 }
 
 const STOP_WORDS = new Set([
@@ -663,14 +665,14 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
       /\b(spatial[- ]block|spatial\s+cross[- ]validation|leave-one-(?:site|field|catchment|farm)-out|spatial\s+buffer|independent\s+site|cross[- ]season\s+validation|external\s+validation)\b/i.test(lower)
   );
 
-  // 8. Sample Size & Geographic Region
+  // 8. Sample Size & Multi-Scale Geographic Region (Global -> Continental -> Country -> Regional -> Zonal -> Woreda -> Watershed)
   const sampleMatch = corpus.match(/\b(n\s*=\s*\d+(?:,\d{3})*|\d+(?:,\d{3})*\s*(?:plots|samples|images|polygons|gullies|catchments|patients|participants|farms|fields))\b/i);
   const detectedSampleSize = article.extractedData?.sampleSize || (sampleMatch ? sampleMatch[1].trim() : '');
 
-  const geoMatch = corpus.match(
-    /\b(Ethiopia|Ethiopian\s+Highlands|China|USA|United\s+States|Brazil|India|Germany|Spain|Italy|Australia|Canada|France|Japan|Kenya|Nigeria|Mediterranean|Europe|Sub-Saharan\s+Africa|Upper\s+Blue\s+Nile)\b/i
-  );
-  const detectedRegion = article.extractedData?.geographicRegion || (geoMatch ? geoMatch[1] : '');
+  const geoAssessment = assessGeographicEligibility(article, project);
+  const detectedRegion =
+    article.extractedData?.geographicRegion ||
+    (geoAssessment.detectedScale !== 'unspecified' ? geoAssessment.primaryPlaceLabel : '');
 
   // 9. Code, Software Tools, Repositories & Compute Detection
   const softwarePatterns = [
@@ -707,13 +709,24 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
   const frameworkEntries = getActiveFrameworkFieldEntries(project);
 
   const matchedPicoc: PicocMatchDetail[] = frameworkEntries.map((entry) => {
-    const rawText =
-      entry.key === 'context' || entry.key === 'setting'
-        ? `${entry.value} ${project.geographicEligibility || ''}`
-        : entry.value;
+    const isContextEntry = entry.key === 'context' || entry.key === 'setting';
+    const rawText = isContextEntry
+      ? `${entry.value} ${project.geographicEligibility || ''}`
+      : entry.value;
     const terms = extractTerms(rawText);
-    const matchedTerms = terms.filter((t) => lower.includes(t)).slice(0, 6);
-    const evidenceSnippet = matchedTerms.length > 0 ? findBestSentenceForTerms(sentences, matchedTerms) : '';
+    let matchedTerms = terms.filter((t) => lower.includes(t)).slice(0, 6);
+    let evidenceSnippet = matchedTerms.length > 0 ? findBestSentenceForTerms(sentences, matchedTerms) : '';
+
+    if (
+      isContextEntry &&
+      matchedTerms.length === 0 &&
+      geoAssessment.detectedScale !== 'unspecified' &&
+      geoAssessment.isEligible
+    ) {
+      matchedTerms = geoAssessment.detectedPlaces.slice(0, 4);
+      evidenceSnippet = geoAssessment.interpretiveSummary;
+    }
+
     return {
       dimension: `${entry.label} (${entry.badge})`,
       matchedTerms,
@@ -789,6 +802,10 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
     spatialLeakageAddressed,
     metrics: detectedMetrics || article.extractedData?.metrics,
     geographicRegion: detectedRegion || article.extractedData?.geographicRegion,
+    geographicScale: article.extractedData?.geographicScale || geoAssessment.detectedScale,
+    geographicVerdict: geoAssessment.verdict,
+    geographicInterpretation: geoAssessment.interpretiveSummary,
+    geographicHierarchy: geoAssessment.hierarchy,
     sampleSize: detectedSampleSize || article.extractedData?.sampleSize,
     softwareTools: softwareToolsStr || undefined,
     codeRepository: codeRepoStr || undefined,
@@ -818,7 +835,8 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
       hyperparametersAndSpecs,
       quantitativeSnippets,
     },
-    corpus
+    corpus,
+    geoAssessment
   );
 
   return {
@@ -837,6 +855,7 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
       quantitativeSnippets,
     },
     prismaDiagnostics,
+    geographicAssessment: geoAssessment,
   };
 }
 
@@ -850,7 +869,8 @@ export function detectPrismaExclusionDiagnostics(
   project: ReviewProject,
   prePaperType?: PaperClassificationResult,
   preCodeDetail?: ArticleCodeDetailAnalysis,
-  preCorpus?: string
+  preCorpus?: string,
+  preGeoAssessment?: ArticleGeographicAssessment
 ): PrismaExclusionDiagnostics {
   const paperType = prePaperType || classifyPaperType(article);
   const corpus = preCorpus || getSearchableCorpus(article);
@@ -994,46 +1014,18 @@ export function detectPrismaExclusionDiagnostics(
     notEnglishDetected ? 94 : 92
   );
 
-  // --- 4. Wrong study area ---
-  const geoEligibility = `${project.geographicEligibility || ''} ${project.picoc?.context || ''}`.trim();
-  const geoLower = geoEligibility.toLowerCase();
-  const isGlobalScope =
-    !geoLower ||
-    /\b(global|worldwide|any\s+region|international|all\s+countries|no\s+geographic\s+restriction)\b/i.test(geoLower);
-  const explicitWrongArea = /\b(wrong\s+study\s+area|wrong\s+region|wrong\s+country|outside\s+study\s+area|ineligible\s+region|out\s+of\s+geographic|wrong\s+catchment|wrong\s+location)\b/i.test(reasonNotesLower);
-
-  const knownGeoTokens = [
-    'ethiopia', 'ethiopian', 'upper blue nile', 'east africa', 'sub-saharan', 'kenya', 'china', 'usa', 'united states',
-    'brazil', 'india', 'germany', 'spain', 'italy', 'australia', 'canada', 'france', 'japan', 'nigeria',
-    'mediterranean', 'europe', 'iran', 'turkey', 'mexico', 'argentina', 'denmark', 'chile', 'peru', 'indonesia',
-  ];
-  const targetGeoTokens = knownGeoTokens.filter((g) => geoLower.includes(g) || project.title.toLowerCase().includes(g));
-  const articleGeoTokens = knownGeoTokens.filter((g) => lower.includes(g) || (article.extractedData?.geographicRegion || '').toLowerCase().includes(g));
-
-  let conflictStudyArea = false;
-  if (!isGlobalScope && targetGeoTokens.length > 0 && articleGeoTokens.length > 0) {
-    const matchesTarget = articleGeoTokens.some((g) => targetGeoTokens.includes(g));
-    if (!matchesTarget) conflictStudyArea = true;
-  }
-  const wrongAreaDetected = explicitWrongArea || conflictStudyArea;
+  // --- 4. Wrong study area (Multi-scale hierarchical sensing: Global -> Continental -> Country -> Regional -> Zonal -> Woreda -> Watershed) ---
+  const geoAssessment = preGeoAssessment || assessGeographicEligibility(article, project);
+  const wrongAreaDetected = !geoAssessment.isEligible;
+  const wrongAreaEvidence = geoAssessment.evidenceSnippet
+    ? `Scale: ${geoAssessment.detectedScaleLabel} | Verdict: ${geoAssessment.verdictLabel} | Places: ${geoAssessment.evidenceSnippet}`
+    : `Scale: ${geoAssessment.detectedScaleLabel} | Verdict: ${geoAssessment.verdictLabel}`;
   const wrongAreaRes = applyOverride(
     'wrong_study_area',
     wrongAreaDetected,
-    explicitWrongArea
-      ? 'Flagged for wrong study area / geographic incompatibility'
-      : conflictStudyArea
-      ? `Study area (${articleGeoTokens.join(', ')}) differs from protocol target (${targetGeoTokens.join(', ')})`
-      : isGlobalScope
-      ? `Geographic scope passes (${project.geographicEligibility || 'Global'})`
-      : `Compatible with protocol geography (${project.geographicEligibility})`,
-    explicitWrongArea
-      ? (article.decisionReason || '')
-      : conflictStudyArea
-      ? `Article region: ${articleGeoTokens.join(', ')} | Required: ${project.geographicEligibility}`
-      : articleGeoTokens.length > 0
-      ? `Detected study area: ${articleGeoTokens.join(', ')}`
-      : '',
-    explicitWrongArea ? 95 : conflictStudyArea ? 85 : 88
+    geoAssessment.interpretiveSummary,
+    wrongAreaEvidence,
+    geoAssessment.confidence
   );
 
   // --- 5. Not accessible papers (PRISMA 2020 Reports Sought vs Not Retrieved / Institution Confirmation) ---

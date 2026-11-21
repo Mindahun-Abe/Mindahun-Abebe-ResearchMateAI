@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   EligibilityCriterion,
+  GeographicScaleTier,
   LiteratureReviewTypeId,
   ProtocolStandardType,
   ResearchQuestion,
@@ -14,6 +15,7 @@ import {
   PROTOCOL_STANDARD_DEFINITIONS,
   REVIEW_TYPE_DEFINITIONS,
 } from '../utils/protocolFrameworks';
+import { GEOGRAPHIC_SCALE_TIERS } from '../utils/geographicSensing';
 import {
   AlertCircle,
   BookOpen,
@@ -59,6 +61,7 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
   const [scope, setScope] = useState('');
   const [methodologyFocus, setMethodologyFocus] = useState('');
   const [geographicEligibility, setGeographicEligibility] = useState('');
+  const [geographicTargetScale, setGeographicTargetScale] = useState<GeographicScaleTier | 'any'>('any');
   const [publicationYears, setPublicationYears] = useState('');
   const [articleTypes, setArticleTypes] = useState('');
 
@@ -107,6 +110,7 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
     setScope('');
     setMethodologyFocus('');
     setGeographicEligibility('');
+    setGeographicTargetScale('any');
     setPublicationYears('');
     setArticleTypes('');
     setFrameworkType('PICOC');
@@ -246,6 +250,7 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
       discipline: discipline.trim() || 'Interdisciplinary Studies',
       methodologyFocus: methodologyFocus.trim() || `${activeRev.name} · ${activeStd.label}`,
       geographicEligibility: geographicEligibility.trim() || 'Global',
+      geographicTargetScale,
       publicationYears: publicationYears.trim() || 'All Years',
       articleTypes: articleTypes.trim() || 'Peer-reviewed empirical studies',
       frameworkType,
@@ -553,14 +558,28 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">Geographic Eligibility</label>
-                <input
-                  type="text"
-                  placeholder="e.g., Global, Sub-Saharan Africa, European Union..."
-                  value={geographicEligibility}
-                  onChange={(e) => setGeographicEligibility(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
-                />
+                <label className="block text-slate-300 font-semibold mb-1">Geographic Eligibility &amp; Scale</label>
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    placeholder="e.g., Global, Africa, Ethiopia, Amhara Region, North Gondar Zone, Mecha Woreda, Debre Mawi Watershed..."
+                    value={geographicEligibility}
+                    onChange={(e) => setGeographicEligibility(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-2.5 py-1.5 text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                  />
+                  <select
+                    value={geographicTargetScale}
+                    onChange={(e) => setGeographicTargetScale(e.target.value as GeographicScaleTier | 'any')}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-teal-300 focus:outline-none focus:border-teal-500 cursor-pointer"
+                  >
+                    <option value="any">Scale: Auto / Hierarchical Containment</option>
+                    {GEOGRAPHIC_SCALE_TIERS.filter((t) => t.tier !== 'unspecified').map((t) => (
+                      <option key={t.tier} value={t.tier}>
+                        {t.shortLabel}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               <div>

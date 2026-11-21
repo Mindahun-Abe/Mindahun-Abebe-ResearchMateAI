@@ -22,7 +22,9 @@ import {
   Edit3,
   ExternalLink,
   FileCheck2,
+  Globe,
   Layers,
+  MapPin,
   Save,
   ShieldAlert,
   ShieldCheck,
@@ -81,7 +83,7 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
 
   if (!article || !analysis) return null;
 
-  const { paperType, sourceProvenance, extracted, codeDetailAnalysis, prismaDiagnostics } = analysis;
+  const { paperType, sourceProvenance, extracted, codeDetailAnalysis, prismaDiagnostics, geographicAssessment } = analysis;
   const activeFramework = getFrameworkDefinition(project.frameworkType);
   const activeReviewType = getReviewTypeDefinition(project.reviewType);
   const activeProtocolStd = getProtocolStandardDefinition(project);
@@ -373,6 +375,62 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                   )}
                 </div>
               ))}
+            </div>
+
+            {/* Multi-Scale Geographic Sensing & Interpretive Outcome */}
+            <div
+              className={`p-3 rounded-xl border space-y-2 ${
+                geographicAssessment.isEligible
+                  ? 'bg-teal-950/25 border-teal-800/50'
+                  : 'bg-rose-950/30 border-rose-700/60'
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-white flex items-center gap-1.5">
+                  <Globe className="w-3.5 h-3.5 text-teal-400" />
+                  <span>Multi-Scale Geographic Eligibility &amp; Spatial Hierarchy</span>
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+                  <span className="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 border border-teal-500/30">
+                    Scale: {geographicAssessment.detectedScaleLabel}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded border font-bold ${
+                      geographicAssessment.isEligible
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                        : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                    }`}
+                  >
+                    {geographicAssessment.verdictLabel}
+                  </span>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-200">{geographicAssessment.interpretiveSummary}</p>
+              <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                {(
+                  [
+                    ['Watershed', geographicAssessment.hierarchy.watershed],
+                    ['Woreda', geographicAssessment.hierarchy.woreda],
+                    ['Zonal', geographicAssessment.hierarchy.zonal],
+                    ['Regional', geographicAssessment.hierarchy.regional],
+                    ['Country', geographicAssessment.hierarchy.country],
+                    ['Continental', geographicAssessment.hierarchy.continental],
+                    ['Global', geographicAssessment.hierarchy.global],
+                  ] as Array<[string, string[] | undefined]>
+                )
+                  .filter(([, list]) => list && list.length > 0)
+                  .map(([tierLabel, list]) => (
+                    <span
+                      key={tierLabel}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-300 font-mono"
+                    >
+                      <MapPin className="w-2.5 h-2.5 text-teal-400" />
+                      <span>
+                        <strong className="text-teal-300">{tierLabel}:</strong> {list!.join(', ')}
+                      </span>
+                    </span>
+                  ))}
+              </div>
             </div>
           </div>
 

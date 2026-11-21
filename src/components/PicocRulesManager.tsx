@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   EligibilityCriterion,
+  GeographicScaleTier,
   LiteratureReviewTypeId,
   ModuleQaRescanRecord,
   ProtocolStandardType,
@@ -20,12 +21,18 @@ import {
   REVIEW_TYPE_DEFINITIONS,
 } from '../utils/protocolFrameworks';
 import {
+  GEOGRAPHIC_SCALE_TIERS,
+  summarizeProjectGeographicOutcomes,
+} from '../utils/geographicSensing';
+import {
   AlertTriangle,
   BookOpen,
   Check,
   Compass,
   Copy,
+  Globe,
   Layers,
+  MapPin,
   Plus,
   Sparkles,
   Trash2,
@@ -89,6 +96,70 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
   const activeFramework = getFrameworkDefinition(project.frameworkType);
   const activeReviewType = getReviewTypeDefinition(project.reviewType);
   const activeProtocolStandard = getProtocolStandardDefinition(project);
+
+  const geoOutcomeSummary = useMemo(
+    () => summarizeProjectGeographicOutcomes(project),
+    [project]
+  );
+
+  const handleSyncGeoToFrameworkContext = () => {
+    const contextField =
+      activeFramework.fields.find((f) => f.key === 'context' || f.key === 'setting') ||
+      activeFramework.fields[activeFramework.fields.length - 1];
+    const nextFrameworkFields = {
+      ...(project.frameworkFields || {}),
+      ...(contextField ? { [contextField.key]: geoOutcomeSummary.suggestedContextText } : {}),
+    };
+    const nextPicoc = {
+      ...project.picoc,
+      context: geoOutcomeSummary.suggestedContextText,
+    };
+    onUpdateProject({
+      ...project,
+      frameworkFields: nextFrameworkFields,
+      picoc: nextPicoc,
+    });
+    setSyncFeedback(
+      `Synced interpretive geographic outcome data into ${activeFramework.name} (${contextField?.title || 'Context'}).`
+    );
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
+
+  const handleSyncGeoEligibilityRule = () => {
+    const existingIdx = project.inclusionCriteria.findIndex((c) =>
+      /\b(geo|geographic|study\s+area|location|region|woreda|watershed)\b/i.test(c.dimension)
+    );
+    const excludeRule = `Studies conducted outside ${project.geographicEligibility || 'eligible study area'} or at incompatible spatial scale.`;
+    let nextCriteria: EligibilityCriterion[];
+    if (existingIdx >= 0) {
+      nextCriteria = project.inclusionCriteria.map((c, i) =>
+        i === existingIdx
+          ? {
+              ...c,
+              includeRule: geoOutcomeSummary.suggestedGeoRuleText,
+              excludeRule,
+            }
+          : c
+      );
+    } else {
+      nextCriteria = [
+        ...project.inclusionCriteria,
+        {
+          id: `crit-geo-${Date.now()}`,
+          dimension: 'Geographic Eligibility',
+          includeRule: geoOutcomeSummary.suggestedGeoRuleText,
+          excludeRule,
+          category: 'inclusion',
+        },
+      ];
+    }
+    onUpdateProject({
+      ...project,
+      inclusionCriteria: nextCriteria,
+    });
+    setSyncFeedback('Updated Geographic Eligibility rule in Eligibility Rules Matrix.');
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
 
   // Framework Type Dropdown handler
   const handleFrameworkTypeChange = (fwId: ReviewFrameworkType) => {
@@ -450,6 +521,161 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
                 placeholder="Describe review scope and boundaries..."
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
               />
+            </div>
+          </div>
+
+          {/* Multi-Scale Geographic Eligibility Configuration & Interpretive Outcomes for Protocol & Frameworks */}
+          <div className="pt-3 border-t border-slate-800/80 space-y-3 text-xs">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
+              <div>
+                <span className="text-[11px] font-bold text-teal-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Globe className="w-3.5 h-3.5 text-teal-400" />
+                  <span>Multi-Scale Geographic Eligibility &amp; Interpretive Outcome Data</span>
+                </span>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Sense study places from macro to micro areas (Globally, Continental, Country, Regional, Zonal, Woreda, Watershed) and feed interpretive outcomes directly into your active Framework &amp; PRISMA reports.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleSyncGeoToFrameworkContext}
+                  className="px-2.5 py-1.5 rounded-lg bg-teal-600/85 hover:bg-teal-500 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                  title="Write sensed geographic hierarchy and target scope into your active Framework Context/Setting field"
+                >
+                  <MapPin className="w-3 h-3" />
+                  <span>Sync Outcome to {activeFramework.name} Context</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSyncGeoEligibilityRule}
+                  className="px-2.5 py-1.5 rounded-lg bg-indigo-600/85 hover:bg-indigo-500 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                  title="Create or update the Geographic Eligibility row in Eligibility Rules Matrix"
+                >
+                  <Check className="w-3 h-3" />
+                  <span>Sync Geo Eligibility Rule</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
+              <div className="lg:col-span-5 space-y-1.5">
+                <label className="block text-[11px] font-semibold text-slate-300">
+                  Target Study Place / Geographic Eligibility (Editable)
+                </label>
+                <input
+                  type="text"
+                  value={project.geographicEligibility || ''}
+                  onChange={(e) =>
+                    onUpdateProject({
+                      ...project,
+                      geographicEligibility: e.target.value,
+                    })
+                  }
+                  placeholder="e.g., Global, Ethiopia, Amhara Region, North Gondar Zone, Mecha Woreda, Debre Mawi Watershed..."
+                  className="w-full bg-slate-900 border border-slate-700 focus:border-teal-500 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none"
+                />
+                <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                  <span className="text-[10px] text-slate-500">Quick scope:</span>
+                  {['Global', 'East Africa', 'Ethiopia', 'Amhara Region', 'East Gojjam Zone', 'Mecha Woreda', 'Debre Mawi Watershed'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() =>
+                        onUpdateProject({
+                          ...project,
+                          geographicEligibility: preset,
+                        })
+                      }
+                      className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] text-slate-300 cursor-pointer"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="lg:col-span-7 space-y-1.5">
+                <label className="block text-[11px] font-semibold text-slate-300">
+                  Target Spatial Resolution / Scale Constraint
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateProject({
+                        ...project,
+                        geographicTargetScale: 'any',
+                      })
+                    }
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                      !project.geographicTargetScale || project.geographicTargetScale === 'any'
+                        ? 'bg-teal-600 text-white border-teal-500'
+                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                    }`}
+                  >
+                    Auto / Hierarchical
+                  </button>
+                  {GEOGRAPHIC_SCALE_TIERS.filter((t) => t.tier !== 'unspecified').map((tierMeta) => {
+                    const isSelected = project.geographicTargetScale === tierMeta.tier;
+                    return (
+                      <button
+                        key={tierMeta.tier}
+                        type="button"
+                        onClick={() =>
+                          onUpdateProject({
+                            ...project,
+                            geographicTargetScale: tierMeta.tier as GeographicScaleTier,
+                          })
+                        }
+                        title={tierMeta.description}
+                        className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                          isSelected
+                            ? 'bg-teal-600 text-white border-teal-500'
+                            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white'
+                        }`}
+                      >
+                        {tierMeta.shortLabel}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-slate-400">
+                  Auto / Hierarchical matches exact places AND smaller sub-scales inside them (e.g., Woreda &amp; Watershed studies pass a Country or Regional target, while mismatched places trigger PRISMA Wrong Study Area).
+                </p>
+              </div>
+            </div>
+
+            {/* Live Interpretive Geographic Outcome Card */}
+            <div className="bg-slate-900/90 border border-teal-800/40 rounded-xl p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[11px] font-bold text-emerald-300 font-mono">
+                  {geoOutcomeSummary.interpretiveHeadline}
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+                  {geoOutcomeSummary.tierBreakdown
+                    .filter((t) => t.count > 0)
+                    .map((t) => (
+                      <span
+                        key={t.tier}
+                        className="px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-teal-300"
+                        title={t.topPlaces.map((p) => `${p.name} (${p.count})`).join(', ')}
+                      >
+                        {t.shortLabel}: {t.count} ({t.percentage}%)
+                      </span>
+                    ))}
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-300 leading-relaxed">
+                {geoOutcomeSummary.interpretiveNarrative}
+              </p>
+              {geoOutcomeSummary.protocolRecommendations.length > 0 && (
+                <ul className="space-y-0.5 text-[10px] text-slate-400 border-t border-slate-800 pt-1.5">
+                  {geoOutcomeSummary.protocolRecommendations.map((rec, i) => (
+                    <li key={i}>• {rec}</li>
+                  ))}
+                </ul>
+              )}
             </div>
           </div>
         </div>

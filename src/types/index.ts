@@ -46,20 +46,36 @@ export interface ArticleGeographicHierarchy {
   watershed?: string[];
 }
 
+export interface GeographicLocationConnection {
+  place: string;
+  tier: GeographicScaleTier;
+  sourcePart: string;
+  pageNumber?: number;
+  quote: string;
+  role: 'primary_study_area' | 'secondary_mention';
+  alignment: 'aligned' | 'conflict' | 'broader' | 'neutral';
+}
+
 export interface ArticleGeographicAssessment {
   detectedScale: GeographicScaleTier;
   detectedScaleLabel: string;
   detectedPlaces: string[];
   primaryPlaceLabel: string;
+  primaryStudyLocation?: string;
   hierarchy: ArticleGeographicHierarchy;
   targetScale: GeographicScaleTier | 'any';
   targetTerms: string[];
+  excludedTargetTerms?: string[];
+  isStrictGeographicScope?: boolean;
+  isGeographicConfirmed?: boolean;
   verdict: GeographicEligibilityVerdict;
   verdictLabel: string;
   isEligible: boolean;
   confidence: number;
   interpretiveSummary: string;
   evidenceSnippet: string;
+  studyAreaConnections?: GeographicLocationConnection[];
+  primaryStudySections?: string[];
 }
 
 export interface ArticleExtractedData {
@@ -79,6 +95,7 @@ export interface ArticleExtractedData {
   geographicVerdict?: GeographicEligibilityVerdict;
   geographicInterpretation?: string;
   geographicHierarchy?: ArticleGeographicHierarchy;
+  geographicStudyEvidence?: string;
   sampleSize?: string;
   studyType?: string;
   keyFindings?: string;
@@ -90,6 +107,13 @@ export interface ArticleExtractedData {
   protocolAlignmentScore?: number;
   matchedPicocSummary?: string;
   codedVariables?: Record<string, string>;
+  suspectedCase?: string;
+  conditioningFactors?: string;
+  analyticalModels?: string;
+  validationMetrics?: string;
+  integratedApplication?: string;
+  conceptAlignmentScore?: number;
+  integratedSummary?: string;
 }
 
 export type DatabaseProvenance =

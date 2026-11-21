@@ -38,7 +38,11 @@ import {
   loadOfflineQueue,
   syncProjectToCloudBackend,
 } from './utils/syncEngine';
-import { apiService, evaluateArticleClient } from './services/apiService';
+import {
+  apiService,
+  evaluateArticleClient,
+  mergeScreeningInsightsIntoExtractedData,
+} from './services/apiService';
 import { parseLocalDataFilesToArticles } from './utils/localFileImporter';
 
 type SurfaceView = 'workbench' | 'website' | 'billing' | 'admin';
@@ -630,9 +634,11 @@ export default function App() {
           const upd = updateMap.get(art.id);
           if (!upd) return art;
           updatedCount++;
+          const localEval = evaluateArticleClient(art, targetProj);
           return {
             ...art,
             decision: upd.decision,
+            decisionReason: upd.decision === 'exclude' ? upd.primaryReason : undefined,
             aiSuggestedDecision: upd.decision,
             aiConfidence: upd.confidenceScore,
             aiReason: upd.primaryReason,
@@ -642,6 +648,7 @@ export default function App() {
                 : upd.decision === 'exclude'
                 ? ('excluded' as const)
                 : ('full_text' as const),
+            extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, localEval),
           };
         });
         handleUpdateArticlesForProject(targetProjectId, nextArticles);
@@ -1085,6 +1092,7 @@ export default function App() {
           aiSuggestedDecision: res.decision,
           aiConfidence: res.confidenceScore,
           aiReason: res.primaryReason,
+          extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, res),
         };
       });
       const elapsed = parseFloat(((performance.now() - start) / 1000).toFixed(2));
@@ -1343,16 +1351,27 @@ export default function App() {
     const updated = isolatedCurrentProject.articles.map((art) => {
       if (art.isDuplicate) return art;
       const res = evaluateArticleClient(art, isolatedCurrentProject);
+      const preservedManualCitations = (art.evidenceCitations || []).filter(
+        (c) =>
+          !c.id?.startsWith('ev-') &&
+          !c.id?.startsWith('ai-ev-') &&
+          !/geographic\s+verification\s+needed|abstract\s*\/\s*eligibility\s+check|title\s*&\s*filename\s+screening/i.test(
+            c.section || ''
+          )
+      );
       const mappedCitations =
         res.pageEvidence && res.pageEvidence.length > 0
-          ? res.pageEvidence.map((ev, i) => ({
-              id: `ev-${art.id}-${i}-${Date.now()}`,
-              pageNumber: ev.pageNumber,
-              section: ev.section || ev.sectionName || 'Evidence Finding',
-              quote: ev.exactQuote,
-              relevance: ev.relevance,
-            }))
-          : art.evidenceCitations;
+          ? [
+              ...preservedManualCitations,
+              ...res.pageEvidence.map((ev, i) => ({
+                id: `ev-${art.id}-${i}-${Date.now()}`,
+                pageNumber: ev.pageNumber,
+                section: ev.section || ev.sectionName || 'Evidence Finding',
+                quote: ev.exactQuote,
+                relevance: ev.relevance,
+              })),
+            ]
+          : preservedManualCitations;
 
       return {
         ...art,
@@ -1369,13 +1388,7 @@ export default function App() {
         aiConfidence: res.confidenceScore,
         aiReason: res.detailedExplanation,
         evidenceCitations: mappedCitations,
-        extractedData: {
-          ...art.extractedData,
-          latencyReported:
-            res.operationalLatencyFound !== undefined
-              ? res.operationalLatencyFound
-              : art.extractedData?.latencyReported,
-        },
+        extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, res),
       };
     });
     handleUpdateArticles(updated);

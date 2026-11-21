@@ -431,6 +431,40 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                     </span>
                   ))}
               </div>
+              {geographicAssessment.studyAreaConnections && geographicAssessment.studyAreaConnections.length > 0 && (
+                <div className="pt-2 border-t border-slate-800/70 space-y-1.5">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
+                    Paper-to-Area Location Connections (Extracted Across Paper Sections)
+                  </span>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+                    {geographicAssessment.studyAreaConnections.slice(0, 4).map((conn, idx) => (
+                      <div
+                        key={idx}
+                        className="p-2 rounded-lg bg-slate-900/90 border border-slate-800 text-[10px] space-y-0.5"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-teal-300">
+                            {conn.place} · {conn.sourcePart}
+                            {conn.pageNumber ? ` (p.${conn.pageNumber})` : ''}
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.2 rounded font-mono uppercase ${
+                              conn.alignment === 'conflict'
+                                ? 'bg-rose-500/20 text-rose-300'
+                                : conn.alignment === 'aligned'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {conn.role === 'primary_study_area' ? 'Study Area' : 'Mention'}
+                          </span>
+                        </div>
+                        <p className="text-slate-400 italic line-clamp-2">"{conn.quote}"</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -615,10 +649,73 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
 
           {/* Row 2: Technical & Code Detail Analysis */}
           <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-3">
-            <h4 className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
-              <Cpu className="w-4 h-4 text-purple-400" />
-              Code, Software, Hardware &amp; Quantitative Parameter Extraction
-            </h4>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h4 className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+                <Cpu className="w-4 h-4 text-purple-400" />
+                Code, Software, Hardware &amp; Integrated 4-Pillar Extraction
+              </h4>
+              {analysis.conceptAlignment && (
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-bold border font-mono ${
+                    analysis.conceptAlignment.isOffTopicCaseMismatch
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                      : analysis.conceptAlignment.caseAnchorMatched
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  }`}
+                >
+                  {analysis.conceptAlignment.isOffTopicCaseMismatch
+                    ? 'Off-Topic / Case Mismatch'
+                    : `4-Pillar Alignment: ${analysis.conceptAlignment.pillarsMatchedCount}/4 (${analysis.conceptAlignment.integratedScore}%)`}
+                </span>
+              )}
+            </div>
+
+            {analysis.conceptAlignment?.isOffTopicCaseMismatch && analysis.conceptAlignment.offTopicReason && (
+              <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-800/70 text-[11px] text-rose-200">
+                <strong>Concept Mismatch Warning:</strong> {analysis.conceptAlignment.offTopicReason}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-[11px]">
+              <div className="bg-slate-900/90 p-2.5 rounded-xl border border-indigo-800/40">
+                <span className="text-slate-400 block text-[10px]">Suspected Case / Target</span>
+                <span className="text-white font-semibold">
+                  {analysis.conceptAlignment?.matchedCasePhrases[0] ||
+                    extracted.suspectedCase ||
+                    'Not explicitly matched'}
+                </span>
+              </div>
+              <div className="bg-slate-900/90 p-2.5 rounded-xl border border-teal-800/40">
+                <span className="text-slate-400 block text-[10px]">Conditioning Factors / Covariates</span>
+                <span className="text-teal-300 font-semibold">
+                  {analysis.conceptAlignment?.conditioningFactors.slice(0, 5).join(', ') ||
+                    extracted.conditioningFactors ||
+                    'None detected'}
+                </span>
+              </div>
+              <div className="bg-slate-900/90 p-2.5 rounded-xl border border-purple-800/40">
+                <span className="text-slate-400 block text-[10px]">Analytical Models / Algorithms</span>
+                <span className="text-indigo-300 font-semibold">
+                  {analysis.conceptAlignment?.analyticalModels.slice(0, 5).join(', ') ||
+                    extracted.analyticalModels ||
+                    extracted.algorithm ||
+                    'None detected'}
+                </span>
+              </div>
+              <div className="bg-slate-900/90 p-2.5 rounded-xl border border-emerald-800/40">
+                <span className="text-slate-400 block text-[10px]">Validation &amp; Application</span>
+                <span className="text-emerald-300 font-semibold">
+                  {[
+                    ...(analysis.conceptAlignment?.validationMetrics.slice(0, 3) || []),
+                    ...(analysis.conceptAlignment?.applicationOutcomes.slice(0, 2) || []),
+                  ].join(', ') ||
+                    extracted.validationMetrics ||
+                    extracted.integratedApplication ||
+                    'None detected'}
+                </span>
+              </div>
+            </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-[11px]">
               <div className="bg-slate-900 p-3 rounded-xl border border-slate-800">

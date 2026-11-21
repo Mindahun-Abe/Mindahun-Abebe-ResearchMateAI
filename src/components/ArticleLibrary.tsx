@@ -49,7 +49,7 @@ import {
   Maximize2,
   ArchiveRestore,
 } from 'lucide-react';
-import { apiService } from '../services/apiService';
+import { apiService, mergeScreeningInsightsIntoExtractedData } from '../services/apiService';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 import { NotebookStudioModal } from './NotebookStudioModal';
 import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
@@ -454,8 +454,16 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           aiSuggestedDecision: res.decision,
           aiConfidence: res.confidenceScore,
           aiReason: res.primaryReason,
+          extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, res),
           evidenceCitations: [
-            ...(art.evidenceCitations || []),
+            ...(art.evidenceCitations || []).filter(
+              (c) =>
+                !c.id?.startsWith('ev-batch-') &&
+                !c.id?.startsWith('ev-') &&
+                !/geographic\s+verification\s+needed|abstract\s*\/\s*eligibility\s+check|title\s*&\s*filename\s+screening/i.test(
+                  c.section || ''
+                )
+            ),
             ...(res.pageEvidence || []).map((pe, idx) => ({
               id: `ev-batch-${art.id}-${idx}`,
               pageNumber: pe.pageNumber,
@@ -1221,6 +1229,45 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           </div>
         </div>
       )}
+
+      {/* One-Click Integration Banner for Articles Needing Strict Geo + 4-Pillar Re-Screening */}
+      {(() => {
+        const pendingUpgradeCount = subLibraryArticles.filter(
+          (a) => !a.isDuplicate && a.extractedData?.conceptAlignmentScore === undefined
+        ).length;
+        if (pendingUpgradeCount === 0) return null;
+        return (
+          <div className="bg-indigo-950/40 border border-indigo-700/70 rounded-2xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-indigo-500/20 text-indigo-300 rounded-xl shrink-0">
+                <Sparkles className="w-4 h-4" />
+              </div>
+              <div>
+                <p className="font-bold text-white text-xs sm:text-sm">
+                  Strict Geographic &amp; 4-Pillar Concept Engine Ready ({pendingUpgradeCount} records pending)
+                </p>
+                <p className="text-indigo-200/80 text-[11px]">
+                  Re-screen to enforce study-area boundaries, block isolated-word off-topic hits, and extract Case, Conditioning Factors, Models &amp; Validation.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={isBatchScreening}
+              onClick={() => {
+                const targets = subLibraryArticles.filter((a) => !a.isDuplicate);
+                if (targets.length > 0) {
+                  handleExecuteBatchScreen(targets, 'full_library');
+                }
+              }}
+              className="px-3.5 py-2 bg-gradient-to-r from-indigo-600 to-teal-600 hover:from-indigo-500 hover:to-teal-500 disabled:opacity-50 text-white rounded-xl font-bold inline-flex items-center gap-1.5 transition shrink-0 cursor-pointer shadow-sm"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span>{isBatchScreening ? 'Re-Screening...' : 'Apply & Re-Screen All Now'}</span>
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Control bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">

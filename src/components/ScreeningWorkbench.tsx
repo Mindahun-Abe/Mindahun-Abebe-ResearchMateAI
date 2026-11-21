@@ -25,8 +25,16 @@ import {
   Compass,
   Check,
   X,
+  Globe,
+  MapPin,
 } from 'lucide-react';
-import { apiService, evaluateArticleClient } from '../services/apiService';
+import {
+  apiService,
+  evaluateArticleClient,
+  mergeScreeningInsightsIntoExtractedData,
+} from '../services/apiService';
+import { assessGeographicEligibility } from '../utils/geographicSensing';
+import { evaluateIntegratedConceptAlignment } from '../utils/conceptScreeningEngine';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface ScreeningWorkbenchProps {
@@ -197,9 +205,17 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
         aiSuggestedDecision: res.decision,
         aiConfidence: res.confidenceScore,
         aiReason: res.primaryReason || res.detailedExplanation,
-        // Append AI page evidence if found
+        extractedData: mergeScreeningInsightsIntoExtractedData(article.extractedData, res),
+        // Append AI page evidence if found (replacing prior synthetic screening citations)
         evidenceCitations: [
-          ...(article.evidenceCitations || []),
+          ...(article.evidenceCitations || []).filter(
+            (c) =>
+              !c.id?.startsWith('ai-ev-') &&
+              !c.id?.startsWith('ev-batch-') &&
+              !/geographic\s+verification\s+needed|abstract\s*\/\s*eligibility\s+check|title\s*&\s*filename\s+screening/i.test(
+                c.section || ''
+              )
+          ),
           ...(res.pageEvidence || []).map((pe: any, idx: number) => ({
             id: 'ai-ev-' + Date.now() + '-' + idx,
             pageNumber: pe.pageNumber || 1,
@@ -683,6 +699,146 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
               ))}
             </div>
           </div>
+
+          {/* Paper Study-Area Sensing & Location Connections */}
+          {(() => {
+            const geo = assessGeographicEligibility(article, project);
+            return (
+              <div
+                className={`rounded-2xl p-4 border space-y-2 text-xs ${
+                  !geo.isEligible
+                    ? 'bg-rose-950/30 border-rose-700/70'
+                    : geo.isStrictGeographicScope && !geo.isGeographicConfirmed
+                    ? 'bg-amber-950/25 border-amber-700/60'
+                    : 'bg-slate-900 border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Studied Place Sensing</span>
+                  </h3>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      !geo.isEligible
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                        : geo.isStrictGeographicScope && !geo.isGeographicConfirmed
+                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                        : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    }`}
+                  >
+                    {geo.verdictLabel}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-300">
+                  <span className="text-slate-400">Detected: </span>
+                  <strong className="text-white">{geo.primaryPlaceLabel}</strong> ({geo.detectedScaleLabel})
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">{geo.interpretiveSummary}</p>
+                {geo.studyAreaConnections && geo.studyAreaConnections.length > 0 && (
+                  <div className="space-y-1.5 pt-2 border-t border-slate-800/80 max-h-36 overflow-y-auto">
+                    {geo.studyAreaConnections.slice(0, 4).map((conn, idx) => (
+                      <div key={idx} className="bg-slate-950/80 p-2 rounded-lg border border-slate-800 text-[10px] space-y-0.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-teal-300 inline-flex items-center gap-1">
+                            <MapPin className="w-2.5 h-2.5" />
+                            {conn.place} ({conn.sourcePart}{conn.pageNumber ? ` · p.${conn.pageNumber}` : ''})
+                          </span>
+                          <span
+                            className={`px-1.5 py-0.2 rounded uppercase font-bold ${
+                              conn.alignment === 'conflict'
+                                ? 'bg-rose-500/20 text-rose-300'
+                                : conn.alignment === 'aligned'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {conn.role === 'primary_study_area' ? 'Study Site' : 'Mention'}
+                          </span>
+                        </div>
+                        <p className="text-slate-400 italic">"{conn.quote}"</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* 4-Pillar Integrated Case, Factors, Models & Validation Check */}
+          {(() => {
+            const ca = evaluateIntegratedConceptAlignment(article, project);
+            return (
+              <div
+                className={`rounded-2xl p-4 border space-y-2.5 text-xs ${
+                  ca.isOffTopicCaseMismatch
+                    ? 'bg-rose-950/30 border-rose-700/70'
+                    : ca.caseAnchorMatched && ca.pillarsMatchedCount >= 2
+                    ? 'bg-emerald-950/20 border-emerald-800/50'
+                    : 'bg-slate-900 border-slate-800'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-bold text-white text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>4-Pillar Case · Methods Check</span>
+                  </h3>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold border font-mono ${
+                      ca.isOffTopicCaseMismatch
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                        : ca.caseAnchorMatched && ca.pillarsMatchedCount >= 2
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    }`}
+                  >
+                    {ca.isOffTopicCaseMismatch
+                      ? 'Case Mismatch'
+                      : `${ca.pillarsMatchedCount}/4 Pillars (${ca.integratedScore}%)`}
+                  </span>
+                </div>
+
+                {ca.isOffTopicCaseMismatch && ca.offTopicReason && (
+                  <p className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/60 rounded-lg px-2.5 py-1.5">
+                    {ca.offTopicReason}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                  <div className="bg-slate-950/80 p-2 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 text-[10px] block">Suspected Case</span>
+                    <span className="font-semibold text-white">
+                      {ca.matchedCasePhrases[0] || (ca.isOffTopicCaseMismatch ? 'Off-Topic' : ca.targetCasePhrases[0] || 'Not matched')}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/80 p-2 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 text-[10px] block">Conditioning Factors</span>
+                    <span className="font-semibold text-teal-300">
+                      {ca.conditioningFactors.slice(0, 4).join(', ') || 'None detected'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/80 p-2 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 text-[10px] block">Analytical Models</span>
+                    <span className="font-semibold text-indigo-300">
+                      {ca.analyticalModels.slice(0, 4).join(', ') || 'None detected'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/80 p-2 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 text-[10px] block">Validation &amp; Application</span>
+                    <span className="font-semibold text-emerald-300">
+                      {[...ca.validationMetrics.slice(0, 2), ...ca.applicationOutcomes.slice(0, 1)].join(', ') || 'None detected'}
+                    </span>
+                  </div>
+                </div>
+
+                {ca.evidenceQuote && (
+                  <p className="text-[10px] text-slate-400 italic border-l-2 border-indigo-500/40 pl-2">
+                    "{ca.evidenceQuote}"
+                  </p>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Decision Controller Dock */}
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4 shadow-sm">

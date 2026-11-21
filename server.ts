@@ -23,6 +23,11 @@ import {
   buildDeterministicProtocol,
   enrichProtocolStepWithAi,
 } from './src/server/protocolBuilderService.ts';
+import { assessGeographicEligibility } from './src/utils/geographicSensing.ts';
+import {
+  evaluateIntegratedConceptAlignment,
+  evaluateRuleWithPhraseInterconnection,
+} from './src/utils/conceptScreeningEngine.ts';
 
 dotenv.config();
 
@@ -4029,11 +4034,51 @@ function extractServerCriterionTerms(ruleText: string): string[] {
   );
 }
 
+function buildServerProjectLike(criteria: any): any {
+  return {
+    id: criteria?.id || 'server-eval',
+    title: criteria?.title || '',
+    subtitle: criteria?.subtitle || '',
+    scope: criteria?.scope || '',
+    discipline: criteria?.discipline || '',
+    publicationYears: criteria?.publicationYears || '',
+    articleTypes: criteria?.articleTypes || '',
+    geographicEligibility: criteria?.geographicEligibility || '',
+    geographicTargetScale: criteria?.geographicTargetScale || 'any',
+    methodologyFocus: criteria?.methodologyFocus || '',
+    frameworkType: criteria?.frameworkType || 'PICOC',
+    frameworkFields: criteria?.frameworkFields || {},
+    picoc: criteria?.picoc || { population: '', intervention: '', comparison: '', outcome: '', context: '' },
+    researchQuestions: criteria?.researchQuestions || [],
+    inclusionCriteria: Array.isArray(criteria?.inclusionCriteria) ? criteria.inclusionCriteria : [],
+    standardExclusionReasons: Array.isArray(criteria?.exclusionReasons)
+      ? criteria.exclusionReasons
+      : Array.isArray(criteria?.standardExclusionReasons)
+      ? criteria.standardExclusionReasons
+      : [],
+    uncertainCasesGuidance: '',
+    booleanQuery: '',
+    articles: [],
+  };
+}
+
+function parseServerYearRange(pubYears?: string): { minYear?: number; maxYear?: number } {
+  if (!pubYears) return {};
+  const matches = pubYears.match(/\b(19\d{2}|20\d{2})\b/g);
+  if (!matches || matches.length === 0) return {};
+  const nums = matches.map((y) => parseInt(y, 10));
+  if (nums.length === 1) return { minYear: nums[0] };
+  return { minYear: Math.min(...nums), maxYear: Math.max(...nums) };
+}
+
 function evaluateArticleLocally(article: any, criteria: any) {
   const title = (article?.title || '').toLowerCase();
   const abstract = (article?.abstract || '').toLowerCase();
   const fullText = (article?.fullText || '').toLowerCase();
-  const text = `${title} ${abstract} ${fullText}`.trim();
+  const pagesText = Array.isArray(article?.pages)
+    ? article.pages.map((p: any) => String(p?.content || '').toLowerCase()).join(' ')
+    : '';
+  const text = `${title} ${abstract} ${fullText} ${pagesText}`.trim();
 
   const hasLatency =
     text.includes('latency') ||
@@ -4044,22 +4089,118 @@ function evaluateArticleLocally(article: any, criteria: any) {
     text.includes('fps') ||
     text.includes('edge computing');
 
-  const inclusionCriteria = Array.isArray(criteria?.inclusionCriteria) ? criteria.inclusionCriteria : [];
-  const exclusionReasons = Array.isArray(criteria?.exclusionReasons) ? criteria.exclusionReasons : [];
+  const projectLike = buildServerProjectLike(criteria || {});
+  const geoAssessment = assessGeographicEligibility(article || {}, projectLike);
+  const conceptAlignment = evaluateIntegratedConceptAlignment(article || {}, projectLike);
+  const articleNormText = text
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9.\s/-]+/g, ' ')
+    .replace(/[-/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const articleNormSentences = text
+    .replace(/\r?\n+/g, '. ')
+    .split(/(?<=[.!?])\s+/)
+    .map((s) =>
+      s
+        .toLowerCase()
+        .replace(/['’]/g, '')
+        .replace(/[^a-z0-9.\s/-]+/g, ' ')
+        .replace(/[-/]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    )
+    .filter((s) => s.length >= 6);
+
+  const geoEvidenceItems = (geoAssessment.studyAreaConnections || [])
+    .filter((c) => c.role === 'primary_study_area' || c.alignment === 'conflict')
+    .slice(0, 3)
+    .map((conn) => ({
+      pageNumber: conn.pageNumber || 1,
+      section: conn.sourcePart,
+      sectionName: conn.sourcePart,
+      exactQuote: conn.quote,
+      relevance: `Studied location "${conn.place}" (${conn.tier}) — ${geoAssessment.verdictLabel}`,
+    }));
+
+  const { minYear, maxYear } = parseServerYearRange(projectLike.publicationYears);
+  if (article?.year && minYear && article.year < minYear) {
+    const reason = `Publication Window: Published in ${article.year}, before eligible window (${projectLike.publicationYears})`;
+    return {
+      decision: 'exclude',
+      confidenceScore: 96,
+      primaryReason: reason,
+      detailedExplanation: reason,
+      metInclusions: [],
+      violatedExclusions: [reason],
+      pageEvidence: [{ pageNumber: 1, section: 'Bibliographic Metadata', exactQuote: `${article.title} (${article.year})`, relevance: reason }],
+      operationalLatencyFound: hasLatency,
+      geographicAssessment: geoAssessment,
+    };
+  }
+  if (article?.year && maxYear && article.year > maxYear + 1) {
+    const reason = `Publication Window: Published in ${article.year}, outside eligible window (${projectLike.publicationYears})`;
+    return {
+      decision: 'exclude',
+      confidenceScore: 94,
+      primaryReason: reason,
+      detailedExplanation: reason,
+      metInclusions: [],
+      violatedExclusions: [reason],
+      pageEvidence: [],
+      operationalLatencyFound: hasLatency,
+      geographicAssessment: geoAssessment,
+    };
+  }
+
+  const inclusionCriteria = projectLike.inclusionCriteria;
+  const exclusionReasons = projectLike.standardExclusionReasons;
 
   const metInclusions: string[] = [];
   const violatedExclusions: string[] = [];
   let inclusionHits = 0;
 
+  if (!geoAssessment.isEligible) {
+    violatedExclusions.push(
+      `Wrong Study Area (${geoAssessment.detectedScaleLabel}): ${geoAssessment.interpretiveSummary}`
+    );
+  } else if (geoAssessment.detectedScale !== 'unspecified') {
+    metInclusions.push(
+      `Geographic (${geoAssessment.detectedScaleLabel}): ${geoAssessment.primaryPlaceLabel} — ${geoAssessment.verdictLabel}`
+    );
+  }
+
   for (const crit of inclusionCriteria) {
-    const incTerms = extractServerCriterionTerms(`${crit.dimension || ''} ${crit.includeRule || ''}`);
+    const isGeoCrit = /\b(geo|geography|geographic|geographical|location|region|area|study\s*area|study\s*site|setting|context|country|countries|nation|zonal|woreda|watershed|catchment|basin|place)\b/i.test(
+      `${crit.dimension || ''} ${crit.includeRule || ''} ${crit.excludeRule || ''}`
+    );
+
+    if (isGeoCrit) {
+      if (geoAssessment.isEligible && geoAssessment.isGeographicConfirmed) {
+        inclusionHits++;
+        metInclusions.push(
+          `${crit.dimension || 'Geographic Eligibility'}: ${geoAssessment.verdictLabel} (${geoAssessment.primaryPlaceLabel})`
+        );
+      } else if (!geoAssessment.isEligible) {
+        if (!violatedExclusions.some((v) => v.toLowerCase().includes('wrong study area'))) {
+          violatedExclusions.push(`${crit.dimension || 'Geographic Eligibility'}: ${geoAssessment.interpretiveSummary}`);
+        }
+      }
+      continue;
+    }
+
+    const ruleMatch = evaluateRuleWithPhraseInterconnection(
+      `${crit.dimension || ''} ${crit.includeRule || ''}`,
+      articleNormText,
+      articleNormSentences
+    );
     const excTerms = extractServerCriterionTerms(crit.excludeRule || '');
-    const matchedInc = incTerms.filter((t) => text.includes(t));
+    const matchedInc = [...ruleMatch.matchedPhrases, ...ruleMatch.matchedSpecificTokens];
     const matchedExc = excTerms.filter((t) => text.includes(t));
 
-    if (matchedInc.length > 0) {
+    if (ruleMatch.isMatched) {
       inclusionHits++;
-      metInclusions.push(`${crit.dimension || 'Criterion'}: Matches "${matchedInc.slice(0, 3).join(', ')}"`);
+      metInclusions.push(`${crit.dimension || 'Criterion'}: ${ruleMatch.reason}`);
     }
 
     const excLower = (crit.excludeRule || '').toLowerCase();
@@ -4073,8 +4214,29 @@ function evaluateArticleLocally(article: any, criteria: any) {
       violatedExclusions.push(`${crit.dimension}: ${crit.excludeRule}`);
     } else if (excLower.includes('flume') && text.includes('flume experiment') && !text.includes('catchment')) {
       violatedExclusions.push(`${crit.dimension}: ${crit.excludeRule}`);
-    } else if (matchedExc.length >= 2 && matchedInc.length === 0) {
-      violatedExclusions.push(`${crit.dimension}: ${crit.excludeRule}`);
+    } else {
+      const explicitExcClauses = (crit.excludeRule || '')
+        .split(/[,;/\n]+/)
+        .map((s: string) => s.trim().toLowerCase())
+        .filter((s: string) => s.length >= 4 && !SERVER_STOP_WORDS.has(s));
+      const matchedExplicitClause = explicitExcClauses.find((clause: string) => {
+        if (/\b(outside|except|other than|non-)\b/i.test(clause)) return false;
+        const clauseWords = extractServerCriterionTerms(clause);
+        if (clauseWords.length === 0) return false;
+        const hasPhrase = text.includes(clause) && !text.includes(`no ${clause}`) && !text.includes(`without ${clause}`);
+        const allClauseWordsPresent =
+          clauseWords.length >= 1 &&
+          clauseWords.length <= 3 &&
+          clauseWords.every((w) => text.includes(w) && !text.includes(`no ${w}`) && !text.includes(`without ${w}`));
+        return hasPhrase || (clauseWords.length === 1 && allClauseWordsPresent && matchedInc.length === 0);
+      });
+      if (matchedExplicitClause && matchedInc.length === 0) {
+        violatedExclusions.push(`${crit.dimension}: Matches excluded "${matchedExplicitClause}" (${crit.excludeRule})`);
+      } else if (matchedExc.length >= 2 && matchedInc.length === 0) {
+        violatedExclusions.push(`${crit.dimension}: ${crit.excludeRule}`);
+      } else if (excTerms.length === 1 && matchedExc.length === 1 && matchedInc.length === 0) {
+        violatedExclusions.push(`${crit.dimension}: ${crit.excludeRule}`);
+      }
     }
   }
 
@@ -4090,52 +4252,97 @@ function evaluateArticleLocally(article: any, criteria: any) {
     }
   }
 
-  const picoc = criteria?.picoc || {};
+  const picoc = projectLike.picoc || {};
   let picocMatches = 0;
   for (const [key, val] of Object.entries(picoc)) {
-    const terms = extractServerCriterionTerms(String(val || ''));
-    const hits = terms.filter((t) => text.includes(t));
-    if (hits.length > 0) {
-      picocMatches++;
-      metInclusions.push(`PICOC (${key}): "${hits.slice(0, 3).join(', ')}"`);
+    const isGeoDim = key === 'context' || key === 'setting';
+    if (isGeoDim && geoAssessment.isStrictGeographicScope) {
+      if (geoAssessment.isEligible && geoAssessment.isGeographicConfirmed) {
+        picocMatches++;
+        metInclusions.push(`PICOC (${key}): ${geoAssessment.detectedScaleLabel} (${geoAssessment.primaryPlaceLabel})`);
+      }
+      continue;
     }
+    const ruleMatch = evaluateRuleWithPhraseInterconnection(String(val || ''), articleNormText, articleNormSentences);
+    if (ruleMatch.isMatched) {
+      picocMatches++;
+      metInclusions.push(`PICOC (${key}): ${ruleMatch.reason}`);
+    }
+  }
+
+  if (conceptAlignment.isOffTopicCaseMismatch) {
+    violatedExclusions.push(conceptAlignment.offTopicReason);
+  } else if (conceptAlignment.caseAnchorMatched) {
+    metInclusions.push(
+      `Integrated Concept Alignment (${conceptAlignment.pillarsMatchedCount}/4 pillars · ${conceptAlignment.integratedScore}%): ${conceptAlignment.integratedSummary}`
+    );
   }
 
   if (violatedExclusions.length > 0) {
     return {
       decision: 'exclude',
-      confidenceScore: Math.min(96, 86 + violatedExclusions.length * 4),
+      confidenceScore: Math.min(97, 88 + violatedExclusions.length * 3),
       primaryReason: violatedExclusions[0],
       detailedExplanation: `Excluded by Eligibility Criteria: ${violatedExclusions.join('; ')}`,
       metInclusions,
       violatedExclusions,
-      pageEvidence: [{ pageNumber: 1, section: 'Eligibility Screening', exactQuote: (article?.abstract || article?.title || '').slice(0, 160), relevance: 'Violated exclusion criterion.' }],
+      pageEvidence:
+        geoEvidenceItems.length > 0 && !geoAssessment.isEligible
+          ? geoEvidenceItems
+          : [{ pageNumber: 1, section: 'Eligibility & Concept Screening', exactQuote: (conceptAlignment.evidenceQuote || article?.abstract || article?.title || '').slice(0, 160), relevance: 'Violated exclusion criterion.' }],
       operationalLatencyFound: hasLatency,
+      geographicAssessment: geoAssessment,
+      conceptAlignment,
+    };
+  }
+
+  if (geoAssessment.isStrictGeographicScope && !geoAssessment.isGeographicConfirmed) {
+    return {
+      decision: 'uncertain',
+      confidenceScore: 70,
+      primaryReason: `Study Area Unspecified: Protocol requires "${geoAssessment.targetTerms.slice(0, 3).join(', ') || projectLike.geographicEligibility}" — verify study location in full text.`,
+      detailedExplanation: geoAssessment.interpretiveSummary,
+      metInclusions,
+      violatedExclusions: [],
+      pageEvidence:
+        geoEvidenceItems.length > 0
+          ? geoEvidenceItems
+          : [{ pageNumber: 1, section: 'Geographic Verification Needed', exactQuote: (article?.abstract || article?.title || '').slice(0, 150), relevance: geoAssessment.interpretiveSummary }],
+      operationalLatencyFound: hasLatency,
+      geographicAssessment: geoAssessment,
+      conceptAlignment,
     };
   }
 
   if (inclusionHits >= 1 || (inclusionCriteria.length === 0 && picocMatches >= 1)) {
     return {
       decision: 'include',
-      confidenceScore: Math.min(95, 80 + inclusionHits * 4 + picocMatches * 3),
-      primaryReason: `Meets Eligibility Criteria (${inclusionHits}/${Math.max(inclusionCriteria.length, 1)} rules & ${picocMatches} PICOC dimensions).`,
+      confidenceScore: Math.min(97, 80 + inclusionHits * 4 + picocMatches * 3 + conceptAlignment.pillarsMatchedCount * 2),
+      primaryReason: `Meets Eligibility Criteria (${inclusionHits}/${Math.max(inclusionCriteria.length, 1)} rules · ${picocMatches} PICOC · ${conceptAlignment.pillarsMatchedCount}/4 concept pillars).`,
       detailedExplanation: `Article satisfies eligibility rules (${metInclusions.slice(0, 4).join(' | ')}).`,
       metInclusions,
       violatedExclusions: [],
-      pageEvidence: [{ pageNumber: 1, section: 'Abstract', exactQuote: (article?.abstract || article?.title || '').slice(0, 160), relevance: 'Matches project inclusion criteria.' }],
+      pageEvidence:
+        geoEvidenceItems.length > 0
+          ? geoEvidenceItems
+          : [{ pageNumber: 1, section: 'Integrated Eligibility Check', exactQuote: (conceptAlignment.evidenceQuote || article?.abstract || article?.title || '').slice(0, 160), relevance: conceptAlignment.integratedSummary }],
       operationalLatencyFound: hasLatency,
+      geographicAssessment: geoAssessment,
+      conceptAlignment,
     };
   }
 
   return {
     decision: 'uncertain',
     confidenceScore: 70,
-    primaryReason: 'Insufficient Eligibility Criteria keyword match in title/abstract; marked UNCERTAIN for full-text verification.',
+    primaryReason: 'Insufficient interconnected Eligibility Criteria phrase match in title/abstract; marked UNCERTAIN for full-text verification.',
     detailedExplanation: 'Requires manual or full-text check against explicit Eligibility Criteria.',
     metInclusions,
     violatedExclusions: [],
     pageEvidence: [{ pageNumber: 1, section: 'Abstract', exactQuote: (article?.abstract || article?.title || '').slice(0, 140), relevance: 'Pending full-text eligibility check.' }],
     operationalLatencyFound: hasLatency,
+    geographicAssessment: geoAssessment,
+    conceptAlignment,
   };
 }
 
@@ -4233,18 +4440,29 @@ Ensure the research questions span RQ1 to RQ7 (or 5-7 clear questions), identify
 // -------------------------------------------------------------
 app.post('/api/ai/screen', async (req: Request, res: Response) => {
   const { article, projectCriteria } = req.body;
+  const localResult = evaluateArticleLocally(article, projectCriteria || {});
+  const geoAssessment = localResult.geographicAssessment;
+  const conceptAlignment = (localResult as any).conceptAlignment;
+
   try {
+    const pagesSummary = Array.isArray(article?.pages) && article.pages.length > 0
+      ? article.pages.slice(0, 8).map((p: any) => `[Page ${p.pageNumber}]\n${String(p.content || '').slice(0, 1400)}`).join('\n\n')
+      : '';
     const prompt = `You are a strict dual-reviewer screener for a systematic literature review following PRISMA 2020.
-Evaluate the candidate article against the project's PICOC framework and explicit eligibility rules.
+Evaluate the candidate article against the project's PICOC framework, geographic eligibility boundaries, interconnected compound topic phrases (Case + Factors + Models + Validation), and explicit eligibility rules across all disciplines.
 
 PROJECT CONTEXT:
 Review Title: "${projectCriteria.title}"
-PICOC:
+Discipline / Scope: "${projectCriteria.discipline || ''} ${projectCriteria.scope || ''}"
+Publication Years: ${projectCriteria.publicationYears || 'Any'}
+Geographic Eligibility Target: "${projectCriteria.geographicEligibility || 'As defined in Context / Inclusion Criteria'}"
+Geographic Target Scale Tier: "${projectCriteria.geographicTargetScale || 'any'}"
+Framework (${projectCriteria.frameworkType || 'PICOC'}):
 - Population: ${projectCriteria.picoc?.population || 'N/A'}
 - Intervention/Technology: ${projectCriteria.picoc?.intervention || 'N/A'}
 - Comparison: ${projectCriteria.picoc?.comparison || 'N/A'}
 - Outcome: ${projectCriteria.picoc?.outcome || 'N/A'}
-- Context: ${projectCriteria.picoc?.context || 'N/A'}
+- Context/Setting: ${projectCriteria.frameworkFields?.context || projectCriteria.frameworkFields?.setting || projectCriteria.picoc?.context || 'N/A'}
 
 INCLUSION CRITERIA:
 ${JSON.stringify(projectCriteria.inclusionCriteria || [], null, 2)}
@@ -4252,21 +4470,24 @@ ${JSON.stringify(projectCriteria.inclusionCriteria || [], null, 2)}
 STANDARD EXCLUSION REASONS:
 ${JSON.stringify(projectCriteria.exclusionReasons || [], null, 2)}
 
+AUTOMATED SPATIAL & 4-PILLAR CONCEPT SENSING:
+- Sensed Studied Location: ${geoAssessment?.primaryPlaceLabel || 'Unspecified'} (${geoAssessment?.detectedScaleLabel || 'Unspecified'} scale)
+- Geographic Verdict: ${geoAssessment?.verdictLabel || 'Unspecified'} (isEligible=${geoAssessment?.isEligible})
+- Location Evidence Quote: ${geoAssessment?.evidenceSnippet || 'None'}
+- Integrated Case / Factors / Models / Validation: ${conceptAlignment?.integratedSummary || 'Not pre-computed'} (caseAnchorMatched=${conceptAlignment?.caseAnchorMatched})
+
 CANDIDATE ARTICLE TO SCREEN:
 Title: "${article.title}"
 Authors: ${(article.authors || []).join(', ')} (${article.year})
 Venue: ${article.journal || 'N/A'}
 DOI: ${article.doi || 'N/A'}
 Abstract: """${article.abstract}"""
-Full Text / Extracted Sections (with page indicators if available):
-"""${article.fullText || article.contentSnippet || 'Full text not yet attached; screening on title & abstract.'}"""
+Full Text / Extracted Pages / Sections:
+"""${article.fullText || pagesSummary || article.contentSnippet || 'Full text not yet attached; screening on title & abstract.'}"""
 
-Task:
-Perform a deep, objective screening assessment.
-Decide:
-- "include": Meets all predefined inclusion criteria and violates no exclusion criteria.
-- "exclude": Clearly violates one or more criteria.
-- "uncertain": Ambiguous case requiring dual-reviewer consensus or full-text retrieval.
+CRITICAL ELIGIBILITY RULES (ALL DISCIPLINES):
+1. Geographic Boundary: If the project targets a specific country, region, zone, woreda, or watershed (or excludes specific countries/regions), and this article's primary studied place falls outside that target geography or inside an excluded country/region, you MUST decide "exclude" citing "Wrong Study Area". Distinguish actual study sites from background literature citations.
+2. Interconnected Compound Phrase Coherence: Do NOT include articles based on isolated single words (e.g., matching "erosion", "susceptibility", "factors", or "models" alone for a "Gully Erosion Susceptibility" review). Verify the interconnected target case WITH its methodology, conditioning factors/variables, models, and validation.
 
 Return a JSON object:
 {
@@ -4291,14 +4512,44 @@ Return a JSON object:
     const aiText = await generateWithAi(prompt, 5000);
     if (aiText) {
       const parsed = JSON.parse(aiText);
-      return res.json(parsed);
+      // Enforce deterministic geographic / local exclusion guardrail over cloud AI
+      if (!geoAssessment?.isEligible || localResult.decision === 'exclude') {
+        return res.json({
+          ...parsed,
+          decision: 'exclude',
+          confidenceScore: Math.max(parsed.confidenceScore || 90, localResult.confidenceScore),
+          primaryReason: !geoAssessment?.isEligible
+            ? `Wrong Study Area (${geoAssessment?.detectedScaleLabel}): ${geoAssessment?.interpretiveSummary}`
+            : localResult.primaryReason,
+          violatedExclusions: Array.from(
+            new Set([...(localResult.violatedExclusions || []), ...(parsed.violatedExclusions || [])])
+          ),
+          pageEvidence:
+            (localResult.pageEvidence || []).length > 0 ? localResult.pageEvidence : parsed.pageEvidence || [],
+          geographicAssessment: geoAssessment,
+          conceptAlignment,
+        });
+      }
+      if (geoAssessment?.isStrictGeographicScope && !geoAssessment?.isGeographicConfirmed && parsed.decision === 'include') {
+        return res.json({
+          ...parsed,
+          decision: 'uncertain',
+          primaryReason: localResult.primaryReason,
+          geographicAssessment: geoAssessment,
+          conceptAlignment,
+        });
+      }
+      return res.json({
+        ...parsed,
+        geographicAssessment: geoAssessment,
+        conceptAlignment,
+      });
     }
   } catch (err: any) {
     console.warn('Gemini cloud screening timed out or failed, falling back to local engine:', err?.message);
   }
 
   // Resilient fallback rule evaluation
-  const localResult = evaluateArticleLocally(article, projectCriteria);
   return res.json(localResult);
 });
 
@@ -4879,6 +5130,13 @@ app.post('/api/ai/rescan-qa', async (req: Request, res: Response) => {
       for (const s of scored) {
         const evalRes = evaluateArticleLocally(s.art, {
           title: project?.title,
+          scope: project?.scope,
+          discipline: project?.discipline,
+          publicationYears: project?.publicationYears,
+          geographicEligibility: project?.geographicEligibility,
+          geographicTargetScale: project?.geographicTargetScale,
+          frameworkType: project?.frameworkType,
+          frameworkFields: project?.frameworkFields,
           picoc: project?.picoc,
           inclusionCriteria: project?.inclusionCriteria,
           exclusionReasons: project?.standardExclusionReasons,

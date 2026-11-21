@@ -21,8 +21,16 @@ import {
   Tag,
   AlertCircle,
   ExternalLink,
+  Globe,
+  MapPin,
+  Layers,
 } from 'lucide-react';
-import { apiService } from '../services/apiService';
+import { apiService, mergeScreeningInsightsIntoExtractedData } from '../services/apiService';
+import { assessGeographicEligibility } from '../utils/geographicSensing';
+import {
+  evaluateIntegratedConceptAlignment,
+  extractConceptPhrasesAndTokens,
+} from '../utils/conceptScreeningEngine';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
 interface TitleScreeningWorkbenchProps {
@@ -152,6 +160,7 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
           aiSuggestedDecision: result.decision,
           aiConfidence: result.confidenceScore,
           aiReason: result.primaryReason,
+          extractedData: mergeScreeningInsightsIntoExtractedData(activeArticle.extractedData, result),
         };
         onUpdateArticle(updated);
       }
@@ -162,30 +171,71 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
     }
   };
 
-  // Keyword highlighting helper
+  // Dynamic phrase-aware keyword highlighting derived from active protocol, geographic scope & exclusion criteria
   const renderHighlightedText = (text: string) => {
     if (!text) return null;
-    const includeKeywords = ['uav', 'drone', 'unmanned', 'canopy', 'stress', 'thermal', 'multispectral', 'gsd', 'latency', 'machine learning', 'random forest', 'gully', 'erosion'];
-    const excludeKeywords = ['satellite-only', 'sentinel-2', 'landsat', 'narrative review', 'scoping review', 'editorial', 'flume experiment', 'opinion'];
 
-    const words = text.split(/(\s+)/);
-    return words.map((word, i) => {
-      const clean = word.toLowerCase().replace(/[^a-z0-9-]/g, '');
-      if (includeKeywords.includes(clean)) {
-        return (
-          <mark key={i} className="bg-emerald-500/25 text-emerald-200 px-1 py-0.5 rounded font-semibold border-b border-emerald-500/50">
-            {word}
-          </mark>
-        );
-      }
-      if (excludeKeywords.includes(clean)) {
+    const includeSources = [
+      project.title || '',
+      project.geographicEligibility || '',
+      ...project.inclusionCriteria.map((c) => c.includeRule || ''),
+      ...Object.values(project.picoc || {}).filter((v): v is string => typeof v === 'string'),
+      ...Object.values(project.frameworkFields || {}).filter((v): v is string => typeof v === 'string'),
+    ].join(' | ');
+
+    const excludeSources = [
+      ...project.inclusionCriteria.map((c) => c.excludeRule || ''),
+      ...(project.standardExclusionReasons || []),
+    ].join(' | ');
+
+    const incParsed = extractConceptPhrasesAndTokens(includeSources);
+    const excParsed = extractConceptPhrasesAndTokens(excludeSources);
+
+    const includeTerms = Array.from(
+      new Set([
+        ...incParsed.phrases,
+        ...incParsed.specificTokens.filter((t) => t.length >= 4),
+      ])
+    )
+      .sort((a, b) => b.length - a.length)
+      .slice(0, 28);
+
+    const excludeTerms = Array.from(
+      new Set([
+        ...excParsed.phrases,
+        ...excParsed.specificTokens.filter((t) => t.length >= 5 && !includeTerms.includes(t)),
+      ])
+    )
+      .sort((a, b) => b.length - a.length)
+      .slice(0, 18);
+
+    const allTerms = Array.from(new Set([...includeTerms, ...excludeTerms])).sort((a, b) => b.length - a.length);
+    if (allTerms.length === 0) return <span>{text}</span>;
+
+    const escapeRx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`\\b(${allTerms.map(escapeRx).join('|')})\\b`, 'gi');
+    const includeSet = new Set(includeTerms.map((t) => t.toLowerCase()));
+    const excludeSet = new Set(excludeTerms.map((t) => t.toLowerCase()));
+
+    const parts = text.split(pattern);
+    return parts.map((part, i) => {
+      if (!part) return null;
+      const lower = part.toLowerCase();
+      if (excludeSet.has(lower)) {
         return (
           <mark key={i} className="bg-rose-500/25 text-rose-200 px-1 py-0.5 rounded font-semibold border-b border-rose-500/50">
-            {word}
+            {part}
           </mark>
         );
       }
-      return <span key={i}>{word}</span>;
+      if (includeSet.has(lower)) {
+        return (
+          <mark key={i} className="bg-emerald-500/25 text-emerald-200 px-1 py-0.5 rounded font-semibold border-b border-emerald-500/50">
+            {part}
+          </mark>
+        );
+      }
+      return <span key={i}>{part}</span>;
     });
   };
 
@@ -400,6 +450,137 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
               {renderHighlightedText(activeArticle.abstract)}
             </div>
           </div>
+
+          {/* Study Area Location Connection & Geographic Eligibility Sensing */}
+          {(() => {
+            const geo = assessGeographicEligibility(activeArticle, project);
+            return (
+              <div
+                className={`p-3.5 rounded-2xl border space-y-2 text-xs ${
+                  !geo.isEligible
+                    ? 'bg-rose-950/30 border-rose-700/70'
+                    : geo.isStrictGeographicScope && !geo.isGeographicConfirmed
+                    ? 'bg-amber-950/25 border-amber-700/60'
+                    : 'bg-teal-950/20 border-teal-800/50'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-white flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-teal-400" />
+                    <span>Studied Place &amp; Geographic Eligibility Connection</span>
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
+                    <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-200">
+                      Studied Place: {geo.primaryPlaceLabel} ({geo.detectedScaleLabel})
+                    </span>
+                    <span
+                      className={`px-2 py-0.5 rounded border font-bold ${
+                        !geo.isEligible
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : geo.isStrictGeographicScope && !geo.isGeographicConfirmed
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      }`}
+                    >
+                      {geo.verdictLabel}
+                    </span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-300">{geo.interpretiveSummary}</p>
+                {geo.studyAreaConnections && geo.studyAreaConnections.length > 0 && (
+                  <div className="space-y-1 pt-1 border-t border-slate-800/70">
+                    {geo.studyAreaConnections.slice(0, 3).map((conn, cIdx) => (
+                      <div key={cIdx} className="flex items-start gap-2 text-[11px] text-slate-400">
+                        <MapPin
+                          className={`w-3 h-3 shrink-0 mt-0.5 ${
+                            conn.alignment === 'conflict'
+                              ? 'text-rose-400'
+                              : conn.alignment === 'aligned'
+                              ? 'text-emerald-400'
+                              : 'text-teal-400'
+                          }`}
+                        />
+                        <span className="min-w-0">
+                          <strong className="text-slate-200">{conn.place}</strong> [{conn.sourcePart}
+                          {conn.pageNumber ? ` · p.${conn.pageNumber}` : ''}]:{' '}
+                          <span className="italic text-slate-400">"{conn.quote}"</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* 4-Pillar Interconnected Concept Alignment (Case · Factors · Models · Validation) */}
+          {(() => {
+            const ca = evaluateIntegratedConceptAlignment(activeArticle, project);
+            return (
+              <div
+                className={`p-3.5 rounded-2xl border space-y-2.5 text-xs ${
+                  ca.isOffTopicCaseMismatch
+                    ? 'bg-rose-950/30 border-rose-700/70'
+                    : ca.caseAnchorMatched && ca.pillarsMatchedCount >= 2
+                    ? 'bg-emerald-950/20 border-emerald-800/50'
+                    : 'bg-slate-950/70 border-slate-800'
+                }`}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-white flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Interconnected Case · Factors · Models · Validation</span>
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded border text-[10px] font-bold font-mono ${
+                      ca.isOffTopicCaseMismatch
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                        : ca.caseAnchorMatched && ca.pillarsMatchedCount >= 2
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    }`}
+                  >
+                    {ca.isOffTopicCaseMismatch
+                      ? 'Off-Topic / Case Mismatch'
+                      : `${ca.pillarsMatchedCount}/4 Pillars · ${ca.integratedScore}%`}
+                  </span>
+                </div>
+
+                {ca.isOffTopicCaseMismatch && ca.offTopicReason && (
+                  <p className="text-[11px] text-rose-300 bg-rose-950/40 border border-rose-800/60 rounded-lg px-2.5 py-1.5">
+                    {ca.offTopicReason}
+                  </p>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-[11px]">
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-2">
+                    <span className="text-[10px] text-slate-400 block">Suspected Case</span>
+                    <span className="font-semibold text-white">
+                      {ca.matchedCasePhrases[0] || (ca.isOffTopicCaseMismatch ? 'Case Mismatch' : ca.targetCasePhrases[0] || 'Not confirmed')}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-2">
+                    <span className="text-[10px] text-slate-400 block">Conditioning Factors</span>
+                    <span className="font-semibold text-teal-300">
+                      {ca.conditioningFactors.slice(0, 4).join(', ') || 'None sensed'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-2">
+                    <span className="text-[10px] text-slate-400 block">Analytical Models</span>
+                    <span className="font-semibold text-indigo-300">
+                      {ca.analyticalModels.slice(0, 4).join(', ') || 'None sensed'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-2">
+                    <span className="text-[10px] text-slate-400 block">Validation &amp; Application</span>
+                    <span className="font-semibold text-emerald-300">
+                      {[...ca.validationMetrics.slice(0, 2), ...ca.applicationOutcomes.slice(0, 1)].join(', ') || 'None sensed'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Exclusion Reason Quick Selector */}
           <div className="pt-2 border-t border-slate-800 space-y-2">

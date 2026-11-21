@@ -5,6 +5,11 @@ import {
   getReviewTypeDefinition,
 } from './protocolFrameworks';
 import { assessGeographicEligibility } from './geographicSensing';
+import {
+  evaluateIntegratedConceptAlignment,
+  evaluateRuleWithPhraseInterconnection,
+  IntegratedConceptAlignment,
+} from './conceptScreeningEngine';
 
 export const DATABASE_PROVENANCE_OPTIONS = [
   'Google Scholar',
@@ -198,6 +203,7 @@ export interface ArticleMatrixAnalysis {
   codeDetailAnalysis: ArticleCodeDetailAnalysis;
   prismaDiagnostics: PrismaExclusionDiagnostics;
   geographicAssessment: ArticleGeographicAssessment;
+  conceptAlignment: IntegratedConceptAlignment;
 }
 
 const STOP_WORDS = new Set([
@@ -704,7 +710,24 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
   ).map((m) => m[0].trim());
   const hyperparametersAndSpecs = Array.from(new Set(hyperMatches)).slice(0, 6);
 
-  // 10. Protocol Framework & Research Questions Alignment (PICOC / PICO / PECO / PCC / SPIDER / SPICE / PICOS / CIMO)
+  // 10. Protocol Framework & Research Questions Alignment (Phrase-Interconnected + 4-Pillar Synthesis)
+  const conceptAlignment = evaluateIntegratedConceptAlignment(article, project);
+  const normCorpus = lower
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9.\s/-]+/g, ' ')
+    .replace(/[-/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const normSentences = sentences.map((s) =>
+    s
+      .toLowerCase()
+      .replace(/['’]/g, '')
+      .replace(/[^a-z0-9.\s/-]+/g, ' ')
+      .replace(/[-/]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  );
+
   const activeFramework = getFrameworkDefinition(project.frameworkType);
   const frameworkEntries = getActiveFrameworkFieldEntries(project);
 
@@ -713,8 +736,11 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
     const rawText = isContextEntry
       ? `${entry.value} ${project.geographicEligibility || ''}`
       : entry.value;
-    const terms = extractTerms(rawText);
-    let matchedTerms = terms.filter((t) => lower.includes(t)).slice(0, 6);
+    const ruleMatch = evaluateRuleWithPhraseInterconnection(rawText, normCorpus, normSentences);
+    let matchedTerms = [...ruleMatch.matchedPhrases, ...ruleMatch.matchedSpecificTokens].slice(0, 6);
+    if (matchedTerms.length === 0 && ruleMatch.isMatched) {
+      matchedTerms = ruleMatch.matchedGenericTokens.slice(0, 6);
+    }
     let evidenceSnippet = matchedTerms.length > 0 ? findBestSentenceForTerms(sentences, matchedTerms) : '';
 
     if (
@@ -735,9 +761,18 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
   });
 
   const matchedResearchQuestions: ResearchQuestionMatchDetail[] = (project.researchQuestions || []).map((rq) => {
+    const rqRule = evaluateRuleWithPhraseInterconnection(
+      `${rq.question} ${rq.mainEvidenceToCollect}`,
+      normCorpus,
+      normSentences
+    );
     const terms = extractTerms(`${rq.question} ${rq.mainEvidenceToCollect}`);
-    const matchedTerms = terms.filter((t) => lower.includes(t)).slice(0, 6);
-    const relevanceScore = terms.length > 0 ? Math.min(100, Math.round((matchedTerms.length / Math.min(terms.length, 6)) * 100)) : 0;
+    const matchedTerms = Array.from(
+      new Set([...rqRule.matchedPhrases, ...rqRule.matchedSpecificTokens])
+    ).slice(0, 6);
+    const relevanceScore = rqRule.isMatched
+      ? Math.min(100, Math.max(45, Math.round((matchedTerms.length / Math.max(1, Math.min(terms.length, 5))) * 100)))
+      : 0;
     const evidenceSnippet = matchedTerms.length > 0 ? findBestSentenceForTerms(sentences, matchedTerms) : '';
     return {
       code: rq.code,
@@ -749,17 +784,46 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
   });
 
   const criteriaCoding: CriterionCodingRow[] = (project.inclusionCriteria || []).map((crit) => {
-    const terms = extractTerms(`${crit.dimension} ${crit.includeRule}`);
-    const matched = terms.filter((t) => lower.includes(t));
-    const ratio = terms.length > 0 ? matched.length / terms.length : 0;
+    const isGeoCrit = /\b(geo|geography|geographic|geographical|location|region|area|study\s*area|study\s*site|setting|context|country|countries|nation|zonal|woreda|watershed|catchment|basin|spatial|place)\b/i.test(
+      `${crit.dimension} ${crit.includeRule} ${crit.excludeRule}`
+    );
+    if (isGeoCrit) {
+      const status: CriterionCodingRow['status'] =
+        geoAssessment.isEligible && geoAssessment.isGeographicConfirmed
+          ? 'Aligned'
+          : geoAssessment.isEligible
+          ? 'Partial'
+          : 'Not Evidenced';
+      return {
+        dimension: crit.dimension,
+        rule: crit.includeRule,
+        status,
+        extractedValue:
+          geoAssessment.detectedScale !== 'unspecified'
+            ? `${geoAssessment.primaryPlaceLabel} (${geoAssessment.detectedScaleLabel}) — ${geoAssessment.verdictLabel}`
+            : 'Study location unspecified',
+        evidenceQuote: geoAssessment.evidenceSnippet || geoAssessment.interpretiveSummary,
+      };
+    }
+
+    const ruleMatch = evaluateRuleWithPhraseInterconnection(
+      `${crit.dimension} ${crit.includeRule}`,
+      normCorpus,
+      normSentences
+    );
+    const matched = [...ruleMatch.matchedPhrases, ...ruleMatch.matchedSpecificTokens];
     const status: CriterionCodingRow['status'] =
-      matched.length >= 2 || ratio >= 0.35 ? 'Aligned' : matched.length === 1 ? 'Partial' : 'Not Evidenced';
+      ruleMatch.isMatched && (ruleMatch.matchedPhrases.length > 0 || matched.length >= 2)
+        ? 'Aligned'
+        : ruleMatch.isMatched
+        ? 'Partial'
+        : 'Not Evidenced';
     const evidenceQuote = matched.length > 0 ? findBestSentenceForTerms(sentences, matched) : '';
     return {
       dimension: crit.dimension,
       rule: crit.includeRule,
       status,
-      extractedValue: matched.length > 0 ? matched.slice(0, 5).join(', ') : 'No explicit keyword match',
+      extractedValue: matched.length > 0 ? matched.slice(0, 5).join(', ') : 'No interconnected phrase match',
       evidenceQuote,
     };
   });
@@ -795,17 +859,18 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
     sensor: detectedSensor || article.extractedData?.sensor,
     gsd: detectedGsd || article.extractedData?.gsd,
     altitude: detectedAltitude || article.extractedData?.altitude,
-    algorithm: detectedAlgorithm || article.extractedData?.algorithm,
+    algorithm: detectedAlgorithm || conceptAlignment.analyticalModels.slice(0, 3).join(', ') || article.extractedData?.algorithm,
     latency: detectedLatency || article.extractedData?.latency,
     latencyReported,
     groundTruth: detectedGroundTruth || article.extractedData?.groundTruth,
     spatialLeakageAddressed,
-    metrics: detectedMetrics || article.extractedData?.metrics,
+    metrics: detectedMetrics || conceptAlignment.validationMetrics.slice(0, 3).join(', ') || article.extractedData?.metrics,
     geographicRegion: detectedRegion || article.extractedData?.geographicRegion,
     geographicScale: article.extractedData?.geographicScale || geoAssessment.detectedScale,
     geographicVerdict: geoAssessment.verdict,
     geographicInterpretation: geoAssessment.interpretiveSummary,
     geographicHierarchy: geoAssessment.hierarchy,
+    geographicStudyEvidence: geoAssessment.evidenceSnippet || article.extractedData?.geographicStudyEvidence,
     sampleSize: detectedSampleSize || article.extractedData?.sampleSize,
     softwareTools: softwareToolsStr || undefined,
     codeRepository: codeRepoStr || undefined,
@@ -815,6 +880,27 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
       article.extractedData?.matchedPicocSummary ||
       `${picocHits}/${matchedPicoc.length} ${activeFramework.name} · ${rqHits}/${matchedResearchQuestions.length || 0} RQs (${protocolFocus.domainLabel})`,
     codedVariables,
+    suspectedCase:
+      conceptAlignment.matchedCasePhrases[0] ||
+      (conceptAlignment.caseAnchorMatched ? conceptAlignment.targetCasePhrases[0] : 'Case Not Matched'),
+    conditioningFactors:
+      conceptAlignment.conditioningFactors.length > 0
+        ? conceptAlignment.conditioningFactors.slice(0, 6).join(', ')
+        : undefined,
+    analyticalModels:
+      conceptAlignment.analyticalModels.length > 0
+        ? conceptAlignment.analyticalModels.slice(0, 5).join(', ')
+        : detectedAlgorithm || undefined,
+    validationMetrics:
+      conceptAlignment.validationMetrics.length > 0
+        ? conceptAlignment.validationMetrics.slice(0, 4).join(', ')
+        : detectedMetrics || undefined,
+    integratedApplication:
+      conceptAlignment.applicationOutcomes.length > 0
+        ? conceptAlignment.applicationOutcomes.slice(0, 3).join(', ')
+        : undefined,
+    conceptAlignmentScore: conceptAlignment.integratedScore,
+    integratedSummary: conceptAlignment.integratedSummary,
     keyFindings:
       article.extractedData?.keyFindings ||
       (quantitativeSnippets[0] ? quantitativeSnippets[0] : (article.abstract || '').slice(0, 240)),
@@ -836,7 +922,8 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
       quantitativeSnippets,
     },
     corpus,
-    geoAssessment
+    geoAssessment,
+    conceptAlignment
   );
 
   return {
@@ -856,6 +943,7 @@ export function analyzeArticleForMatrix(article: Article, project: ReviewProject
     },
     prismaDiagnostics,
     geographicAssessment: geoAssessment,
+    conceptAlignment,
   };
 }
 
@@ -870,7 +958,8 @@ export function detectPrismaExclusionDiagnostics(
   prePaperType?: PaperClassificationResult,
   preCodeDetail?: ArticleCodeDetailAnalysis,
   preCorpus?: string,
-  preGeoAssessment?: ArticleGeographicAssessment
+  preGeoAssessment?: ArticleGeographicAssessment,
+  preConceptAlignment?: IntegratedConceptAlignment
 ): PrismaExclusionDiagnostics {
   const paperType = prePaperType || classifyPaperType(article);
   const corpus = preCorpus || getSearchableCorpus(article);
@@ -910,39 +999,28 @@ export function detectPrismaExclusionDiagnostics(
     };
   };
 
-  // --- 1. Not relevant to the topic ---
-  const activeFrameworkEntries = getActiveFrameworkFieldEntries(project);
-  const topicSourceText = [
-    project.title,
-    project.subtitle,
-    project.scope,
-    project.discipline,
-    ...activeFrameworkEntries.slice(0, 3).map((e) => e.value),
-  ]
-    .filter(Boolean)
-    .join(' ');
-  const topicKeywords = extractTerms(topicSourceText).slice(0, 35);
-  const matchedTopicKeywords = topicKeywords.filter((kw) => lower.includes(kw));
-  const explicitOffTopic = /\b(not\s+relevant|off[- ]topic|out\s+of\s+scope|unrelated\s+(?:to\s+)?topic|outside\s+topic|wrong\s+topic|irrelevant)\b/i.test(reasonNotesLower);
+  // --- 1. Not relevant to the topic (Interconnected compound-phrase check + case mismatch guard) ---
+  const conceptAlign = preConceptAlignment || evaluateIntegratedConceptAlignment(article, project);
+  const explicitOffTopic = /\b(not\s+relevant|off[- ]topic|out\s+of\s+scope|unrelated\s+(?:to\s+)?topic|outside\s+topic|wrong\s+topic|irrelevant|case\s+mismatch)\b/i.test(reasonNotesLower);
   const lowTopicOverlap =
-    corpus.trim().length > 40 &&
-    topicKeywords.length >= 4 &&
-    matchedTopicKeywords.length === 0;
+    corpus.trim().length > 45 &&
+    (conceptAlign.isOffTopicCaseMismatch ||
+      (!conceptAlign.caseAnchorMatched && conceptAlign.targetCasePhrases.length > 0));
   const notRelDetected = explicitOffTopic || lowTopicOverlap;
   const notRelRes = applyOverride(
     'not_relevant_topic',
     notRelDetected,
     explicitOffTopic
       ? `Screening/decision reason notes off-topic scope`
+      : conceptAlign.isOffTopicCaseMismatch
+      ? conceptAlign.offTopicReason
       : lowTopicOverlap
-      ? `0/${topicKeywords.length} core protocol terms matched from "${project.title.slice(0, 48)}..."`
-      : `Aligned (${matchedTopicKeywords.length} protocol topic terms matched: ${matchedTopicKeywords.slice(0, 4).join(', ')})`,
+      ? `Missing interconnected target phrase(s): ${conceptAlign.targetCasePhrases.slice(0, 3).join(', ')}`
+      : `Aligned (${conceptAlign.pillarsMatchedCount}/4 concept pillars · ${conceptAlign.integratedScore}%): ${conceptAlign.matchedCasePhrases[0] || conceptAlign.targetCasePhrases[0] || 'Core focus matched'}`,
     explicitOffTopic
       ? (article.decisionReason || article.screeningNotes || '')
-      : lowTopicOverlap
-      ? `Expected topic concepts: ${topicKeywords.slice(0, 6).join(', ')}`
-      : `Matched: ${matchedTopicKeywords.slice(0, 5).join(', ')}`,
-    explicitOffTopic ? 96 : lowTopicOverlap ? 84 : 88
+      : conceptAlign.integratedSummary || conceptAlign.evidenceQuote,
+    explicitOffTopic ? 96 : lowTopicOverlap ? 91 : 90
   );
 
   // --- 2. Not primary research (conference abstract, thesis, review articles, editorial letter, book chapter) ---

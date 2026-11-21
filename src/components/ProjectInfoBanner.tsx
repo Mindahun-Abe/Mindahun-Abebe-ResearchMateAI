@@ -11,7 +11,7 @@ import {
 
 interface ProjectInfoBannerProps {
   project: ReviewProject;
-  onUpdateProject: (updated: ReviewProject) => void;
+  onUpdateProject: (updated: ReviewProject) => Promise<ReviewProject | void> | void;
   onSwitchProject: (projectId: string) => void;
   onCreateNewReview?: () => void;
 }
@@ -23,6 +23,8 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
   onCreateNewReview,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+  const [editError, setEditError] = useState('');
   const [copied, setCopied] = useState(false);
   const [showAiModal, setShowAiModal] = useState(false);
   const [aiTopicInput, setAiTopicInput] = useState('');
@@ -32,7 +34,9 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
 
   // Editable local state (always stays synced to active review partition)
   const [title, setTitle] = useState(project.title);
+  const [databaseFolderName, setDatabaseFolderName] = useState(project.databaseFolderName || '');
   const [subtitle, setSubtitle] = useState(project.subtitle);
+  const [scope, setScope] = useState(project.scope || '');
   const [methodology, setMethodology] = useState(project.methodologyFocus);
   const [geographic, setGeographic] = useState(project.geographicEligibility);
   const [years, setYears] = useState(project.publicationYears);
@@ -41,37 +45,81 @@ export const ProjectInfoBanner: React.FC<ProjectInfoBannerProps> = ({
 
   useEffect(() => {
     setTitle(project.title);
+    setDatabaseFolderName(project.databaseFolderName || '');
     setSubtitle(project.subtitle);
+    setScope(project.scope || '');
     setMethodology(project.methodologyFocus);
     setGeographic(project.geographicEligibility);
     setYears(project.publicationYears);
     setArticleTypes(project.articleTypes);
     setDiscipline(project.discipline);
+    setEditError('');
     setIsEditing(false);
-  }, [project.id, project.title, project.subtitle, project.methodologyFocus, project.geographicEligibility, project.publicationYears, project.articleTypes, project.discipline]);
+  }, [
+    project.id,
+    project.title,
+    project.databaseFolderName,
+    project.subtitle,
+    project.scope,
+    project.methodologyFocus,
+    project.geographicEligibility,
+    project.publicationYears,
+    project.articleTypes,
+    project.discipline,
+  ]);
 
   const handleClearEditFields = () => {
     setTitle('');
+    setDatabaseFolderName('');
     setSubtitle('');
+    setScope('');
     setMethodology('');
     setGeographic('');
     setYears('');
     setArticleTypes('');
     setDiscipline('');
+    setEditError('');
   };
 
-  const handleSave = () => {
-    onUpdateProject({
-      ...project,
-      title: title.trim() || 'Untitled Systematic Review',
-      subtitle: subtitle.trim() || 'Systematic Review Protocol',
-      methodologyFocus: methodology.trim() || 'PRISMA 2020 Systematic Review',
-      geographicEligibility: geographic.trim() || 'Global',
-      publicationYears: years.trim() || 'All Years',
-      articleTypes: articleTypes.trim() || 'Peer-reviewed research',
-      discipline: discipline.trim() || 'Interdisciplinary Studies',
-    });
-    setIsEditing(false);
+  const handleSave = async () => {
+    const cleanedFolder = databaseFolderName
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[._-]+|[._-]+$/g, '')
+      .slice(0, 80);
+
+    if (databaseFolderName.trim() && !cleanedFolder) {
+      setEditError('Database Folder Name must include letters or numbers (e.g., my_review_db).');
+      return;
+    }
+
+    setIsSavingEdit(true);
+    setEditError('');
+    try {
+      await onUpdateProject({
+        ...project,
+        title: title.trim() || 'Untitled Systematic Review',
+        ...(cleanedFolder
+          ? {
+              databaseFolderName: cleanedFolder,
+              databaseFolderPath: `database/reviews/${cleanedFolder}`,
+            }
+          : {}),
+        subtitle: subtitle.trim() || 'Systematic Review Protocol',
+        scope: scope.trim() || `${title.trim() || 'Review'} synthesis`,
+        methodologyFocus: methodology.trim() || 'PRISMA 2020 Systematic Review',
+        geographicEligibility: geographic.trim() || 'Global',
+        publicationYears: years.trim() || 'All Years',
+        articleTypes: articleTypes.trim() || 'Peer-reviewed research',
+        discipline: discipline.trim() || 'Interdisciplinary Studies',
+      });
+      setIsEditing(false);
+    } catch (err: any) {
+      setEditError(err?.message || 'Failed to update review database details.');
+    } finally {
+      setIsSavingEdit(false);
+    }
   };
 
   const activeFramework = getFrameworkDefinition(project.frameworkType);
@@ -231,26 +279,72 @@ ${project.booleanQuery}
               </button>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">
-                Review Topic / Title <span className="text-slate-400 font-normal">(Empty placeholder — type custom title)</span>
-              </label>
-              <input
-                type="text"
-                placeholder="Enter research review title (e.g., Systematic Review on Microplastics in Freshwater Ecosystems)..."
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 font-medium"
-              />
+            {editError && (
+              <div className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-700/70 text-rose-200 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{editError}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Review Topic / Title <span className="text-slate-400 font-normal">(Empty placeholder — type custom title)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="Enter research review title (e.g., Systematic Review on Microplastics in Freshwater Ecosystems)..."
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500 font-medium"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Database Folder Name <span className="text-teal-400 font-normal">(database/reviews/&lt;folder&gt;)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="Enter custom database folder name (e.g., microplastics_freshwater_db)..."
+                  value={databaseFolderName}
+                  onChange={(e) => {
+                    setDatabaseFolderName(e.target.value);
+                    if (editError) setEditError('');
+                  }}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-teal-300 font-mono placeholder:font-sans placeholder:text-slate-500 focus:outline-none focus:border-teal-500"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Focus / Subtitle Integration</label>
+                <input
+                  type="text"
+                  placeholder="Enter review focus, subtitle, or PRISMA protocol scope..."
+                  value={subtitle}
+                  onChange={(e) => setSubtitle(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Academic Discipline</label>
+                <input
+                  type="text"
+                  placeholder="e.g., Remote Sensing, Agronomy, Public Health, Computer Science..."
+                  value={discipline}
+                  onChange={(e) => setDiscipline(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
             </div>
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1">Focus / Subtitle Integration</label>
+              <label className="block text-xs font-semibold text-slate-300 mb-1">Scope &amp; Theoretical Motivation</label>
               <input
                 type="text"
-                placeholder="Enter review focus, subtitle, or PRISMA protocol scope..."
-                value={subtitle}
-                onChange={(e) => setSubtitle(e.target.value)}
-                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
+                placeholder="Brief description of the review scope, boundaries, and motivation..."
+                value={scope}
+                onChange={(e) => setScope(e.target.value)}
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
               />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -306,17 +400,21 @@ ${project.booleanQuery}
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setIsEditing(false)}
+                  onClick={() => {
+                    setEditError('');
+                    setIsEditing(false);
+                  }}
                   className="px-3 py-1.5 text-xs bg-slate-700 hover:bg-slate-600 rounded-lg text-slate-300 cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
+                  disabled={isSavingEdit}
                   onClick={handleSave}
-                  className="px-4 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg shadow-sm cursor-pointer"
+                  className="px-4 py-1.5 text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg shadow-sm cursor-pointer disabled:opacity-50"
                 >
-                  Save Changes
+                  {isSavingEdit ? 'Updating...' : 'Save Changes'}
                 </button>
               </div>
             </div>

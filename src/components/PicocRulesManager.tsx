@@ -168,6 +168,20 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
     setNewExcludeRule('');
   };
 
+  const handleUpdateCriterion = (
+    id: string,
+    field: keyof EligibilityCriterion,
+    val: string
+  ) => {
+    const updated = project.inclusionCriteria.map((c) =>
+      c.id === id ? { ...c, [field]: val } : c
+    );
+    onUpdateProject({
+      ...project,
+      inclusionCriteria: updated,
+    });
+  };
+
   const handleDeleteCriterion = (id: string) => {
     onUpdateProject({
       ...project,
@@ -183,6 +197,15 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
       standardExclusionReasons: [...project.standardExclusionReasons, newReason.trim()],
     });
     setNewReason('');
+  };
+
+  const handleUpdateReason = (index: number, value: string) => {
+    const updated = [...project.standardExclusionReasons];
+    updated[index] = value;
+    onUpdateProject({
+      ...project,
+      standardExclusionReasons: updated,
+    });
   };
 
   const handleDeleteReason = (index: number) => {
@@ -212,6 +235,20 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
     setNewRqCode('RQ' + (project.researchQuestions.length + 2));
     setNewRqText('');
     setNewRqEvidence('');
+  };
+
+  const handleUpdateRq = (
+    index: number,
+    field: keyof ResearchQuestion,
+    value: string
+  ) => {
+    const updated = project.researchQuestions.map((rq, idx) =>
+      idx === index ? { ...rq, [field]: value } : rq
+    );
+    onUpdateProject({
+      ...project,
+      researchQuestions: updated,
+    });
   };
 
   const handleDeleteRq = (index: number) => {
@@ -344,37 +381,76 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
         </div>
 
         {/* Independent Protocol Standards Selector: Standard SLR, Scoping Review, Meta-Analysis */}
-        <div className="bg-slate-950/90 p-3.5 rounded-xl border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="space-y-0.5">
-            <span className="text-[11px] font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
-              <Compass className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Independent Protocol Standard Mode</span>
-            </span>
-            <p className="text-[11px] text-slate-400">{activeProtocolStandard.description}</p>
+        <div className="bg-slate-950/90 p-3.5 rounded-xl border border-slate-800 space-y-3">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="space-y-0.5">
+              <span className="text-[11px] font-bold text-slate-200 uppercase tracking-wider flex items-center gap-1.5">
+                <Compass className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Independent Protocol Standard Mode</span>
+              </span>
+              <p className="text-[11px] text-slate-400">{activeProtocolStandard.description}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {(Object.keys(PROTOCOL_STANDARD_DEFINITIONS) as ProtocolStandardType[]).map((stdKey) => {
+                const stdDef = PROTOCOL_STANDARD_DEFINITIONS[stdKey];
+                const isSelected = activeProtocolStandard.id === stdKey;
+                return (
+                  <button
+                    key={stdKey}
+                    type="button"
+                    onClick={() => handleProtocolStandardChange(stdKey)}
+                    className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
+                      isSelected
+                        ? stdKey === 'scoping_review'
+                          ? 'bg-teal-600 text-white border-teal-500 shadow-sm'
+                          : stdKey === 'meta_analysis'
+                          ? 'bg-purple-600 text-white border-purple-500 shadow-sm'
+                          : 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
+                        : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:border-slate-700'
+                    }`}
+                  >
+                    {stdDef.shortBadge}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-            {(Object.keys(PROTOCOL_STANDARD_DEFINITIONS) as ProtocolStandardType[]).map((stdKey) => {
-              const stdDef = PROTOCOL_STANDARD_DEFINITIONS[stdKey];
-              const isSelected = activeProtocolStandard.id === stdKey;
-              return (
-                <button
-                  key={stdKey}
-                  type="button"
-                  onClick={() => handleProtocolStandardChange(stdKey)}
-                  className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border transition cursor-pointer ${
-                    isSelected
-                      ? stdKey === 'scoping_review'
-                        ? 'bg-teal-600 text-white border-teal-500 shadow-sm'
-                        : stdKey === 'meta_analysis'
-                        ? 'bg-purple-600 text-white border-purple-500 shadow-sm'
-                        : 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
-                      : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:border-slate-700'
-                  }`}
-                >
-                  {stdDef.shortBadge}
-                </button>
-              );
-            })}
+
+          <div className="pt-2 border-t border-slate-800/80 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-400 mb-1">
+                Custom Methodology Focus Label (Editable)
+              </label>
+              <input
+                type="text"
+                value={project.methodologyFocus || ''}
+                onChange={(e) =>
+                  onUpdateProject({
+                    ...project,
+                    methodologyFocus: e.target.value,
+                  })
+                }
+                placeholder="e.g., PRISMA 2020 Systematic Review & Meta-Analysis"
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-slate-400 mb-1">
+                Review Scope / Core Focus (Editable)
+              </label>
+              <input
+                type="text"
+                value={project.scope || ''}
+                onChange={(e) =>
+                  onUpdateProject({
+                    ...project,
+                    scope: e.target.value,
+                  })
+                }
+                placeholder="Describe review scope and boundaries..."
+                className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -516,7 +592,7 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
                 {activeReviewType.name} Research Questions
               </h3>
               <p className="text-xs text-slate-400">
-                Structures your literature search, data extraction form, synthesis tables, and discussion under {activeFramework.name}.
+                Edit any existing research question, code, or evidence requirement directly in place — changes auto-save to your review database.
               </p>
             </div>
           </div>
@@ -525,22 +601,46 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
             <table className="w-full text-left text-xs text-slate-300">
               <thead className="bg-slate-950 text-slate-400 uppercase text-[11px] border-b border-slate-800">
                 <tr>
-                  <th className="py-3 px-4 w-16">Code</th>
-                  <th className="py-3 px-4">Research Question</th>
-                  <th className="py-3 px-4">Main Evidence to Collect</th>
-                  <th className="py-3 px-4 w-16 text-right">Action</th>
+                  <th className="py-3 px-3 w-24">Code</th>
+                  <th className="py-3 px-3">Research Question (Editable)</th>
+                  <th className="py-3 px-3">Main Evidence to Collect (Editable)</th>
+                  <th className="py-3 px-3 w-14 text-right">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/80 bg-slate-900/50">
                 {project.researchQuestions.map((rq, idx) => (
-                  <tr key={idx} className="hover:bg-slate-800/40 transition">
-                    <td className="py-3 px-4 font-mono font-bold text-indigo-400">{rq.code}</td>
-                    <td className="py-3 px-4 font-medium text-white">{rq.question}</td>
-                    <td className="py-3 px-4 text-slate-300">{rq.mainEvidenceToCollect}</td>
-                    <td className="py-3 px-4 text-right">
+                  <tr key={idx} className="hover:bg-slate-800/30 transition align-top">
+                    <td className="py-2.5 px-3">
+                      <input
+                        type="text"
+                        value={rq.code}
+                        onChange={(e) => handleUpdateRq(idx, 'code', e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-2 py-1.5 font-mono font-bold text-indigo-300 text-xs focus:outline-none"
+                      />
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <textarea
+                        rows={2}
+                        value={rq.question}
+                        onChange={(e) => handleUpdateRq(idx, 'question', e.target.value)}
+                        placeholder="Enter research question..."
+                        className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 font-medium text-white text-xs focus:outline-none"
+                      />
+                    </td>
+                    <td className="py-2.5 px-3">
+                      <textarea
+                        rows={2}
+                        value={rq.mainEvidenceToCollect}
+                        onChange={(e) => handleUpdateRq(idx, 'mainEvidenceToCollect', e.target.value)}
+                        placeholder="Evidence to collect..."
+                        className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 text-slate-200 text-xs focus:outline-none"
+                      />
+                    </td>
+                    <td className="py-2.5 px-3 text-right">
                       <button
+                        type="button"
                         onClick={() => handleDeleteRq(idx)}
-                        className="text-slate-500 hover:text-rose-400 p-1 cursor-pointer"
+                        className="text-slate-500 hover:text-rose-400 p-1.5 cursor-pointer"
                         title="Delete question"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -607,7 +707,7 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
             <div>
               <h3 className="text-base font-bold text-white">Explicit Eligibility Rules Matrix</h3>
               <p className="text-xs text-slate-400">
-                Define operational inclusion and exclusion criteria before screening to eliminate selection bias.
+                Edit any existing dimension, inclusion rule, or exclusion rule directly in place — no need to delete and re-add.
               </p>
             </div>
           </div>
@@ -616,36 +716,67 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
             {project.inclusionCriteria.map((crit) => (
               <div
                 key={crit.id}
-                className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs flex flex-col md:flex-row md:items-center justify-between gap-4"
+                className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs grid grid-cols-1 md:grid-cols-12 gap-3 items-start"
               >
-                <div className="md:w-1/4">
-                  <span className="font-bold text-white text-sm">{crit.dimension}</span>
-                  <span className="block text-[11px] text-slate-500 font-mono">Dimension</span>
+                <div className="md:col-span-3 space-y-1.5">
+                  <label className="block text-[10px] text-slate-400 font-semibold uppercase">
+                    Dimension &amp; Rule Type
+                  </label>
+                  <input
+                    type="text"
+                    value={crit.dimension}
+                    onChange={(e) => handleUpdateCriterion(crit.id, 'dimension', e.target.value)}
+                    placeholder="Dimension name"
+                    className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-2.5 py-1.5 font-bold text-white text-xs focus:outline-none"
+                  />
+                  <select
+                    value={crit.category || 'inclusion'}
+                    onChange={(e) => handleUpdateCriterion(crit.id, 'category', e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-slate-300 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                  >
+                    <option value="inclusion">Primary Inclusion Criterion</option>
+                    <option value="exclusion">Exclusion Criterion</option>
+                  </select>
                 </div>
 
-                <div className="md:w-3/8 bg-emerald-950/20 border border-emerald-800/40 p-2.5 rounded-lg">
-                  <div className="flex items-center gap-1.5 text-emerald-400 font-semibold mb-1">
+                <div className="md:col-span-4 bg-emerald-950/20 border border-emerald-800/40 p-2.5 rounded-lg space-y-1">
+                  <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
                     <Check className="w-3.5 h-3.5" />
-                    <span>Include Rule</span>
+                    <span>Include Rule (Editable)</span>
                   </div>
-                  <p className="text-slate-200">{crit.includeRule}</p>
+                  <textarea
+                    rows={2}
+                    value={crit.includeRule}
+                    onChange={(e) => handleUpdateCriterion(crit.id, 'includeRule', e.target.value)}
+                    placeholder="Explicit inclusion rule..."
+                    className="w-full bg-slate-900/90 border border-emerald-900/50 focus:border-emerald-500 rounded-lg p-2 text-slate-100 text-xs focus:outline-none"
+                  />
                 </div>
 
-                <div className="md:w-3/8 bg-rose-950/20 border border-rose-800/40 p-2.5 rounded-lg">
-                  <div className="flex items-center gap-1.5 text-rose-400 font-semibold mb-1">
+                <div className="md:col-span-4 bg-rose-950/20 border border-rose-800/40 p-2.5 rounded-lg space-y-1">
+                  <div className="flex items-center gap-1.5 text-rose-400 font-semibold">
                     <X className="w-3.5 h-3.5" />
-                    <span>Exclude Rule</span>
+                    <span>Exclude Rule (Editable)</span>
                   </div>
-                  <p className="text-slate-200">{crit.excludeRule}</p>
+                  <textarea
+                    rows={2}
+                    value={crit.excludeRule}
+                    onChange={(e) => handleUpdateCriterion(crit.id, 'excludeRule', e.target.value)}
+                    placeholder="Explicit exclusion rule..."
+                    className="w-full bg-slate-900/90 border border-rose-900/50 focus:border-rose-500 rounded-lg p-2 text-slate-100 text-xs focus:outline-none"
+                  />
                 </div>
 
-                <button
-                  onClick={() => handleDeleteCriterion(crit.id)}
-                  className="text-slate-500 hover:text-rose-400 p-1 self-end md:self-center cursor-pointer"
-                  title="Delete criterion"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <div className="md:col-span-1 flex justify-end md:pt-5">
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteCriterion(crit.id)}
+                    className="text-slate-500 hover:text-rose-400 p-1.5 cursor-pointer"
+                    title="Delete criterion"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
             ))}
           </div>
@@ -734,17 +865,22 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
               {project.standardExclusionReasons.map((reason, idx) => (
                 <div
                   key={idx}
-                  className="flex items-center justify-between p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200"
+                  className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200"
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center font-bold text-[10px]">
-                      {idx + 1}
-                    </span>
-                    <span>{reason}</span>
-                  </div>
+                  <span className="w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center font-bold text-[10px] shrink-0">
+                    {idx + 1}
+                  </span>
+                  <input
+                    type="text"
+                    value={reason}
+                    onChange={(e) => handleUpdateReason(idx, e.target.value)}
+                    placeholder="Standard exclusion reason..."
+                    className="flex-1 bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none"
+                  />
                   <button
+                    type="button"
                     onClick={() => handleDeleteReason(idx)}
-                    className="text-slate-500 hover:text-rose-400 p-1 cursor-pointer"
+                    className="text-slate-500 hover:text-rose-400 p-1.5 cursor-pointer shrink-0"
                     title="Remove reason"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -795,7 +931,7 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
 
           <textarea
             rows={4}
-            value={project.booleanQuery}
+            value={project.booleanQuery || ''}
             onChange={(e) =>
               onUpdateProject({
                 ...project,

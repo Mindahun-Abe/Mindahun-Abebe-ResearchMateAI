@@ -13,6 +13,8 @@ import {
   ShieldCheck,
   Clock,
   Layers,
+  Pencil,
+  Check,
   X,
 } from 'lucide-react';
 
@@ -27,6 +29,14 @@ interface SavedReviewFoldersProps {
     savedAt?: string;
     databaseFolderPath?: string;
   }>;
+  onRenameProjectFolder?: (
+    projectId: string,
+    folderName: string
+  ) => Promise<{
+    databaseFolderName: string;
+    databaseFolderPath: string;
+  }>;
+  onUpdateProject?: (updated: ReviewProject) => Promise<ReviewProject | void> | void;
   onDeleteProjectFolder: (projectId: string) => Promise<{
     success: boolean;
     deletedFolderPath?: string;
@@ -41,10 +51,38 @@ export const SavedReviewFolders: React.FC<SavedReviewFoldersProps> = ({
   onOpenProjectLibrary,
   onCreateNewReview,
   onSaveFolderChanges,
+  onRenameProjectFolder,
+  onUpdateProject,
   onDeleteProjectFolder,
   onOpenAddFilesForProject,
 }) => {
   const [savingId, setSavingId] = useState<string | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [draftFolderName, setDraftFolderName] = useState('');
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [editingDetailsId, setEditingDetailsId] = useState<string | null>(null);
+  const [updatingDetailsId, setUpdatingDetailsId] = useState<string | null>(null);
+  const [detailsDraft, setDetailsDraft] = useState<{
+    databaseFolderName: string;
+    title: string;
+    subtitle: string;
+    discipline: string;
+    scope: string;
+    methodologyFocus: string;
+    geographicEligibility: string;
+    publicationYears: string;
+    articleTypes: string;
+  }>({
+    databaseFolderName: '',
+    title: '',
+    subtitle: '',
+    discipline: '',
+    scope: '',
+    methodologyFocus: '',
+    geographicEligibility: '',
+    publicationYears: '',
+    articleTypes: '',
+  });
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<{
@@ -89,6 +127,117 @@ export const SavedReviewFolders: React.FC<SavedReviewFoldersProps> = ({
       });
     } finally {
       setDeletingId(null);
+    }
+  };
+
+  const handleStartRename = (proj: ReviewProject) => {
+    const currentFolder =
+      proj.databaseFolderName ||
+      (proj.databaseFolderPath ? proj.databaseFolderPath.replace(/^database\/reviews\//, '') : proj.id);
+    setEditingFolderId(proj.id);
+    setDraftFolderName(currentFolder);
+    setStatusBanner(null);
+  };
+
+  const handleSaveRename = async (proj: ReviewProject) => {
+    if (!onRenameProjectFolder) return;
+    const cleaned = draftFolderName.trim();
+    if (!cleaned) {
+      setStatusBanner({
+        type: 'error',
+        message: 'Database folder name cannot be empty.',
+      });
+      return;
+    }
+    setRenamingId(proj.id);
+    try {
+      const res = await onRenameProjectFolder(proj.id, cleaned);
+      setEditingFolderId(null);
+      setDraftFolderName('');
+      setStatusBanner({
+        type: 'success',
+        message: `Renamed database folder for "${proj.title}" to "/${res.databaseFolderName}".`,
+        path: res.databaseFolderPath,
+      });
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        message: err?.message || `Failed to rename database folder for "${proj.title}".`,
+      });
+    } finally {
+      setRenamingId(null);
+    }
+  };
+
+  const handleStartEditDetails = (proj: ReviewProject) => {
+    const currentFolder =
+      proj.databaseFolderName ||
+      (proj.databaseFolderPath ? proj.databaseFolderPath.replace(/^database\/reviews\//, '') : proj.id);
+    setEditingFolderId(null);
+    setEditingDetailsId(proj.id);
+    setDetailsDraft({
+      databaseFolderName: currentFolder,
+      title: proj.title || '',
+      subtitle: proj.subtitle || '',
+      discipline: proj.discipline || '',
+      scope: proj.scope || '',
+      methodologyFocus: proj.methodologyFocus || '',
+      geographicEligibility: proj.geographicEligibility || '',
+      publicationYears: proj.publicationYears || '',
+      articleTypes: proj.articleTypes || '',
+    });
+    setStatusBanner(null);
+  };
+
+  const handleSaveDetails = async (proj: ReviewProject) => {
+    if (!onUpdateProject) return;
+    const cleanedFolder = detailsDraft.databaseFolderName
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^[._-]+|[._-]+$/g, '')
+      .slice(0, 80);
+
+    if (detailsDraft.databaseFolderName.trim() && !cleanedFolder) {
+      setStatusBanner({
+        type: 'error',
+        message: 'Database folder name must include letters or numbers.',
+      });
+      return;
+    }
+
+    setUpdatingDetailsId(proj.id);
+    try {
+      const updated = await onUpdateProject({
+        ...proj,
+        title: detailsDraft.title.trim() || 'Untitled Research Review',
+        ...(cleanedFolder
+          ? {
+              databaseFolderName: cleanedFolder,
+              databaseFolderPath: `database/reviews/${cleanedFolder}`,
+            }
+          : {}),
+        subtitle: detailsDraft.subtitle.trim() || 'Systematic Review Protocol',
+        discipline: detailsDraft.discipline.trim() || 'Interdisciplinary Studies',
+        scope: detailsDraft.scope.trim() || `${detailsDraft.title.trim() || proj.title} synthesis`,
+        methodologyFocus: detailsDraft.methodologyFocus.trim() || 'PRISMA 2020 Systematic Review',
+        geographicEligibility: detailsDraft.geographicEligibility.trim() || 'Global',
+        publicationYears: detailsDraft.publicationYears.trim() || 'All Years',
+        articleTypes: detailsDraft.articleTypes.trim() || 'Peer-reviewed empirical studies',
+      });
+      setEditingDetailsId(null);
+      setStatusBanner({
+        type: 'success',
+        message: `Updated review database "${detailsDraft.title.trim() || proj.title}".`,
+        path: (updated as any)?.databaseFolderPath || (cleanedFolder ? `database/reviews/${cleanedFolder}` : proj.databaseFolderPath),
+      });
+    } catch (err: any) {
+      setStatusBanner({
+        type: 'error',
+        message: err?.message || `Failed to update database "${proj.title}".`,
+      });
+    } finally {
+      setUpdatingDetailsId(null);
     }
   };
 
@@ -234,14 +383,71 @@ export const SavedReviewFolders: React.FC<SavedReviewFoldersProps> = ({
                     </div>
                   </div>
 
-                  {/* Dedicated Partition Path */}
-                  <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 space-y-1 text-[11px]">
-                    <div className="flex items-center gap-1.5 text-teal-400 font-mono truncate">
-                      <Database className="w-3.5 h-3.5 shrink-0" />
-                      <span className="truncate" title={`${folderRelPath}/articles.json`}>
-                        {folderRelPath}/articles.json
-                      </span>
-                    </div>
+                  {/* Dedicated Partition Path (Editable Folder Name) */}
+                  <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/90 space-y-1.5 text-[11px]">
+                    {editingFolderId === proj.id ? (
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] font-semibold text-teal-300 block">
+                          Edit Database Folder Name (database/reviews/&lt;folder&gt;)
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <input
+                            type="text"
+                            value={draftFolderName}
+                            onChange={(e) => setDraftFolderName(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleSaveRename(proj);
+                              } else if (e.key === 'Escape') {
+                                setEditingFolderId(null);
+                              }
+                            }}
+                            placeholder="Enter custom folder name..."
+                            className="flex-1 min-w-0 bg-slate-900 border border-teal-500/70 rounded-lg px-2.5 py-1 text-[11px] font-mono text-white focus:outline-none focus:border-teal-400"
+                            autoFocus
+                          />
+                          <button
+                            type="button"
+                            disabled={renamingId === proj.id}
+                            onClick={() => handleSaveRename(proj)}
+                            className="px-2 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 shrink-0"
+                            title="Save new database folder name"
+                          >
+                            <Check className="w-3 h-3" />
+                            <span>{renamingId === proj.id ? 'Saving...' : 'Save'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingFolderId(null)}
+                            className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer shrink-0"
+                            title="Cancel rename"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 text-teal-400 font-mono truncate min-w-0">
+                          <Database className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate" title={`${folderRelPath}/articles.json`}>
+                            {folderRelPath}/articles.json
+                          </span>
+                        </div>
+                        {onRenameProjectFolder && (
+                          <button
+                            type="button"
+                            onClick={() => handleStartRename(proj)}
+                            className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-teal-300 border border-slate-800 text-[10px] font-medium inline-flex items-center gap-1 cursor-pointer shrink-0 transition"
+                            title="Edit database folder name"
+                          >
+                            <Pencil className="w-2.5 h-2.5" />
+                            <span>Rename</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <div className="flex flex-wrap items-center gap-3 text-[10px] text-slate-400">
                       <span className="inline-flex items-center gap-1">
                         <Layers className="w-3 h-3 text-emerald-400" />
@@ -258,6 +464,121 @@ export const SavedReviewFolders: React.FC<SavedReviewFoldersProps> = ({
                       )}
                     </div>
                   </div>
+                  {/* Inline Full Review & Database Details Editor */}
+                  {editingDetailsId === proj.id && (
+                    <div className="p-3 rounded-xl bg-slate-950 border border-indigo-700/60 space-y-2.5 text-[11px]">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+                        <span className="font-bold text-indigo-300">Update Review &amp; Database Details</span>
+                        <button
+                          type="button"
+                          onClick={() => setEditingDetailsId(null)}
+                          className="text-slate-400 hover:text-white cursor-pointer"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Review Title</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.title}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, title: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-teal-400 block mb-0.5">Database Folder Name</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.databaseFolderName}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, databaseFolderName: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 font-mono text-teal-300 focus:outline-none focus:border-teal-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Subtitle / Focus</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.subtitle}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, subtitle: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Discipline</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.discipline}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, discipline: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Scope &amp; Motivation</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.scope}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, scope: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Methodology Focus</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.methodologyFocus}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, methodologyFocus: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Geographic Eligibility</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.geographicEligibility}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, geographicEligibility: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Publication Years</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.publicationYears}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, publicationYears: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-400 block mb-0.5">Article Types</label>
+                          <input
+                            type="text"
+                            value={detailsDraft.articleTypes}
+                            onChange={(e) => setDetailsDraft({ ...detailsDraft, articleTypes: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1 text-white focus:outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setEditingDetailsId(null)}
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          disabled={updatingDetailsId === proj.id}
+                          onClick={() => handleSaveDetails(proj)}
+                          className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold cursor-pointer disabled:opacity-50"
+                        >
+                          {updatingDetailsId === proj.id ? 'Updating...' : 'Update Database'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Per-Folder Explicit Actions */}
@@ -307,6 +628,22 @@ export const SavedReviewFolders: React.FC<SavedReviewFoldersProps> = ({
                         <Upload className="w-3.5 h-3.5 text-teal-400" />
                         <span>Add Files</span>
                       </button>
+
+                      {onUpdateProject && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            editingDetailsId === proj.id
+                              ? setEditingDetailsId(null)
+                              : handleStartEditDetails(proj)
+                          }
+                          className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-indigo-300 border border-indigo-700/50 font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
+                          title="Edit review metadata and database details"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          <span>{editingDetailsId === proj.id ? 'Close Edit' : 'Edit Details'}</span>
+                        </button>
+                      )}
 
                       <button
                         type="button"

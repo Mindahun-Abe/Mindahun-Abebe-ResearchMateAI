@@ -19,9 +19,11 @@ import {
   Cpu,
   Database,
   Download,
+  Edit3,
   ExternalLink,
   FileCheck2,
   Layers,
+  Save,
   ShieldAlert,
   ShieldCheck,
   X,
@@ -49,12 +51,32 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
 }) => {
   const [notesDraft, setNotesDraft] = useState('');
   const [customDb, setCustomDb] = useState('');
+  const [isEditingRecord, setIsEditingRecord] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  const [editAuthors, setEditAuthors] = useState('');
+  const [editYear, setEditYear] = useState('');
+  const [editJournal, setEditJournal] = useState('');
+  const [editDoi, setEditDoi] = useState('');
+  const [editUrl, setEditUrl] = useState('');
+  const [editPdfUrl, setEditPdfUrl] = useState('');
+  const [editPublisher, setEditPublisher] = useState('');
+  const [editAbstract, setEditAbstract] = useState('');
 
   useEffect(() => {
     if (!article || !analysis) return;
     setNotesDraft(article.codeAnalysisNotes || '');
     const db = analysis.sourceProvenance.database || article.sourceDatabase || 'Other';
     setCustomDb(DATABASE_PROVENANCE_OPTIONS.includes(db as any) ? '' : db);
+    setEditTitle(article.title || '');
+    setEditAuthors((article.authors || []).join(', '));
+    setEditYear(String(article.year || ''));
+    setEditJournal(article.journal || '');
+    setEditDoi(article.doi || '');
+    setEditUrl(article.url || '');
+    setEditPdfUrl(article.pdfUrl || article.openAccessUrl || '');
+    setEditPublisher(article.publisher || '');
+    setEditAbstract(article.abstract || '');
+    setIsEditingRecord(false);
   }, [article?.id, analysis?.sourceProvenance.database]);
 
   if (!article || !analysis) return null;
@@ -137,16 +159,149 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
               {article.authors?.join(', ')} ({article.year}) · <span className="italic">{article.journal}</span>
             </p>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 rounded-xl border border-slate-800 transition cursor-pointer shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsEditingRecord((v) => !v)}
+              className="px-3 py-1.5 text-xs font-semibold rounded-xl bg-indigo-600/80 hover:bg-indigo-600 text-white inline-flex items-center gap-1.5 transition cursor-pointer"
+              title="Edit and update stored article metadata in the database"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>{isEditingRecord ? 'Cancel Edit' : 'Edit Record'}</span>
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 rounded-xl border border-slate-800 transition cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
+          {isEditingRecord && (
+            <div className="bg-slate-950 border border-indigo-700/70 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <span className="font-bold text-indigo-300 text-xs uppercase tracking-wider">
+                  Update Stored Article Database Record
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const parsedYear = Number.parseInt(editYear, 10);
+                    onUpdateArticle({
+                      ...article,
+                      title: editTitle.trim() || article.title,
+                      authors: editAuthors
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                      year: Number.isFinite(parsedYear) ? parsedYear : article.year,
+                      journal: editJournal.trim(),
+                      doi: editDoi.trim(),
+                      url: editUrl.trim(),
+                      pdfUrl: editPdfUrl.trim() || undefined,
+                      openAccessUrl: editPdfUrl.trim() || article.openAccessUrl,
+                      publisher: editPublisher.trim() || undefined,
+                      abstract: editAbstract.trim(),
+                    });
+                    setIsEditingRecord(false);
+                    onSavedToast?.('Updated article record in partitioned database.');
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Save Database Update</span>
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] text-slate-400 mb-1">Article Title</label>
+                  <input
+                    type="text"
+                    value={editTitle}
+                    onChange={(e) => setEditTitle(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Authors (comma-separated)</label>
+                  <input
+                    type="text"
+                    value={editAuthors}
+                    onChange={(e) => setEditAuthors(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Year</label>
+                    <input
+                      type="number"
+                      value={editYear}
+                      onChange={(e) => setEditYear(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">DOI</label>
+                    <input
+                      type="text"
+                      value={editDoi}
+                      onChange={(e) => setEditDoi(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 font-mono text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Journal / Venue</label>
+                  <input
+                    type="text"
+                    value={editJournal}
+                    onChange={(e) => setEditJournal(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Publisher</label>
+                  <input
+                    type="text"
+                    value={editPublisher}
+                    onChange={(e) => setEditPublisher(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">Article Landing URL</label>
+                  <input
+                    type="text"
+                    value={editUrl}
+                    onChange={(e) => setEditUrl(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] text-slate-400 mb-1">PDF / Open-Access URL</label>
+                  <input
+                    type="text"
+                    value={editPdfUrl}
+                    onChange={(e) => setEditPdfUrl(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block text-[11px] text-slate-400 mb-1">Abstract</label>
+                  <textarea
+                    rows={3}
+                    value={editAbstract}
+                    onChange={(e) => setEditAbstract(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-white focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+              </div>
+            </div>
+          )}
           {/* Row 0: PRISMA 2020 Protocol Eligibility & 8-Point Exclusion Diagnostics */}
           <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">

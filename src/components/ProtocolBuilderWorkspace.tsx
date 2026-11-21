@@ -1214,12 +1214,40 @@ export const ProtocolBuilderWorkspace: React.FC<ProtocolBuilderWorkspaceProps> =
                   {protocol.frameworkComponents.map((comp, idx) => (
                     <div key={comp.id} className="border border-slate-200 rounded-lg p-3.5 space-y-2.5">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="font-bold text-slate-900">
-                          <span className="inline-block px-2 py-0.5 rounded bg-indigo-700 text-white font-mono mr-2">
-                            {comp.componentCode}
-                          </span>
-                          {comp.componentName}
-                          <span className="ml-2 font-normal text-slate-500">— {comp.definition}</span>
+                        <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[240px]">
+                          <input
+                            type="text"
+                            value={comp.componentCode}
+                            onChange={(e) => {
+                              const next = [...protocol.frameworkComponents];
+                              next[idx] = { ...comp, componentCode: e.target.value };
+                              setProtocol({ ...protocol, frameworkComponents: next });
+                            }}
+                            placeholder="Code"
+                            className="w-16 px-2 py-0.5 rounded bg-indigo-700 text-white font-mono font-bold text-center border border-indigo-600 focus:outline-none"
+                          />
+                          <input
+                            type="text"
+                            value={comp.componentName}
+                            onChange={(e) => {
+                              const next = [...protocol.frameworkComponents];
+                              next[idx] = { ...comp, componentName: e.target.value };
+                              setProtocol({ ...protocol, frameworkComponents: next });
+                            }}
+                            placeholder="Component name"
+                            className="font-bold text-slate-900 border border-slate-200 rounded px-2 py-0.5 min-w-[160px]"
+                          />
+                          <input
+                            type="text"
+                            value={comp.definition}
+                            onChange={(e) => {
+                              const next = [...protocol.frameworkComponents];
+                              next[idx] = { ...comp, definition: e.target.value };
+                              setProtocol({ ...protocol, frameworkComponents: next });
+                            }}
+                            placeholder="Component definition..."
+                            className="flex-1 min-w-[200px] text-slate-600 border border-slate-200 rounded px-2 py-0.5"
+                          />
                         </div>
                         <div className="flex items-center gap-2">
                           <select

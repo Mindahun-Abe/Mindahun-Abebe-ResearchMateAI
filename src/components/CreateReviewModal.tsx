@@ -19,7 +19,9 @@ import {
   BookOpen,
   Check,
   Compass,
+  Database,
   FileText,
+  FolderEdit,
   HelpCircle,
   Layers,
   Plus,
@@ -31,15 +33,27 @@ interface CreateReviewModalProps {
   isOpen: boolean;
   onClose: () => void;
   onCreateProject: (project: ReviewProject) => void;
+  existingFolderNames?: string[];
+}
+
+function sanitizeFolderNameInput(raw: string): string {
+  return raw
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 80);
 }
 
 export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
   isOpen,
   onClose,
   onCreateProject,
+  existingFolderNames = [],
 }) => {
   // Pure manual blank state - all inputs start empty with descriptive placeholders (NOT auto-filled)
   const [title, setTitle] = useState('');
+  const [databaseFolderName, setDatabaseFolderName] = useState('');
   const [subtitle, setSubtitle] = useState('');
   const [discipline, setDiscipline] = useState('');
   const [scope, setScope] = useState('');
@@ -87,6 +101,7 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
   // Clear all fields back to blank placeholders
   const handleClearAll = () => {
     setTitle('');
+    setDatabaseFolderName('');
     setSubtitle('');
     setDiscipline('');
     setScope('');
@@ -165,10 +180,31 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
     setCriteria(criteria.filter((_, i) => i !== index));
   };
 
+  const sanitizedFolderPreview = sanitizeFolderNameInput(databaseFolderName);
+  const folderNameCollision = Boolean(
+    sanitizedFolderPreview &&
+      existingFolderNames.some(
+        (existing) => existing.toLowerCase() === sanitizedFolderPreview.toLowerCase()
+      )
+  );
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) {
       setError('Please enter a Research Review Title (or enter a title in the placeholder box).');
+      return;
+    }
+
+    const customFolder = sanitizeFolderNameInput(databaseFolderName);
+    if (databaseFolderName.trim() && !customFolder) {
+      setError('Database Folder Name must include letters or numbers (e.g., my_review_db_2026).');
+      return;
+    }
+    if (
+      customFolder &&
+      existingFolderNames.some((existing) => existing.toLowerCase() === customFolder.toLowerCase())
+    ) {
+      setError(`Database folder "${customFolder}" already exists. Please choose a different folder name.`);
       return;
     }
 
@@ -199,6 +235,12 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
     const newProject: ReviewProject = {
       id: projectId,
       title: title.trim(),
+      ...(customFolder
+        ? {
+            databaseFolderName: customFolder,
+            databaseFolderPath: `database/reviews/${customFolder}`,
+          }
+        : {}),
       subtitle: subtitle.trim() || `${activeRev.name} (${activeFw.name} Protocol)`,
       scope: scope.trim() || `${title.trim()} synthesis`,
       discipline: discipline.trim() || 'Interdisciplinary Studies',
@@ -308,19 +350,77 @@ export const CreateReviewModal: React.FC<CreateReviewModalProps> = ({
               <span>1. Research Review Title & Scope (Manual Entry)</span>
             </h4>
 
-            {/* Partitioned Storage Database Preview */}
-            <div className="p-3 rounded-xl bg-indigo-950/30 border border-indigo-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]">
-              <div className="min-w-0">
-                <span className="font-bold text-indigo-300 block">
-                  Dedicated Partitioned Article Library &amp; Storing Database
-                </span>
-                <span className="text-slate-400">
-                  Creates a brand-new separate database folder starting with <strong className="text-emerald-400">0 articles</strong> — existing saved review folders stay intact and are never cleared.
+            {/* Editable Partitioned Storage Database Folder Name */}
+            <div className="p-3.5 rounded-xl bg-indigo-950/30 border border-indigo-800/50 space-y-2.5 text-[11px]">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="min-w-0">
+                  <span className="font-bold text-indigo-300 flex items-center gap-1.5">
+                    <Database className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                    <span>Dedicated Partitioned Database Folder Name (Editable)</span>
+                  </span>
+                  <span className="text-slate-400 block mt-0.5">
+                    Customize your own database folder name rather than using the Review Title by default. Starts with <strong className="text-emerald-400">0 articles</strong> and keeps all existing folders untouched.
+                  </span>
+                </div>
+                <span className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[10px] text-teal-400 truncate max-w-xs shrink-0">
+                  database/reviews/{sanitizedFolderPreview || 'review-db-...'}/articles.json
                 </span>
               </div>
-              <span className="px-2.5 py-1 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[10px] text-teal-400 truncate max-w-xs shrink-0">
-                database/reviews/{(title.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'new-review')}__rev-.../articles.json
-              </span>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <div className="relative flex-1">
+                  <FolderEdit className="w-3.5 h-3.5 text-teal-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder="Type custom database folder name (e.g., gully_uav_2026, clinical-meta-v1) — leave blank for auto-ID..."
+                    value={databaseFolderName}
+                    onChange={(e) => {
+                      setDatabaseFolderName(e.target.value);
+                      if (error) setError('');
+                    }}
+                    className={`w-full bg-slate-900 border rounded-xl pl-8 pr-3 py-2 text-xs text-white font-mono placeholder:font-sans placeholder:text-slate-500 focus:outline-none ${
+                      folderNameCollision
+                        ? 'border-rose-500 focus:border-rose-400'
+                        : 'border-slate-700 focus:border-teal-500'
+                    }`}
+                  />
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const tag = `study-db-${new Date().getFullYear()}-${Math.random().toString(36).slice(2, 6)}`;
+                      setDatabaseFolderName(tag);
+                      if (error) setError('');
+                    }}
+                    className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-teal-300 border border-slate-700 text-[11px] font-semibold cursor-pointer transition"
+                    title="Generate a unique non-title database folder name"
+                  >
+                    Suggest Folder Name
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!title.trim()}
+                    onClick={() => {
+                      const slugFromTitle = sanitizeFolderNameInput(title.toLowerCase().slice(0, 48));
+                      if (slugFromTitle) {
+                        setDatabaseFolderName(slugFromTitle);
+                        if (error) setError('');
+                      }
+                    }}
+                    className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[11px] font-medium cursor-pointer transition disabled:opacity-40"
+                    title="Optionally derive folder name from your Review Title"
+                  >
+                    Use Title
+                  </button>
+                </div>
+              </div>
+
+              {folderNameCollision && (
+                <p className="text-[11px] text-rose-400 font-semibold">
+                  A database folder named &ldquo;{sanitizedFolderPreview}&rdquo; already exists. Please enter a unique folder name.
+                </p>
+              )}
             </div>
 
             <div>

@@ -388,7 +388,8 @@ export const apiService = {
       body: JSON.stringify({ project }),
     });
     if (!res.ok) {
-      throw new Error(`Failed to create database folder (${res.status})`);
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to create database folder (${res.status})`);
     }
     const data = await res.json();
     return data.project;
@@ -401,10 +402,33 @@ export const apiService = {
       body: JSON.stringify({ project }),
     });
     if (!res.ok) {
-      throw new Error(`Failed to update database folder (${res.status})`);
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to update database folder (${res.status})`);
     }
     const data = await res.json();
     return data.project;
+  },
+
+  async renameProjectFolder(
+    projectId: string,
+    folderName: string
+  ): Promise<{
+    success: boolean;
+    projectId: string;
+    databaseFolderName: string;
+    databaseFolderPath: string;
+    updatedAt?: string;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/folder-name`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderName }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to rename database folder (${res.status})`);
+    }
+    return res.json();
   },
 
   async uploadArticlesChunk(

@@ -43,14 +43,32 @@ function ensureDir(dirPath: string) {
   }
 }
 
-function buildReviewFolderName(title: string, projectId: string): string {
+function sanitizeCustomFolderName(rawName: string): string {
+  return String(rawName || '')
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+    .slice(0, 80);
+}
+
+function buildFallbackFolderName(projectId: string): string {
   const safeId = (projectId || 'review').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
-  const cleanSlug = (title || 'untitled-review')
+  return `review-db-${safeId}`;
+}
+
+function buildReviewFolderName(title: string, projectId: string, customFolderName?: string): string {
+  const custom = sanitizeCustomFolderName(customFolderName || '');
+  if (custom) {
+    return custom;
+  }
+  const safeId = (projectId || 'review').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40);
+  const cleanSlug = (title || '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 56);
-  return `${cleanSlug || 'untitled-review'}__${safeId}`;
+  return cleanSlug ? `${cleanSlug}__${safeId}` : `review-db-${safeId}`;
 }
 
 function findFolderForProjectId(projectId: string): string | null {
@@ -210,19 +228,68 @@ function appendDeletedOnlineArticles(folderPath: string, projectId: string, remo
   return addedCount || onlineRemoved.length;
 }
 
+function readFolderProjectId(folderPath: string): string | null {
+  const metaPath = path.join(folderPath, 'project.json');
+  if (fs.existsSync(metaPath)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (meta?.id) return String(meta.id);
+    } catch {}
+  }
+  const partPath = path.join(folderPath, 'database.partition.json');
+  if (fs.existsSync(partPath)) {
+    try {
+      const part = JSON.parse(fs.readFileSync(partPath, 'utf-8'));
+      if (part?.partitionId) return String(part.partitionId);
+    } catch {}
+  }
+  return null;
+}
+
 function writeProjectToFolder(project: any, options?: { allowClearArticles?: boolean }) {
   ensureDir(REVIEWS_DB_ROOT);
-  const desiredFolderName = buildReviewFolderName(project.title, project.id);
-  const desiredFolderPath = path.join(REVIEWS_DB_ROOT, desiredFolderName);
-
   const existingFolderPath = findFolderForProjectId(project.id);
-  let targetFolderPath = desiredFolderPath;
-  if (existingFolderPath && existingFolderPath !== desiredFolderPath) {
-    if (!fs.existsSync(desiredFolderPath)) {
-      fs.renameSync(existingFolderPath, desiredFolderPath);
-      targetFolderPath = desiredFolderPath;
-    } else {
+  const requestedFolderName = sanitizeCustomFolderName(project.databaseFolderName || '');
+
+  let desiredFolderName: string;
+  if (requestedFolderName) {
+    desiredFolderName = requestedFolderName;
+  } else if (existingFolderPath) {
+    // Keep existing folder name intact when updating metadata/title unless explicitly renamed
+    desiredFolderName = path.basename(existingFolderPath);
+  } else {
+    // Brand-new partition without custom name: use neutral project-ID folder instead of Title
+    desiredFolderName = buildFallbackFolderName(project.id);
+  }
+
+  let targetFolderPath = path.join(REVIEWS_DB_ROOT, desiredFolderName);
+
+  if (existingFolderPath && existingFolderPath !== targetFolderPath) {
+    if (fs.existsSync(targetFolderPath)) {
+      const ownerId = readFolderProjectId(targetFolderPath);
+      if (ownerId && ownerId !== project.id) {
+        const conflictErr: any = new Error(
+          `Database folder "${desiredFolderName}" already exists for another review. Please choose a different folder name.`
+        );
+        conflictErr.statusCode = 409;
+        throw conflictErr;
+      }
       targetFolderPath = existingFolderPath;
+    } else {
+      fs.renameSync(existingFolderPath, targetFolderPath);
+    }
+  } else if (!existingFolderPath && fs.existsSync(targetFolderPath)) {
+    const ownerId = readFolderProjectId(targetFolderPath);
+    if (ownerId && ownerId !== project.id) {
+      if (requestedFolderName) {
+        const conflictErr: any = new Error(
+          `Database folder "${desiredFolderName}" already exists. Please choose a different folder name.`
+        );
+        conflictErr.statusCode = 409;
+        throw conflictErr;
+      }
+      desiredFolderName = `${desiredFolderName}-${Math.random().toString(36).slice(2, 6)}`;
+      targetFolderPath = path.join(REVIEWS_DB_ROOT, desiredFolderName);
     }
   }
 
@@ -634,7 +701,8 @@ app.post('/api/projects', (req: Request, res: Response) => {
     const saved = writeProjectToFolder(project);
     return res.json({ project: saved });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to create review folder' });
+    const status = err?.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'Failed to create review folder' });
   }
 });
 
@@ -683,7 +751,50 @@ app.put('/api/projects/:id', (req: Request, res: Response) => {
     const saved = writeProjectToFolder({ ...project, id: projectId, articles: existingArticles || [] }, { allowClearArticles: false });
     return res.json({ project: saved });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to update review folder' });
+    const status = err?.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'Failed to update review folder' });
+  }
+});
+
+app.patch('/api/projects/:id/folder-name', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const rawFolderName = String(req.body?.folderName || '');
+    const sanitized = sanitizeCustomFolderName(rawFolderName);
+    if (!sanitized) {
+      return res.status(400).json({
+        error: 'Please enter a valid folder name using letters, numbers, hyphens, or underscores.',
+      });
+    }
+
+    const existingFolderPath = findFolderForProjectId(projectId);
+    if (!existingFolderPath || !fs.existsSync(existingFolderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+
+    const metaPath = path.join(existingFolderPath, 'project.json');
+    let meta: any = { id: projectId, title: projectId };
+    if (fs.existsSync(metaPath)) {
+      try {
+        meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      } catch {}
+    }
+
+    const saved = writeProjectToFolder(
+      { ...meta, id: projectId, databaseFolderName: sanitized },
+      { allowClearArticles: false }
+    );
+
+    return res.json({
+      success: true,
+      projectId,
+      databaseFolderName: saved.databaseFolderName,
+      databaseFolderPath: saved.databaseFolderPath,
+      updatedAt: saved.updatedAt,
+    });
+  } catch (err: any) {
+    const status = err?.statusCode || 500;
+    return res.status(status).json({ error: err.message || 'Failed to rename review database folder' });
   }
 });
 

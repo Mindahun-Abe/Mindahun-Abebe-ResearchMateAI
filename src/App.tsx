@@ -362,7 +362,8 @@ export default function App() {
   };
 
   // Handlers for updating project cleanly with functional updates & backend folder sync
-  const handleUpdateProject = (updated: ReviewProject) => {
+  const handleUpdateProject = async (updated: ReviewProject): Promise<ReviewProject | void> => {
+    const previousProj = projectsRef.current.find((p) => p.id === updated.id);
     const isolatedUpdated: ReviewProject = {
       ...updated,
       articles: (updated.articles || []).map((a) => ({ ...a, projectId: updated.id })),
@@ -373,34 +374,52 @@ export default function App() {
       cacheProjectsOffline(next);
       return next;
     });
-    apiService
-      .updateProjectFolder(isolatedUpdated)
-      .then((saved) => {
-        const savedIso = new Date().toISOString();
-        setAutoSaveStatus({ state: 'saved', lastSavedAt: saved?.updatedAt || savedIso, label: 'Protocol & Settings' });
-        if (saved?.databaseFolderPath) {
-          setProjects((prev) =>
-            prev.map((p) =>
-              p.id === saved.id
-                ? {
-                    ...p,
-                    databaseFolderName: saved.databaseFolderName,
-                    databaseFolderPath: saved.databaseFolderPath,
-                  }
-                : p
-            )
+    try {
+      const saved = await apiService.updateProjectFolder(isolatedUpdated);
+      const savedIso = new Date().toISOString();
+      setAutoSaveStatus({ state: 'saved', lastSavedAt: saved?.updatedAt || savedIso, label: 'Protocol & Settings' });
+      if (saved?.databaseFolderPath) {
+        setProjects((prev) => {
+          const next = prev.map((p) =>
+            p.id === saved.id
+              ? {
+                  ...p,
+                  databaseFolderName: saved.databaseFolderName,
+                  databaseFolderPath: saved.databaseFolderPath,
+                  updatedAt: saved.updatedAt || p.updatedAt,
+                }
+              : p
           );
-        }
-      })
-      .catch((err) => {
-        console.warn('Folder sync warning:', err?.message);
-        setAutoSaveStatus((prev) => ({
-          ...prev,
-          state: 'error',
-          error: err?.message || 'Offline cached locally',
-        }));
-      });
-    void triggerCloudBackgroundSync(isolatedUpdated, 'update_project', `Updated ${isolatedUpdated.title}`);
+          cacheProjectsOffline(next);
+          return next;
+        });
+      }
+      void triggerCloudBackgroundSync(isolatedUpdated, 'update_project', `Updated ${isolatedUpdated.title}`);
+      return saved;
+    } catch (err: any) {
+      console.warn('Folder sync warning:', err?.message);
+      if (previousProj && previousProj.databaseFolderName !== isolatedUpdated.databaseFolderName) {
+        setProjects((prev) => {
+          const next = prev.map((p) =>
+            p.id === updated.id
+              ? {
+                  ...p,
+                  databaseFolderName: previousProj.databaseFolderName,
+                  databaseFolderPath: previousProj.databaseFolderPath,
+                }
+              : p
+          );
+          cacheProjectsOffline(next);
+          return next;
+        });
+      }
+      setAutoSaveStatus((prev) => ({
+        ...prev,
+        state: 'error',
+        error: err?.message || 'Offline cached locally',
+      }));
+      throw err;
+    }
   };
 
   const handleUpdateArticlesForProject = useCallback(
@@ -752,6 +771,29 @@ export default function App() {
     await apiService.updateProjectFolder({ ...targetProj, articles: isolatedArticles });
     const syncRes = await apiService.syncProjectArticles(targetProjectId, isolatedArticles);
     return syncRes;
+  };
+
+  // Rename a review's database folder name independently of its Review Title
+  const handleRenameProjectFolder = async (targetProjectId: string, folderName: string) => {
+    const res = await apiService.renameProjectFolder(targetProjectId, folderName);
+    setProjects((prev) => {
+      const next = prev.map((p) =>
+        p.id === targetProjectId
+          ? {
+              ...p,
+              databaseFolderName: res.databaseFolderName,
+              databaseFolderPath: res.databaseFolderPath,
+              updatedAt: res.updatedAt || p.updatedAt,
+            }
+          : p
+      );
+      cacheProjectsOffline(next);
+      return next;
+    });
+    return {
+      databaseFolderName: res.databaseFolderName,
+      databaseFolderPath: res.databaseFolderPath,
+    };
   };
 
   // Permanently delete a review folder from disk
@@ -1532,6 +1574,8 @@ export default function App() {
                       }}
                       onCreateNewReview={() => setIsCreateReviewOpen(true)}
                       onSaveFolderChanges={handleSaveFolderChanges}
+                      onRenameProjectFolder={handleRenameProjectFolder}
+                      onUpdateProject={handleUpdateProject}
                       onDeleteProjectFolder={handleDeleteProjectFolder}
                       onOpenAddFilesForProject={handleOpenAddFilesForProject}
                     />
@@ -1989,6 +2033,8 @@ export default function App() {
                   }}
                   onCreateNewReview={() => setIsCreateReviewOpen(true)}
                   onSaveFolderChanges={handleSaveFolderChanges}
+                  onRenameProjectFolder={handleRenameProjectFolder}
+                  onUpdateProject={handleUpdateProject}
                   onDeleteProjectFolder={handleDeleteProjectFolder}
                   onOpenAddFilesForProject={handleOpenAddFilesForProject}
                 />
@@ -2407,6 +2453,15 @@ export default function App() {
         isOpen={isCreateReviewOpen}
         onClose={() => setIsCreateReviewOpen(false)}
         onCreateProject={handleCreateNewProject}
+        existingFolderNames={
+          projects
+            .map(
+              (p) =>
+                p.databaseFolderName ||
+                (p.databaseFolderPath ? p.databaseFolderPath.replace(/^database\/reviews\//, '') : '')
+            )
+            .filter(Boolean) as string[]
+        }
       />
 
       <CrossrefLookupModal

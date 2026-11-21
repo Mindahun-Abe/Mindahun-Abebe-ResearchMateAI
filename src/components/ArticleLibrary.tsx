@@ -55,6 +55,10 @@ import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 import { NotebookStudioModal } from './NotebookStudioModal';
 import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import {
+  isRawPdfOrPlaceholderAbstract,
+  resolveFullArticleAbstract,
+} from '../utils/abstractDisplay';
 
 type BulkRemoveMode = 'ids' | 'all' | 'excluded' | 'duplicates' | 'uncertain' | 'unscreened' | 'delete_folder';
 
@@ -161,6 +165,13 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   const [showDeletedOnlineArchive, setShowDeletedOnlineArchive] = useState(false);
   const [deletedOnlineCount, setDeletedOnlineCount] = useState<number>(0);
   const [syncingArticleId, setSyncingArticleId] = useState<string | null>(null);
+  const [showFullAbstracts, setShowFullAbstracts] = useState<boolean>(true);
+  const [isBatchEnrichingAbstracts, setIsBatchEnrichingAbstracts] = useState<boolean>(false);
+  const [batchAbstractProgress, setBatchAbstractProgress] = useState<{
+    done: number;
+    total: number;
+    resolved: number;
+  }>({ done: 0, total: 0, resolved: 0 });
   const [visibleLimit, setVisibleLimit] = useState<number>(100);
 
   // Bulk Selection & Per-Folder Permanent Remover States
@@ -823,11 +834,16 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     e.stopPropagation();
     setSyncingArticleId(art.id);
     try {
-      const data = await apiService.autoSyncMetadata({
-        doi: art.doi,
-        title: art.title,
-      });
+      const data = await apiService.autoSyncMetadata(
+        {
+          doi: art.doi,
+          title: art.title,
+          filename: art.sourceFileName,
+        },
+        6000
+      );
       if (data) {
+        const hasCleanSyncedAbs = Boolean(data.abstract && !isRawPdfOrPlaceholderAbstract(data.abstract));
         const updated = subLibraryArticles.map((a) => {
           if (a.id === art.id) {
             return {
@@ -837,20 +853,109 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
               year: data.year || a.year,
               journal: data.journal || a.journal,
               doi: data.doi || a.doi,
-              abstract: data.abstract || a.abstract,
+              abstract: hasCleanSyncedAbs ? data.abstract : a.abstract,
               sourceDatabase: data.sourceDatabase || a.sourceDatabase,
               url: data.url || a.url,
+              openAccessUrl: data.openAccessUrl || a.openAccessUrl,
             };
           }
           return a;
         });
         onUpdateArticles(updated);
+        setFolderActionStatus({
+          type: hasCleanSyncedAbs ? 'success' : 'error',
+          message: hasCleanSyncedAbs
+            ? `Retrieved full abstract for "${(data.title || art.title).slice(0, 50)}".`
+            : `Metadata synced for "${art.title.slice(0, 45)}", but source repository did not return an abstract.`,
+          timestamp: new Date().toLocaleTimeString(),
+        });
       }
     } catch (err: any) {
       console.warn('Auto-sync single article failed:', err?.message);
+      setFolderActionStatus({
+        type: 'error',
+        message: err?.message || 'Could not retrieve full abstract from online metadata.',
+        timestamp: new Date().toLocaleTimeString(),
+      });
     } finally {
       setSyncingArticleId(null);
     }
+  };
+
+  const missingAbstractFilteredCount = useMemo(() => {
+    return filteredArticles.filter((art) => resolveFullArticleAbstract(art).isPlaceholder).length;
+  }, [filteredArticles]);
+
+  const handleResolveMissingAbstractsInStatus = async () => {
+    const targets = filteredArticles.filter((art) => resolveFullArticleAbstract(art).isPlaceholder);
+    if (targets.length === 0 || isBatchEnrichingAbstracts) return;
+    setIsBatchEnrichingAbstracts(true);
+    setBatchAbstractProgress({ done: 0, total: targets.length, resolved: 0 });
+
+    const enrichedById = new Map<string, any>();
+    let cursor = 0;
+    let done = 0;
+    let resolved = 0;
+    const CONCURRENCY = 4;
+
+    const worker = async () => {
+      while (cursor < targets.length) {
+        const idx = cursor++;
+        if (idx >= targets.length) break;
+        const art = targets[idx];
+        try {
+          const data = await apiService.autoSyncMetadata(
+            {
+              doi: art.doi,
+              title: art.title,
+              filename: art.sourceFileName,
+            },
+            5500
+          );
+          if (data && data.abstract && !isRawPdfOrPlaceholderAbstract(data.abstract)) {
+            enrichedById.set(art.id, data);
+            resolved++;
+          }
+        } catch {
+          // Skip unavailable metadata records cleanly
+        } finally {
+          done++;
+          setBatchAbstractProgress({ done, total: targets.length, resolved });
+        }
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, () => worker()));
+
+    if (enrichedById.size > 0) {
+      const updated = subLibraryArticles.map((art) => {
+        const data = enrichedById.get(art.id);
+        if (!data) return art;
+        return {
+          ...art,
+          title: data.title || art.title,
+          authors: data.authors?.length ? data.authors : art.authors,
+          year: data.year || art.year,
+          journal: data.journal || art.journal,
+          doi: data.doi || art.doi,
+          abstract: data.abstract,
+          sourceDatabase: data.sourceDatabase || art.sourceDatabase,
+          url: data.url || art.url,
+          openAccessUrl: data.openAccessUrl || art.openAccessUrl,
+        };
+      });
+      onUpdateArticles(updated);
+    }
+
+    setFolderActionStatus({
+      type: resolved > 0 ? 'success' : 'error',
+      message:
+        resolved > 0
+          ? `Resolved full original abstracts for ${resolved} of ${targets.length} papers in the current Status list and saved to disk.`
+          : `Checked ${targets.length} papers; repositories did not return public abstracts for unparsed local files.`,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+    setIsBatchEnrichingAbstracts(false);
   };
 
   // Provenance counts (active folder only)
@@ -1745,8 +1850,39 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
             ))}
           </div>
 
-          {/* Database Provenance & Separate Search Batch Filters */}
+          {/* Database Provenance, Full Abstract Display Control & Separate Search Batch Filters */}
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+            <button
+              type="button"
+              onClick={() => setShowFullAbstracts((prev) => !prev)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap ${
+                showFullAbstracts
+                  ? 'bg-teal-600/20 border-teal-500/50 text-teal-300'
+                  : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+              title="Toggle between displaying the full abstract of the original document or compact 3-line view"
+            >
+              <BookOpen className="w-3 h-3" />
+              <span>{showFullAbstracts ? 'Full Abstracts: Expanded' : 'Full Abstracts: Compact'}</span>
+            </button>
+
+            {missingAbstractFilteredCount > 0 && (
+              <button
+                type="button"
+                disabled={isBatchEnrichingAbstracts}
+                onClick={handleResolveMissingAbstractsInStatus}
+                className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-indigo-600/25 hover:bg-indigo-600/40 disabled:opacity-60 border border-indigo-500/50 text-indigo-200 transition cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap tabular-nums"
+                title="Retrieve full original abstracts from Crossref, OpenAlex & Europe PMC for unparsed PDFs or missing abstracts in this Status list"
+              >
+                <RefreshCw className={`w-3 h-3 ${isBatchEnrichingAbstracts ? 'animate-spin' : ''}`} />
+                <span>
+                  {isBatchEnrichingAbstracts
+                    ? `Resolving Abstracts (${batchAbstractProgress.done}/${batchAbstractProgress.total})...`
+                    : `Fetch Missing Abstracts (${missingAbstractFilteredCount})`}
+                </span>
+              </button>
+            )}
+
             {searchBatchOptions.length > 0 && (
               <div className="flex items-center gap-1.5">
                 <span className="text-slate-500">Search Run:</span>
@@ -2020,7 +2156,63 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                     <span className="italic text-slate-300">{art.journal}</span>
                   </p>
 
-                  <p className="text-xs text-slate-400 line-clamp-2 pt-1">{art.abstract}</p>
+                  {/* Full Abstract of Original Document for every listed Status category */}
+                  {(() => {
+                    const resolvedAbs = resolveFullArticleAbstract(art);
+                    return (
+                      <div
+                        onClick={(e) => e.stopPropagation()}
+                        className="mt-2 rounded-xl bg-slate-950/80 border border-slate-800/90 p-3 space-y-1.5 cursor-text"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                          <span className="font-semibold text-teal-300">
+                            {resolvedAbs.source === 'original_doc_section'
+                              ? 'Full Abstract (Extracted from Original Document)'
+                              : 'Full Abstract (Original Record)'}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            {!resolvedAbs.isPlaceholder && (
+                              <span className="font-mono tabular-nums text-slate-400">
+                                {resolvedAbs.wordCount} words
+                              </span>
+                            )}
+                            {resolvedAbs.isPlaceholder && (
+                              <button
+                                type="button"
+                                disabled={syncingArticleId === art.id}
+                                onClick={(e) => handleAutoSyncSingleArticle(art, e)}
+                                className="px-2 py-0.5 rounded-md bg-indigo-600/25 hover:bg-indigo-600/40 border border-indigo-500/40 text-indigo-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer transition"
+                              >
+                                <RefreshCw
+                                  className={`w-3 h-3 ${syncingArticleId === art.id ? 'animate-spin' : ''}`}
+                                />
+                                <span>
+                                  {syncingArticleId === art.id ? 'Fetching...' : 'Fetch Full Abstract'}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {resolvedAbs.isPlaceholder ? (
+                          <p className="text-xs text-amber-300/90 leading-relaxed">
+                            {resolvedAbs.source === 'placeholder_pdf' && art.sourceFileName
+                              ? `Compressed PDF import (${art.sourceFileName}) did not store plain-text abstract streams. Click "Fetch Full Abstract" or "Fetch Missing Abstracts" in the Status bar to retrieve the complete abstract.`
+                              : resolvedAbs.text ||
+                                'Full abstract text was not included in this import record. Click "Fetch Full Abstract" to retrieve it from Crossref, OpenAlex, or Europe PMC.'}
+                          </p>
+                        ) : (
+                          <p
+                            className={`text-xs text-slate-200 leading-relaxed whitespace-pre-line ${
+                              showFullAbstracts ? '' : 'line-clamp-3'
+                            }`}
+                          >
+                            {resolvedAbs.text}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Cross-DB duplicate or exclusion reason */}
                   {(art.duplicateNote || art.decisionReason) && (

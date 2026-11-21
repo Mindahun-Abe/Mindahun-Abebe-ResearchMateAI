@@ -2286,6 +2286,25 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
       if (!queryTitle) queryTitle = parsed.titleCandidate;
     }
 
+    const cleanXmlAbstract = (raw?: string): string => {
+      if (!raw || typeof raw !== 'string') return '';
+      return raw
+        .replace(/<\/?(?:jats:)?(?:p|sec|title|italic|bold|sup|sub|list|list-item|br|div|span)[^>]*>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .replace(/^Abstract(?=[A-Z])/, '')
+        .replace(/^Abstract\s*[:.\-–—]\s*/i, '')
+        .trim();
+    };
+
+    let bestPayload: any = null;
+
     // 1. If DOI is provided, look up Crossref first (4s timeout so bulk never stalls)
     if (targetDoi) {
       const cleanDoi = targetDoi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
@@ -2309,19 +2328,23 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
             item['created']?.['date-parts']?.[0] ||
             [];
           const year = publishedDate[0] || item.issued?.['date-parts']?.[0]?.[0] || new Date().getFullYear();
-          const cleanAbstract = item.abstract ? item.abstract.replace(/<[^>]+>/g, '').trim() : '';
+          const cleanAbstract = cleanXmlAbstract(item.abstract);
+          const resolvedTitle = Array.isArray(item.title) ? item.title[0] : item.title || queryTitle || 'Untitled';
+          if (!queryTitle && resolvedTitle && resolvedTitle !== 'Untitled') {
+            queryTitle = resolvedTitle;
+          }
 
-          return res.json({
+          bestPayload = {
             success: true,
             matchedBy: 'doi',
             doi: cleanDoi,
-            title: Array.isArray(item.title) ? item.title[0] : item.title || queryTitle || 'Untitled',
+            title: resolvedTitle,
             authors: authors.length > 0 ? authors : ['Unknown Author'],
             year: Number(year),
             journal: Array.isArray(item['container-title'])
               ? item['container-title'][0]
               : item['container-title'] || item.publisher || 'Academic Publication',
-            abstract: cleanAbstract || 'Abstract verified from Crossref record.',
+            abstract: cleanAbstract,
             volume: item.volume || '',
             issue: item.issue || '',
             pagesStr: item.page || '',
@@ -2329,50 +2352,206 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
             url: item.URL || `https://doi.org/${cleanDoi}`,
             citationsCount: item['is-referenced-by-count'] || 0,
             sourceDatabase: 'Crossref',
-          });
+          };
+
+          if (cleanAbstract.length >= 60) {
+            return res.json(bestPayload);
+          }
         }
       } catch (crErr: any) {
         console.warn('Crossref bounded lookup skipped:', crErr?.message);
       }
     }
 
-    // 2. If no DOI or Crossref failed, search OpenAlex using Title (4s timeout)
-    const searchParam = queryTitle || targetDoi;
-    if (searchParam) {
+    // 1b. If DOI was missing or Crossref DOI record lacked an abstract, search Crossref by Title
+    if ((!bestPayload || (bestPayload.abstract || '').length < 60) && queryTitle && queryTitle.length >= 6) {
+      const normalizeTokens = (str: string) =>
+        str
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter((t) => t.length >= 3);
+      const targetTokens = normalizeTokens(queryTitle);
       try {
-        const openAlexUrl = `https://api.openalex.org/works?search=${encodeURIComponent(searchParam)}&per-page=3`;
+        const crSearchUrl = `https://api.crossref.org/works?query.title=${encodeURIComponent(queryTitle)}&rows=3`;
+        const crSearchResp = await fetchWithTimeout(
+          crSearchUrl,
+          { headers: { 'User-Agent': 'ResearchMateAI/1.0 (mailto:mindahun77@gmail.com)' } },
+          4500
+        );
+        if (crSearchResp.ok) {
+          const crSearchData = await crSearchResp.json();
+          const items: any[] = crSearchData?.message?.items || [];
+          const bestItem = items.find((item) => {
+            const candidateTitle = Array.isArray(item.title) ? item.title[0] : item.title || '';
+            if (!candidateTitle) return false;
+            const candTokens = new Set(normalizeTokens(candidateTitle));
+            if (targetTokens.length === 0 || candTokens.size === 0) return false;
+            const hits = targetTokens.filter((t) => candTokens.has(t)).length;
+            return hits / targetTokens.length >= 0.55;
+          });
+          if (bestItem) {
+            const authors = (bestItem.author || []).map((a: any) => {
+              if (a.given && a.family) return `${a.family}, ${a.given}`;
+              return a.family || a.name || 'Unknown Author';
+            });
+            const publishedDate =
+              bestItem['published-print']?.['date-parts']?.[0] ||
+              bestItem['published-online']?.['date-parts']?.[0] ||
+              bestItem['created']?.['date-parts']?.[0] ||
+              [];
+            const year =
+              publishedDate[0] || bestItem.issued?.['date-parts']?.[0]?.[0] || new Date().getFullYear();
+            const crAbs = cleanXmlAbstract(bestItem.abstract);
+            const resolvedTitle = Array.isArray(bestItem.title)
+              ? bestItem.title[0]
+              : bestItem.title || queryTitle;
+
+            bestPayload = {
+              ...(bestPayload || {}),
+              success: true,
+              matchedBy: bestPayload ? `${bestPayload.matchedBy}+crossref_title` : 'crossref_title',
+              doi: bestPayload?.doi || bestItem.DOI || '',
+              title: bestPayload?.title || resolvedTitle,
+              authors:
+                bestPayload?.authors?.length && bestPayload.authors[0] !== 'Unknown Author'
+                  ? bestPayload.authors
+                  : authors.length > 0
+                  ? authors
+                  : ['Unknown Author'],
+              year: bestPayload?.year || Number(year),
+              journal:
+                bestPayload?.journal ||
+                (Array.isArray(bestItem['container-title'])
+                  ? bestItem['container-title'][0]
+                  : bestItem['container-title'] || bestItem.publisher || 'Academic Publication'),
+              abstract: crAbs || bestPayload?.abstract || '',
+              volume: bestPayload?.volume || bestItem.volume || '',
+              issue: bestPayload?.issue || bestItem.issue || '',
+              pagesStr: bestPayload?.pagesStr || bestItem.page || '',
+              publisher: bestPayload?.publisher || bestItem.publisher || '',
+              url: bestPayload?.url || bestItem.URL || (bestItem.DOI ? `https://doi.org/${bestItem.DOI}` : ''),
+              citationsCount: Math.max(bestPayload?.citationsCount || 0, bestItem['is-referenced-by-count'] || 0),
+              sourceDatabase: bestPayload?.sourceDatabase || 'Crossref',
+            };
+
+            if (!targetDoi && bestPayload.doi) targetDoi = bestPayload.doi;
+            if ((bestPayload.abstract || '').length >= 60) {
+              return res.json(bestPayload);
+            }
+          }
+        }
+      } catch (crTitleErr: any) {
+        console.warn('Crossref title lookup skipped:', crTitleErr?.message);
+      }
+    }
+
+    // 2. Query OpenAlex by DOI (if available) or Title to recover full abstract & OA links
+    const searchParam = queryTitle || targetDoi;
+    if (targetDoi || searchParam) {
+      try {
+        const cleanDoi = targetDoi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
+        const openAlexUrl = cleanDoi
+          ? `https://api.openalex.org/works/https://doi.org/${encodeURIComponent(cleanDoi)}`
+          : `https://api.openalex.org/works?search=${encodeURIComponent(searchParam)}&per-page=3`;
         const oaResp = await fetchWithTimeout(
           openAlexUrl,
           { headers: { 'User-Agent': 'ResearchMateAI/1.0 (mailto:academic-researcher@example.org)' } },
-          4000
+          4500
         );
         if (oaResp.ok) {
           const oaData = await oaResp.json();
-          const match = (oaData.results || [])[0];
-          if (match) {
-            const rawDoi = match.doi ? match.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : targetDoi;
+          const match = cleanDoi ? oaData : (oaData.results || [])[0];
+          if (match && (match.id || match.title)) {
+            const rawDoi = match.doi ? match.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : cleanDoi;
             const authors = (match.authorships || []).map((a: any) => a.author?.display_name || 'Unknown');
-            const abstract = reconstructAbstract(match.abstract_inverted_index);
+            const oaAbstract = cleanXmlAbstract(reconstructAbstract(match.abstract_inverted_index));
 
-            return res.json({
+            bestPayload = {
+              ...(bestPayload || {}),
               success: true,
-              matchedBy: 'openalex_search',
-              doi: rawDoi || '',
-              title: match.title || queryTitle || 'Untitled Study',
-              authors: authors.length > 0 ? authors : ['Unknown Author'],
-              year: match.publication_year || new Date().getFullYear(),
-              journal: match.primary_location?.source?.display_name || match.host_venue?.name || 'Academic Journal',
-              abstract: abstract || 'Abstract indexed in scientific repository.',
-              citationsCount: match.cited_by_count || 0,
-              url: match.doi || match.primary_location?.landing_page_url || '',
-              openAccessUrl: match.open_access?.oa_url || '',
-              sourceDatabase: match.primary_location?.source?.display_name?.includes('IEEE') ? 'IEEE Xplore' : 'OpenAlex',
-            });
+              matchedBy: bestPayload ? `${bestPayload.matchedBy}+openalex` : 'openalex_search',
+              doi: bestPayload?.doi || rawDoi || '',
+              title: bestPayload?.title || match.title || queryTitle || 'Untitled Study',
+              authors:
+                bestPayload?.authors?.length && bestPayload.authors[0] !== 'Unknown Author'
+                  ? bestPayload.authors
+                  : authors.length > 0
+                  ? authors
+                  : ['Unknown Author'],
+              year: bestPayload?.year || match.publication_year || new Date().getFullYear(),
+              journal:
+                bestPayload?.journal ||
+                match.primary_location?.source?.display_name ||
+                match.host_venue?.name ||
+                'Academic Journal',
+              abstract: oaAbstract || bestPayload?.abstract || '',
+              citationsCount: Math.max(bestPayload?.citationsCount || 0, match.cited_by_count || 0),
+              url: bestPayload?.url || match.doi || match.primary_location?.landing_page_url || '',
+              openAccessUrl: match.open_access?.oa_url || bestPayload?.openAccessUrl || '',
+              sourceDatabase:
+                bestPayload?.sourceDatabase ||
+                (match.primary_location?.source?.display_name?.includes('IEEE') ? 'IEEE Xplore' : 'OpenAlex'),
+            };
+
+            if (!targetDoi && rawDoi) targetDoi = rawDoi;
+            if (!queryTitle && bestPayload.title) queryTitle = bestPayload.title;
+
+            if ((bestPayload.abstract || '').length >= 60) {
+              return res.json(bestPayload);
+            }
           }
         }
       } catch (oaErr: any) {
         console.warn('OpenAlex fallback query skipped:', oaErr?.message);
       }
+    }
+
+    // 3. Fallback to Europe PMC (provides full abstracts for many life/environmental/remote-sensing OA papers)
+    if (targetDoi || queryTitle) {
+      try {
+        const cleanDoi = targetDoi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
+        const epmcQuery = cleanDoi ? `DOI:"${cleanDoi}"` : `TITLE:"${queryTitle.replace(/"/g, '')}"`;
+        const epmcUrl = `https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(
+          epmcQuery
+        )}&format=json&resultType=core&pageSize=2`;
+        const epmcResp = await fetchWithTimeout(epmcUrl, {}, 4000);
+        if (epmcResp.ok) {
+          const epmcData = await epmcResp.json();
+          const hit = epmcData?.resultList?.result?.[0];
+          const epmcAbs = cleanXmlAbstract(hit?.abstractText);
+          if (hit && epmcAbs.length >= 60) {
+            return res.json({
+              ...(bestPayload || {}),
+              success: true,
+              matchedBy: bestPayload ? `${bestPayload.matchedBy}+europepmc` : 'europepmc',
+              doi: bestPayload?.doi || hit.doi || cleanDoi || '',
+              title: bestPayload?.title || hit.title || queryTitle || 'Untitled Study',
+              authors:
+                bestPayload?.authors?.length && bestPayload.authors[0] !== 'Unknown Author'
+                  ? bestPayload.authors
+                  : hit.authorString
+                  ? hit.authorString.split(/,\s*/).slice(0, 12)
+                  : ['Unknown Author'],
+              year: bestPayload?.year || Number(hit.pubYear) || new Date().getFullYear(),
+              journal: bestPayload?.journal || hit.journalTitle || 'Academic Publication',
+              abstract: epmcAbs,
+              citationsCount: bestPayload?.citationsCount || Number(hit.citedByCount) || 0,
+              url: bestPayload?.url || (hit.doi ? `https://doi.org/${hit.doi}` : ''),
+              sourceDatabase: bestPayload?.sourceDatabase || 'Europe PMC',
+            });
+          }
+        }
+      } catch (epmcErr: any) {
+        console.warn('Europe PMC fallback skipped:', epmcErr?.message);
+      }
+    }
+
+    if (bestPayload) {
+      return res.json({
+        ...bestPayload,
+        abstract: bestPayload.abstract || 'Abstract was not provided by Crossref/OpenAlex metadata record.',
+      });
     }
 
     return res.status(404).json({

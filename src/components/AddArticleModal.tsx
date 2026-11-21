@@ -28,6 +28,7 @@ import {
   DATABASE_PROVENANCE_OPTIONS,
   detectArticleSourceDatabase,
 } from '../utils/slrDetectionEngine';
+import { extractReadablePdfHints } from '../utils/abstractDisplay';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
 
@@ -74,18 +75,7 @@ async function extractLocalPdfHints(file: File): Promise<{ titleHint?: string; d
   try {
     const slice = file.slice(0, Math.min(file.size, 262144)); // first 256KB for speed
     const raw = await slice.text();
-    const doiMatch = raw.match(/10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
-    const titleMeta = raw.match(/\/Title\s*\(([^)]{4,180})\)/i);
-    const printable = raw
-      .replace(/[^\x20-\x7E\n]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 450);
-    return {
-      doiHint: doiMatch ? doiMatch[0].replace(/[)>.,;]+$/, '') : undefined,
-      titleHint: titleMeta ? titleMeta[1].trim() : undefined,
-      snippet: printable.length > 40 ? printable : undefined,
-    };
+    return extractReadablePdfHints(raw);
   } catch {
     return {};
   }

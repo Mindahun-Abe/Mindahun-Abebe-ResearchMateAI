@@ -1,6 +1,7 @@
 import { Article } from '../types';
 import { apiService } from '../services/apiService';
 import { classifyPaperType, detectArticleSourceDatabase } from './slrDetectionEngine';
+import { extractReadablePdfHints } from './abstractDisplay';
 
 const makeUniqueId = (prefix: string) => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -230,18 +231,7 @@ async function extractPdfHints(file: File): Promise<{ titleHint?: string; doiHin
   try {
     const slice = file.slice(0, Math.min(file.size, 262144));
     const raw = await slice.text();
-    const doiMatch = raw.match(/10\.\d{4,9}\/[-._;()/:A-Za-z0-9]+/);
-    const titleMeta = raw.match(/\/Title\s*\(([^)]{4,180})\)/i);
-    const printable = raw
-      .replace(/[^\x20-\x7E\n]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 600);
-    return {
-      doiHint: doiMatch ? doiMatch[0].replace(/[)>.,;]+$/, '') : undefined,
-      titleHint: titleMeta ? titleMeta[1].trim() : undefined,
-      snippet: printable.length > 40 ? printable : undefined,
-    };
+    return extractReadablePdfHints(raw);
   } catch {
     return {};
   }

@@ -40,6 +40,7 @@ export const GeminiSuiteChatPanel: React.FC<GeminiSuiteChatPanelProps> = ({
   initialMode = 'chat',
 }) => {
   const [mode, setMode] = useState<'chat' | 'search'>(initialMode);
+  const [taskMode, setTaskMode] = useState<'deep_reasoning' | 'complex_interactive' | 'general' | 'fast'>('general');
   const [model, setModel] = useState<'gemini-4-hydrogen' | 'gemini-3.1-flash-lite'>('gemini-4-hydrogen');
   const [persona, setPersona] = useState<string>('methodologist');
   const [input, setInput] = useState('');
@@ -112,6 +113,7 @@ export const GeminiSuiteChatPanel: React.FC<GeminiSuiteChatPanelProps> = ({
             message: queryText,
             history: historyPayload,
             model,
+            taskMode,
             systemInstruction: sysPrompt,
           }),
         });
@@ -180,13 +182,19 @@ export const GeminiSuiteChatPanel: React.FC<GeminiSuiteChatPanelProps> = ({
                 <option value="editor">Role: Manuscript Editor</option>
               </select>
               <select
-                value={model}
-                onChange={(e) => setModel(e.target.value as 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite')}
+                value={taskMode}
+                onChange={(e) => {
+                  const next = e.target.value as 'deep_reasoning' | 'complex_interactive' | 'general' | 'fast';
+                  setTaskMode(next);
+                  setModel(next === 'fast' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen');
+                }}
                 className="px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-200 focus:outline-none"
-                aria-label="Gemini Model"
+                aria-label="Gemini Task Mode"
               >
-                <option value="gemini-4-hydrogen">gemini-4-hydrogen (Balanced)</option>
-                <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Fast)</option>
+                <option value="general">General (gemini-4-hydrogen)</option>
+                <option value="deep_reasoning">Deep Reasoning (Hydrogen High)</option>
+                <option value="complex_interactive">Complex Interactive (Hydrogen High)</option>
+                <option value="fast">Fast Triage (Flash-Lite Minimal)</option>
               </select>
             </>
           )}

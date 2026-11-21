@@ -17,6 +17,7 @@ import {
 import { getOrCreateUser } from '../db/users.ts';
 import {
   createPendingTransaction,
+  enrichPlanWithPricingSchedule,
   ensureSeedPlans,
   exportAllUserData,
   getAccountOverview,
@@ -31,6 +32,7 @@ import {
   writeAuditLog,
 } from '../db/commercial.ts';
 import { AuthRequest, optionalAuth, requireAdmin, requireAuth } from '../middleware/auth.ts';
+import { getStagePriceAmount, resolveUserTenureSummary } from '../utils/pricingSchedule.ts';
 
 export const commercialRouter = express.Router();
 
@@ -40,11 +42,22 @@ const processedSyncOps = new Map<string, number>();
 // -------------------------------------------------------------
 // Public Commercial Endpoints
 // -------------------------------------------------------------
-commercialRouter.get('/plans', async (_req: Request, res: Response) => {
+commercialRouter.get('/plans', optionalAuth, async (req: AuthRequest, res: Response) => {
   try {
     const plans = await ensureSeedPlans();
+    let tenureSummary = resolveUserTenureSummary(null);
+    if (req.user?.uid) {
+      const existingUsers = await db.select().from(users).where(eq(users.uid, req.user.uid));
+      if (existingUsers[0]) {
+        tenureSummary = resolveUserTenureSummary(existingUsers[0].createdAt);
+      }
+    }
+
     return res.json({
-      plans: plans.filter((p) => p.isActive),
+      plans: plans
+        .filter((p) => p.isActive)
+        .map((p) => enrichPlanWithPricingSchedule(p, tenureSummary.stage)),
+      pricingTenure: tenureSummary,
       paymentGateways: {
         chapaConfigured: Boolean(process.env.CHAPA_SECRET_KEY),
         telebirrConfigured: Boolean(
@@ -295,12 +308,16 @@ commercialRouter.post('/billing/chapa/init', requireAuth, async (req: AuthReques
     const user = await getOrCreateUser(req.user!.uid, req.user?.email || '', req.user?.name);
     const cycle = billingCycle === 'annual' ? 'annual' : 'monthly';
     const curr = currency === 'USD' ? 'USD' : 'ETB';
-    const amount =
+    const tenureSummary = resolveUserTenureSummary(user.createdAt);
+    const stagePrice = getStagePriceAmount(plan, tenureSummary.stage, cycle, curr);
+    const chapaAmountStr =
       curr === 'USD'
-        ? Math.round((cycle === 'annual' ? plan.annualPriceUsd : plan.monthlyPriceUsd) / 100)
-        : cycle === 'annual'
-        ? plan.annualPriceEtb
-        : plan.monthlyPriceEtb;
+        ? stagePrice.majorUnitNumber.toFixed(2)
+        : String(Math.round(stagePrice.majorUnitNumber));
+    const integerStoredAmount =
+      curr === 'USD'
+        ? Math.max(1, Math.round(stagePrice.majorUnitNumber))
+        : Math.round(stagePrice.majorUnitNumber);
 
     const txRef = `RM-CHAPA-${user.id}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
     const appOrigin =
@@ -311,11 +328,17 @@ commercialRouter.post('/billing/chapa/init', requireAuth, async (req: AuthReques
       userId: user.id,
       planCode: plan.code,
       billingCycle: cycle,
-      amount,
+      amount: integerStoredAmount,
       currency: curr,
       provider: 'chapa',
       txRef,
-      metadata: { planName: plan.name },
+      metadata: {
+        planName: plan.name,
+        tenureStage: tenureSummary.stage,
+        tenureLabel: tenureSummary.label,
+        exactAmount: stagePrice.majorUnitNumber,
+        formattedAmount: stagePrice.formatted,
+      },
     });
 
     const chapaRes = await fetch('https://api.chapa.co/v1/transaction/initialize', {
@@ -325,7 +348,7 @@ commercialRouter.post('/billing/chapa/init', requireAuth, async (req: AuthReques
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        amount: String(amount),
+        amount: chapaAmountStr,
         currency: curr,
         email: user.email,
         first_name: (user.displayName || 'Researcher').split(' ')[0],
@@ -335,7 +358,7 @@ commercialRouter.post('/billing/chapa/init', requireAuth, async (req: AuthReques
         return_url: `${appOrigin}/#billing?tx_ref=${encodeURIComponent(txRef)}`,
         customization: {
           title: 'ResearchMate AI',
-          description: `${plan.name} (${cycle}) subscription`,
+          description: `${plan.name} (${cycle} · ${tenureSummary.shortLabel}) subscription`,
         },
       }),
     });

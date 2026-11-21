@@ -17,6 +17,12 @@ import {
 } from 'lucide-react';
 import heroVisual from '../../assets/images/researchmate_hero_visual_1794913234675.jpg';
 import { AccountPlan, useAuth } from '../../contexts/AuthContext';
+import {
+  computePlanPricingSchedule,
+  getStagePriceAmount,
+  isProgressivePricingPlan,
+  PricingTenureStage,
+} from '../../utils/pricingSchedule';
 import { PWAInstallButton } from '../PWAInstallButton';
 
 interface LandingWebsiteProps {
@@ -46,6 +52,7 @@ export const LandingWebsite: React.FC<LandingWebsiteProps> = ({
   const [plans, setPlans] = useState<AccountPlan[]>([]);
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>('monthly');
   const [currency, setCurrency] = useState<'USD' | 'ETB'>('USD');
+  const [pricingStage, setPricingStage] = useState<PricingTenureStage>('startup');
   const [activeLegalDoc, setActiveLegalDoc] = useState<'privacy' | 'terms' | 'refund'>('privacy');
   const [authModalMode, setAuthModalMode] = useState<'closed' | 'login' | 'register' | 'reset'>('closed');
 
@@ -141,16 +148,8 @@ export const LandingWebsite: React.FC<LandingWebsiteProps> = ({
     }
   };
 
-  const formatPlanPrice = (plan: AccountPlan) => {
-    if (currency === 'USD') {
-      const cents = billingCycle === 'annual' ? plan.annualPriceUsd : plan.monthlyPriceUsd;
-      if (cents === 0) return '$0';
-      const dollars = Math.round(cents / 100);
-      return billingCycle === 'annual' ? `$${dollars}/yr` : `$${dollars}/mo`;
-    }
-    const etb = billingCycle === 'annual' ? plan.annualPriceEtb : plan.monthlyPriceEtb;
-    if (etb === 0) return '0 ETB';
-    return billingCycle === 'annual' ? `${etb.toLocaleString()} ETB/yr` : `${etb.toLocaleString()} ETB/mo`;
+  const formatPlanPrice = (plan: AccountPlan, stage: PricingTenureStage = pricingStage) => {
+    return getStagePriceAmount(plan, stage, billingCycle, currency).formatted;
   };
 
   return (
@@ -483,9 +482,56 @@ export const LandingWebsite: React.FC<LandingWebsiteProps> = ({
             </div>
           </div>
 
+          {/* Progressive Start-Up & Usage-Experience Tenure Switcher */}
+          <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <p className="text-xs font-bold text-teal-400 uppercase tracking-wider">
+                Scholar & Institutional Progressive Pricing Schedule
+              </p>
+              <p className="text-xs text-slate-300">
+                For <span className="text-white font-semibold">Student Scholar</span>,{' '}
+                <span className="text-white font-semibold">Researcher Pro</span>,{' '}
+                <span className="text-white font-semibold">Professional Lead</span> &{' '}
+                <span className="text-white font-semibold">Institutional Lab</span>: launch at{' '}
+                <span className="text-teal-300 font-semibold">80% off</span>, adjust{' '}
+                <span className="text-indigo-300 font-semibold">+50%</span> after 1 year usage experience, and{' '}
+                <span className="text-amber-300 font-semibold">double (2×)</span> after 2 years.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5 bg-slate-950 border border-slate-800 rounded-xl p-1 shrink-0">
+              {(
+                [
+                  { id: 'startup', label: 'Start-Up (-80%)' },
+                  { id: 'year_1_plus', label: 'After 1 Yr (+50%)' },
+                  { id: 'year_2_plus', label: 'After 2 Yrs (2×)' },
+                  { id: 'standard', label: 'Standard Base' },
+                ] as { id: PricingTenureStage; label: string }[]
+              ).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setPricingStage(item.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                    pricingStage === item.id
+                      ? 'bg-teal-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             {plans.map((plan) => {
               const isHighlighted = plan.code === 'researcher_pro';
+              const progressive = isProgressivePricingPlan(plan.code);
+              const schedule = plan.pricingSchedule || computePlanPricingSchedule(plan);
+              const basePriceFormatted = getStagePriceAmount(plan, 'standard', billingCycle, currency).formatted;
+              const startupFormatted = getStagePriceAmount(plan, 'startup', billingCycle, currency).formattedUnitOnly;
+              const year1Formatted = getStagePriceAmount(plan, 'year_1_plus', billingCycle, currency).formattedUnitOnly;
+              const year2Formatted = getStagePriceAmount(plan, 'year_2_plus', billingCycle, currency).formattedUnitOnly;
               return (
                 <div
                   key={plan.code}
@@ -508,9 +554,57 @@ export const LandingWebsite: React.FC<LandingWebsiteProps> = ({
                       <p className="text-xs text-slate-400 mt-1 min-h-[36px]">{plan.tagline}</p>
                     </div>
 
-                    <p className="text-2xl font-extrabold text-white tabular-nums">
-                      {formatPlanPrice(plan)}
-                    </p>
+                    <div className="space-y-1">
+                      <div className="flex items-baseline gap-2 flex-wrap">
+                        <p className="text-2xl font-extrabold text-white tabular-nums">
+                          {formatPlanPrice(plan, pricingStage)}
+                        </p>
+                        {progressive && pricingStage !== 'standard' && (
+                          <span className="text-xs text-slate-500 line-through tabular-nums">
+                            {basePriceFormatted}
+                          </span>
+                        )}
+                      </div>
+                      {progressive ? (
+                        <p className="text-[11px] font-semibold text-teal-400">
+                          {pricingStage === 'startup' && schedule.startup.badgeText}
+                          {pricingStage === 'year_1_plus' && schedule.year1Plus.badgeText}
+                          {pricingStage === 'year_2_plus' && schedule.year2Plus.badgeText}
+                          {pricingStage === 'standard' && 'Standard list price (100%)'}
+                        </p>
+                      ) : (
+                        <p className="text-[11px] font-semibold text-slate-400">Free Forever</p>
+                      )}
+                    </div>
+
+                    {progressive && (
+                      <div className="rounded-xl bg-slate-950/80 border border-slate-800/90 p-2.5 space-y-1 text-[11px]">
+                        <div
+                          className={`flex items-center justify-between ${
+                            pricingStage === 'startup' ? 'text-teal-300 font-bold' : 'text-slate-400'
+                          }`}
+                        >
+                          <span>Start-Up (-80%)</span>
+                          <span className="tabular-nums">{startupFormatted}</span>
+                        </div>
+                        <div
+                          className={`flex items-center justify-between ${
+                            pricingStage === 'year_1_plus' ? 'text-indigo-300 font-bold' : 'text-slate-400'
+                          }`}
+                        >
+                          <span>After 1 Yr (+50%)</span>
+                          <span className="tabular-nums">{year1Formatted}</span>
+                        </div>
+                        <div
+                          className={`flex items-center justify-between ${
+                            pricingStage === 'year_2_plus' ? 'text-amber-300 font-bold' : 'text-slate-400'
+                          }`}
+                        >
+                          <span>After 2 Yrs (2×)</span>
+                          <span className="tabular-nums">{year2Formatted}</span>
+                        </div>
+                      </div>
+                    )}
 
                     <ul className="space-y-2 text-xs text-slate-300 border-t border-slate-800 pt-4">
                       <li className="flex items-center gap-2">

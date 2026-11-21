@@ -25,6 +25,7 @@ import { ResearchSuiteModal } from './components/suite/ResearchSuiteModal';
 import { LandingWebsite } from './components/commercial/LandingWebsite';
 import { AccountBillingPortal } from './components/commercial/AccountBillingPortal';
 import { AdminDashboard } from './components/commercial/AdminDashboard';
+import { GeminiChatbotDrawer } from './components/GeminiChatbotDrawer';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import { AutoSaveStatusInfo } from './components/ModuleWorkbenchControls';
 import { useAuth } from './contexts/AuthContext';
@@ -33,9 +34,13 @@ import {
   SyncStatus,
   cacheProjectsOffline,
   enqueueOfflineSyncOp,
+  fetchCloudProjectsWithPayloads,
   flushOfflineSyncQueue,
   loadCachedOfflineProjects,
   loadOfflineQueue,
+  loadWorkspaceUiState,
+  mergeProjectsPreservingData,
+  saveWorkspaceUiState,
   syncProjectToCloudBackend,
 } from './utils/syncEngine';
 import {
@@ -44,6 +49,14 @@ import {
   mergeScreeningInsightsIntoExtractedData,
 } from './services/apiService';
 import { parseLocalDataFilesToArticles } from './utils/localFileImporter';
+import {
+  appendLocalProtocolRevision,
+  computeProtocolFingerprint,
+  extractProtocolSnapshot,
+  PROTOCOL_SCHEMA_VERSION,
+  removeProjectProtocolFromVault,
+  saveProjectProtocolToVault,
+} from './utils/protocolVault';
 
 type SurfaceView = 'workbench' | 'website' | 'billing' | 'admin';
 
@@ -73,13 +86,29 @@ export default function App() {
     { id: number; title: string; message: string; severity: string }[]
   >([]);
 
+  const initialUiState = useMemo(() => loadWorkspaceUiState(), []);
   const [projects, setProjects] = useState<ReviewProject[]>([]);
   const [isLoadingProjects, setIsLoadingProjects] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string>('');
-  const [currentProjectId, setCurrentProjectId] = useState<string>('');
-  const [currentTab, setCurrentTab] = useState<string>('dashboard');
-  const [selectedArticleId, setSelectedArticleId] = useState<string>('');
-  const [deviceMode, setDeviceMode] = useState<'desktop' | 'mobile'>('desktop');
+  const [currentProjectId, setCurrentProjectId] = useState<string>(
+    initialUiState.currentProjectId || ''
+  );
+  const [currentTab, setCurrentTab] = useState<string>(initialUiState.currentTab || 'dashboard');
+  const [selectedArticleId, setSelectedArticleId] = useState<string>(
+    initialUiState.selectedArticleId || ''
+  );
+  const [deviceMode, setDeviceMode] = useState<'desktop' | 'mobile'>(
+    initialUiState.deviceMode === 'mobile' ? 'mobile' : 'desktop'
+  );
+
+  useEffect(() => {
+    saveWorkspaceUiState({
+      currentProjectId,
+      currentTab,
+      selectedArticleId,
+      deviceMode,
+    });
+  }, [currentProjectId, currentTab, selectedArticleId, deviceMode]);
 
   // Modal states
   const [isCrossrefOpen, setIsCrossrefOpen] = useState<boolean>(false);
@@ -94,6 +123,8 @@ export default function App() {
   const [autoSaveStatus, setAutoSaveStatus] = useState<AutoSaveStatusInfo>({ state: 'idle' });
   const workbenchDebounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const pendingWorkbenchPayloadsRef = useRef<Map<string, WorkbenchState>>(new Map());
+  const projectDebounceRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const pendingProjectPayloadsRef = useRef<Map<string, ReviewProject>>(new Map());
   const projectsRef = useRef<ReviewProject[]>(projects);
 
   useEffect(() => {
@@ -113,14 +144,59 @@ export default function App() {
     });
   }, []);
 
+  const flushPendingProjectSaves = useCallback(
+    async (projectIdFilter?: string, keepalive = false): Promise<void> => {
+      const promises: Promise<any>[] = [];
+      projectDebounceRef.current.forEach((timer, pid) => {
+        if (projectIdFilter && pid !== projectIdFilter) return;
+        clearTimeout(timer);
+        projectDebounceRef.current.delete(pid);
+        const pending = pendingProjectPayloadsRef.current.get(pid);
+        if (pending) {
+          pendingProjectPayloadsRef.current.delete(pid);
+          const snap = extractProtocolSnapshot(pending);
+          if (keepalive) {
+            apiService
+              .saveProtocolVault(pid, {
+                snapshot: snap,
+                reason: 'Unload/restart emergency keepalive flush',
+                source: 'auto',
+                allowReplace: true,
+                keepalive: true,
+              })
+              .catch(() => {});
+          } else {
+            promises.push(apiService.updateProjectFolder(pending).catch(() => {}));
+          }
+        }
+      });
+      if (promises.length > 0) {
+        await Promise.all(promises);
+      }
+    },
+    []
+  );
+
   useEffect(() => {
-    const handleBeforeUnload = () => flushPendingWorkbenchSaves();
+    const handleBeforeUnload = () => {
+      flushPendingWorkbenchSaves();
+      flushPendingProjectSaves(undefined, true);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPendingWorkbenchSaves();
+        flushPendingProjectSaves(undefined, true);
+      }
+    };
     window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       flushPendingWorkbenchSaves();
+      flushPendingProjectSaves(undefined, true);
     };
-  }, [flushPendingWorkbenchSaves]);
+  }, [flushPendingWorkbenchSaves, flushPendingProjectSaves]);
 
   const navigateSurface = (
     nextView: SurfaceView,
@@ -261,26 +337,57 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+    const savedUi = loadWorkspaceUiState();
     setIsLoadingProjects(true);
     setLoadError('');
     apiService
       .fetchProjects()
-      .then((serverProjects) => {
+      .then(async (serverProjects) => {
         if (!active) return;
         const list = Array.isArray(serverProjects) ? serverProjects : [];
-        const sanitized = list.map((proj) => ({
-          ...proj,
-          articles: (proj.articles || [])
-            .filter((a) => !a.projectId || a.projectId === proj.id)
-            .map((a) => ({ ...a, projectId: proj.id })),
-        }));
-        setProjects(sanitized);
-        cacheProjectsOffline(sanitized);
-        if (sanitized.length > 0) {
+        const localCached = loadCachedOfflineProjects();
+        const merged = mergeProjectsPreservingData(list, localCached);
+
+        // If local cache or protocol vault recovered projects, richer protocol fields, or articles absent from server disk after an update/restart, persist back to disk
+        const serverById = new Map(list.map((p) => [p.id, p]));
+        for (const mProj of merged) {
+          const sProj = serverById.get(mProj.id);
+          const protocolChanged =
+            sProj &&
+            computeProtocolFingerprint(extractProtocolSnapshot(mProj)) !==
+              computeProtocolFingerprint(extractProtocolSnapshot(sProj));
+          if (!sProj) {
+            apiService.createProjectFolder(mProj).catch(() => {});
+          } else if (protocolChanged || (mProj.articles?.length || 0) > (sProj.articles?.length || 0)) {
+            apiService.updateProjectFolder(mProj).catch(() => {});
+            apiService
+              .saveProtocolVault(mProj.id, {
+                snapshot: extractProtocolSnapshot(mProj),
+                reason: 'Recovered protocol & framework state on startup',
+                source: 'recovery',
+                allowReplace: true,
+              })
+              .catch(() => {});
+            if ((mProj.articles?.length || 0) > (sProj.articles?.length || 0)) {
+              apiService.syncProjectArticles(mProj.id, mProj.articles || []).catch(() => {});
+            }
+          }
+        }
+
+        if (!active) return;
+        setProjects(merged);
+        cacheProjectsOffline(merged);
+        if (merged.length > 0) {
+          const preferredProjectId = currentProjectId || savedUi.currentProjectId || '';
           const resolvedActive =
-            sanitized.find((p) => p.id === currentProjectId) || sanitized[0];
+            merged.find((p) => p.id === preferredProjectId) || merged[0];
           setCurrentProjectId(resolvedActive.id);
-          setSelectedArticleId(resolvedActive.articles[0]?.id || '');
+          const preferredArtId = selectedArticleId || savedUi.selectedArticleId || '';
+          const validArt =
+            preferredArtId && resolvedActive.articles.some((a) => a.id === preferredArtId)
+              ? preferredArtId
+              : resolvedActive.articles[0]?.id || '';
+          setSelectedArticleId(validArt);
         } else {
           setCurrentProjectId('');
           setSelectedArticleId('');
@@ -291,8 +398,15 @@ export default function App() {
         const offlineCached = loadCachedOfflineProjects();
         if (offlineCached.length > 0) {
           setProjects(offlineCached);
-          setCurrentProjectId(offlineCached[0].id);
-          setSelectedArticleId(offlineCached[0].articles?.[0]?.id || '');
+          const preferredId = currentProjectId || savedUi.currentProjectId || '';
+          const resolved = offlineCached.find((p) => p.id === preferredId) || offlineCached[0];
+          setCurrentProjectId(resolved.id);
+          const preferredArtId = selectedArticleId || savedUi.selectedArticleId || '';
+          const validArt =
+            preferredArtId && resolved.articles?.some((a) => a.id === preferredArtId)
+              ? preferredArtId
+              : resolved.articles?.[0]?.id || '';
+          setSelectedArticleId(validArt);
           setSyncStatus('Offline');
         } else {
           console.warn('Could not load review folders:', err?.message);
@@ -306,6 +420,92 @@ export default function App() {
       active = false;
     };
   }, []);
+
+  // Hydrate & reconcile signed-in user's cloud projects across sessions and app updates
+  const lastHydratedUidRef = useRef<string>('');
+  useEffect(() => {
+    if (!idToken || !user?.uid || isLoadingProjects) return;
+    const sessionKey = `${user.uid}:${idToken.slice(-12)}`;
+    if (lastHydratedUidRef.current === sessionKey) return;
+    lastHydratedUidRef.current = sessionKey;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        setSyncStatus('Synchronizing');
+        const cloudList = await fetchCloudProjectsWithPayloads(idToken);
+        if (cancelled) return;
+        const localCached = loadCachedOfflineProjects();
+        const baseProjects = projectsRef.current;
+        const merged = mergeProjectsPreservingData(baseProjects, localCached, cloudList);
+
+        // Persist any cloud-recovered projects or richer/newer protocol edits onto local disk partition
+        const localById = new Map(baseProjects.map((p) => [p.id, p]));
+        for (const mProj of merged) {
+          const lProj = localById.get(mProj.id);
+          const protocolChanged =
+            lProj &&
+            computeProtocolFingerprint(extractProtocolSnapshot(mProj)) !==
+              computeProtocolFingerprint(extractProtocolSnapshot(lProj));
+          if (!lProj) {
+            apiService.createProjectFolder(mProj).catch(() => {});
+          } else if (protocolChanged || (mProj.articles?.length || 0) > (lProj.articles?.length || 0)) {
+            apiService.updateProjectFolder(mProj).catch(() => {});
+            apiService
+              .saveProtocolVault(mProj.id, {
+                snapshot: extractProtocolSnapshot(mProj),
+                reason: 'Reconciled protocol & framework across cloud/local sync',
+                source: 'sync',
+                allowReplace: true,
+              })
+              .catch(() => {});
+            if ((mProj.articles?.length || 0) > (lProj.articles?.length || 0)) {
+              apiService.syncProjectArticles(mProj.id, mProj.articles || []).catch(() => {});
+            }
+          }
+        }
+
+        if (merged.length > 0) {
+          setProjects(merged);
+          cacheProjectsOffline(merged);
+          setCurrentProjectId((prevId) => {
+            if (prevId && merged.some((p) => p.id === prevId)) return prevId;
+            return merged[0].id;
+          });
+        }
+
+        // Flush pending offline ops & push any local-only projects up to user's cloud store
+        const cloudIds = new Set(cloudList.map((c) => c.id));
+        const flushed = await flushOfflineSyncQueue({
+          token: idToken,
+          uid: user.uid,
+          emailVerified: user.emailVerified,
+          projects: merged,
+        });
+        setPendingOps(flushed.remaining);
+
+        for (const proj of merged) {
+          if (!cloudIds.has(proj.id)) {
+            await syncProjectToCloudBackend({
+              token: idToken,
+              uid: user.uid,
+              emailVerified: user.emailVerified,
+              project: proj,
+            }).catch(() => {});
+          }
+        }
+        if (!cancelled) {
+          setSyncStatus(flushed.remaining.length === 0 ? 'Synced' : 'Sync Failed');
+        }
+      } catch {
+        if (!cancelled) setSyncStatus('Sync Failed');
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [idToken, user?.uid, user?.emailVerified, isLoadingProjects]);
 
   const triggerCloudBackgroundSync = async (
     targetProject: ReviewProject,
@@ -365,65 +565,106 @@ export default function App() {
     }
   };
 
-  // Handlers for updating project cleanly with functional updates & backend folder sync
+  // Handlers for updating project cleanly with instant local Protocol Vault protection + serialized debounced disk/cloud sync
   const handleUpdateProject = async (updated: ReviewProject): Promise<ReviewProject | void> => {
+    const nowIso = new Date().toISOString();
     const previousProj = projectsRef.current.find((p) => p.id === updated.id);
     const isolatedUpdated: ReviewProject = {
       ...updated,
+      protocolSchemaVersion: PROTOCOL_SCHEMA_VERSION,
+      protocolUpdatedAt: nowIso,
+      updatedAt: nowIso,
       articles: (updated.articles || []).map((a) => ({ ...a, projectId: updated.id })),
     };
-    setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Protocol & Settings' }));
+
+    setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Protocol & Framework Vault' }));
     setProjects((prev) => {
       const next = prev.map((p) => (p.id === updated.id ? isolatedUpdated : p));
       cacheProjectsOffline(next);
       return next;
     });
-    try {
-      const saved = await apiService.updateProjectFolder(isolatedUpdated);
-      const savedIso = new Date().toISOString();
-      setAutoSaveStatus({ state: 'saved', lastSavedAt: saved?.updatedAt || savedIso, label: 'Protocol & Settings' });
-      if (saved?.databaseFolderPath) {
-        setProjects((prev) => {
-          const next = prev.map((p) =>
-            p.id === saved.id
-              ? {
-                  ...p,
-                  databaseFolderName: saved.databaseFolderName,
-                  databaseFolderPath: saved.databaseFolderPath,
-                  updatedAt: saved.updatedAt || p.updatedAt,
-                }
-              : p
-          );
-          cacheProjectsOffline(next);
-          return next;
-        });
-      }
-      void triggerCloudBackgroundSync(isolatedUpdated, 'update_project', `Updated ${isolatedUpdated.title}`);
-      return saved;
-    } catch (err: any) {
-      console.warn('Folder sync warning:', err?.message);
-      if (previousProj && previousProj.databaseFolderName !== isolatedUpdated.databaseFolderName) {
-        setProjects((prev) => {
-          const next = prev.map((p) =>
-            p.id === updated.id
-              ? {
-                  ...p,
-                  databaseFolderName: previousProj.databaseFolderName,
-                  databaseFolderPath: previousProj.databaseFolderPath,
-                }
-              : p
-          );
-          cacheProjectsOffline(next);
-          return next;
-        });
-      }
-      setAutoSaveStatus((prev) => ({
-        ...prev,
-        state: 'error',
-        error: err?.message || 'Offline cached locally',
-      }));
-      throw err;
+    saveProjectProtocolToVault(isolatedUpdated, { authoritative: true });
+    appendLocalProtocolRevision(isolatedUpdated, 'Auto-saved protocol & framework edit', 'auto');
+
+    // Clear any stale queued timer and coalesce rapid keystrokes in order without overwriting newer edits
+    const existingTimer = projectDebounceRef.current.get(updated.id);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      projectDebounceRef.current.delete(updated.id);
     }
+    pendingProjectPayloadsRef.current.set(updated.id, isolatedUpdated);
+
+    const folderRenamed =
+      previousProj && previousProj.databaseFolderName !== isolatedUpdated.databaseFolderName;
+
+    const executePersist = async (): Promise<ReviewProject | void> => {
+      const payloadToPersist = pendingProjectPayloadsRef.current.get(updated.id) || isolatedUpdated;
+      pendingProjectPayloadsRef.current.delete(updated.id);
+      try {
+        const saved = await apiService.updateProjectFolder(payloadToPersist);
+        const savedIso = new Date().toISOString();
+        setAutoSaveStatus({
+          state: 'saved',
+          lastSavedAt: saved?.updatedAt || savedIso,
+          label: 'Protocol & Framework Vault',
+        });
+        if (saved?.databaseFolderPath) {
+          setProjects((prev) => {
+            const next = prev.map((p) =>
+              p.id === saved.id
+                ? {
+                    ...p,
+                    databaseFolderName: saved.databaseFolderName,
+                    databaseFolderPath: saved.databaseFolderPath,
+                    updatedAt: saved.updatedAt || p.updatedAt,
+                  }
+                : p
+            );
+            cacheProjectsOffline(next);
+            return next;
+          });
+        }
+        void triggerCloudBackgroundSync(
+          payloadToPersist,
+          'update_project',
+          `Updated ${payloadToPersist.title} protocol`
+        );
+        return saved;
+      } catch (err: any) {
+        console.warn('Folder sync warning:', err?.message);
+        if (folderRenamed && previousProj) {
+          setProjects((prev) => {
+            const next = prev.map((p) =>
+              p.id === updated.id
+                ? {
+                    ...p,
+                    databaseFolderName: previousProj.databaseFolderName,
+                    databaseFolderPath: previousProj.databaseFolderPath,
+                  }
+                : p
+            );
+            cacheProjectsOffline(next);
+            return next;
+          });
+        }
+        setAutoSaveStatus((prev) => ({
+          ...prev,
+          state: 'error',
+          error: err?.message || 'Saved in Local Protocol Vault (offline fallback)',
+        }));
+        if (folderRenamed) throw err;
+      }
+    };
+
+    if (folderRenamed) {
+      return executePersist();
+    }
+
+    const timer = setTimeout(() => {
+      projectDebounceRef.current.delete(updated.id);
+      void executePersist();
+    }, 350);
+    projectDebounceRef.current.set(updated.id, timer);
   };
 
   const handleUpdateArticlesForProject = useCallback(
@@ -534,6 +775,14 @@ export default function App() {
               error: err?.message || 'Cached locally',
             }));
           });
+        const targetProj = projectsRef.current.find((p) => p.id === targetProjectId);
+        if (targetProj && idToken) {
+          void triggerCloudBackgroundSync(
+            { ...targetProj, workbenchState: payloadToSave },
+            'update_project',
+            `Saved ${options?.label || options?.moduleId || 'Workbench'}`
+          );
+        }
       };
 
       if (options?.immediate) {
@@ -546,7 +795,8 @@ export default function App() {
         workbenchDebounceRef.current.set(targetProjectId, timer);
       }
     },
-    []
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [idToken]
   );
 
   // Reset or delete saved output/articles for Fast Batch Screener or any Core SLR module
@@ -767,7 +1017,11 @@ export default function App() {
 
   // Explicitly save all changes (metadata + articles + manifest) for a review folder to disk
   const handleSaveFolderChanges = async (targetProjectId: string) => {
-    const targetProj = projects.find((p) => p.id === targetProjectId);
+    flushPendingWorkbenchSaves(targetProjectId);
+    await flushPendingProjectSaves(targetProjectId, false);
+    const targetProj =
+      projectsRef.current.find((p) => p.id === targetProjectId) ||
+      projects.find((p) => p.id === targetProjectId);
     if (!targetProj) {
       throw new Error('Target review folder not found');
     }
@@ -775,6 +1029,7 @@ export default function App() {
       .filter((a) => !a.projectId || a.projectId === targetProjectId)
       .map((a) => ({ ...a, projectId: targetProjectId }));
 
+    saveProjectProtocolToVault(targetProj, { authoritative: true });
     await apiService.updateProjectFolder({ ...targetProj, articles: isolatedArticles });
     const syncRes = await apiService.syncProjectArticles(targetProjectId, isolatedArticles);
     return syncRes;
@@ -809,6 +1064,7 @@ export default function App() {
     try {
       localStorage.removeItem(`slr_search_history_${targetProjectId}`);
     } catch {}
+    removeProjectProtocolFromVault(targetProjectId);
     const remainingProjects = projects.filter((p) => p.id !== targetProjectId);
     setProjects(remainingProjects);
     cacheProjectsOffline(remainingProjects);
@@ -1635,6 +1891,7 @@ export default function App() {
                       onAutoSyncScreening={handleAutoSyncScreeningCriteria}
                       onOpenProtocolBuilder={() => setCurrentTab('protocol_builder')}
                       autoSaveStatus={autoSaveStatus}
+                      isCloudSynced={Boolean(idToken)}
                       onResetWorkbenchModule={(params) =>
                         handleResetWorkbenchModule(isolatedCurrentProject.id, params)
                       }
@@ -1807,6 +2064,7 @@ export default function App() {
                     <PrismaDiagram
                       project={isolatedCurrentProject}
                       onUpdateArticle={handleUpdateArticle}
+                      onUpdateProject={handleUpdateProject}
                       onOpenSynthesis={handleOpenQuantSynthesis}
                       autoSaveStatus={autoSaveStatus}
                       onResetWorkbenchModule={(params) =>
@@ -2096,6 +2354,7 @@ export default function App() {
                   onAutoSyncScreening={handleAutoSyncScreeningCriteria}
                   onOpenProtocolBuilder={() => setCurrentTab('protocol_builder')}
                   autoSaveStatus={autoSaveStatus}
+                  isCloudSynced={Boolean(idToken)}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)
                   }
@@ -2275,6 +2534,7 @@ export default function App() {
                 <PrismaDiagram
                   project={isolatedCurrentProject}
                   onUpdateArticle={handleUpdateArticle}
+                  onUpdateProject={handleUpdateProject}
                   onOpenSynthesis={handleOpenQuantSynthesis}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
@@ -2515,6 +2775,12 @@ export default function App() {
           onClose={() => setIsResearchSuiteOpen(false)}
           project={isolatedCurrentProject}
           initialTab={suiteInitialTab}
+        />
+      )}
+      {isolatedCurrentProject && surfaceView === 'workbench' && (
+        <GeminiChatbotDrawer
+          project={isolatedCurrentProject}
+          onUpdateWorkbenchState={handleUpdateWorkbenchState}
         />
       )}
       <OfflineIndicator pendingCount={pendingOps.length} />

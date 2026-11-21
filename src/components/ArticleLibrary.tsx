@@ -3,6 +3,7 @@ import {
   Article,
   BatchScreenerRunRecord,
   ModuleQaRescanRecord,
+  ReviewIterationEntry,
   ReviewProject,
   SearchHistoryEntry,
   WorkbenchModuleId,
@@ -711,6 +712,28 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
       if (stageFilter === 'exclude' && art.decision !== 'exclude') return false;
       if (stageFilter === 'uncertain' && art.decision !== 'uncertain') return false;
       if (stageFilter === 'duplicate' && !art.isDuplicate) return false;
+      if (
+        stageFilter === 'prisma_included' &&
+        art.prismaProtocolStatus !== 'included' &&
+        art.decision !== 'include'
+      ) {
+        return false;
+      }
+      if (
+        stageFilter === 'prisma_excluded' &&
+        art.prismaProtocolStatus !== 'excluded_archived' &&
+        !(art.decision === 'exclude' && !art.isDuplicate)
+      ) {
+        return false;
+      }
+      if (
+        stageFilter === 'needs_iteration' &&
+        art.prismaProtocolStatus !== 'needs_iteration' &&
+        art.decision !== 'uncertain' &&
+        (!art.reviewIterations || art.reviewIterations.length === 0)
+      ) {
+        return false;
+      }
 
       // source filter
       if (sourceFilter !== 'all' && art.sourceDatabase !== sourceFilter) return false;
@@ -728,6 +751,72 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
       a.id === artId ? { ...a, isStarred: !a.isStarred } : a
     );
     onUpdateArticles(updated);
+  };
+
+  const handlePrismaIterationAction = (
+    artId: string,
+    prismaStatus: 'included' | 'excluded_archived' | 'needs_iteration',
+    e: React.MouseEvent
+  ) => {
+    e.stopPropagation();
+    const nowIso = new Date().toISOString();
+    const nextDecision =
+      prismaStatus === 'included'
+        ? ('include' as const)
+        : prismaStatus === 'excluded_archived'
+        ? ('exclude' as const)
+        : ('uncertain' as const);
+    const nextStage =
+      prismaStatus === 'included'
+        ? ('final_included' as const)
+        : prismaStatus === 'excluded_archived'
+        ? ('excluded' as const)
+        : ('full_text' as const);
+    const reasonText =
+      prismaStatus === 'included'
+        ? 'Confirmed for PRISMA protocol inclusion via Library quick action'
+        : prismaStatus === 'excluded_archived'
+        ? 'Excluded in PRISMA protocol (data preserved in review database)'
+        : 'Flagged for reviewer iteration / re-check (data preserved)';
+
+    let affectedTitle = '';
+    const updated = subLibraryArticles.map((a) => {
+      if (a.id !== artId) return a;
+      affectedTitle = a.title;
+      const prevIterations = Array.isArray(a.reviewIterations) ? a.reviewIterations : [];
+      const entry: ReviewIterationEntry = {
+        id: `iter_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        iterationNumber: prevIterations.length + 1,
+        timestamp: nowIso,
+        actor: 'Reviewer',
+        previousDecision: a.decision,
+        newDecision: nextDecision,
+        prismaStatus,
+        reason: reasonText,
+        stage: stageFilter === 'starred' ? 'Interesting / Starred' : 'Article Library',
+      };
+      return {
+        ...a,
+        decision: nextDecision,
+        screeningStage: nextStage,
+        decisionReason: prismaStatus === 'excluded_archived' ? reasonText : a.decisionReason,
+        prismaProtocolStatus: prismaStatus,
+        reviewIterations: [...prevIterations, entry],
+        lastReviewedIterationAt: nowIso,
+      };
+    });
+
+    onUpdateArticles(updated);
+    setFolderActionStatus({
+      type: 'success',
+      message:
+        prismaStatus === 'included'
+          ? `Included "${affectedTitle.slice(0, 48)}" in PRISMA protocol (iteration saved).`
+          : prismaStatus === 'excluded_archived'
+          ? `Excluded "${affectedTitle.slice(0, 48)}" in PRISMA protocol (data kept safely in DB).`
+          : `Flagged "${affectedTitle.slice(0, 48)}" for Review Iteration.`,
+      timestamp: new Date().toLocaleTimeString(),
+    });
   };
 
   const handleAutoSyncSingleArticle = async (art: Article, e: React.MouseEvent) => {
@@ -1637,6 +1726,9 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
               { id: 'include', label: `Included (${subLibraryArticles.filter((a) => a.decision === 'include').length})` },
               { id: 'exclude', label: `Excluded (${subLibraryArticles.filter((a) => a.decision === 'exclude').length})` },
               { id: 'uncertain', label: `Uncertain (${subLibraryArticles.filter((a) => a.decision === 'uncertain').length})` },
+              { id: 'prisma_included', label: `PRISMA Included (${subLibraryArticles.filter((a) => a.prismaProtocolStatus === 'included' || a.decision === 'include').length})` },
+              { id: 'prisma_excluded', label: `PRISMA Excluded Saved (${subLibraryArticles.filter((a) => a.prismaProtocolStatus === 'excluded_archived' || (a.decision === 'exclude' && !a.isDuplicate)).length})` },
+              { id: 'needs_iteration', label: `Review Iteration (${subLibraryArticles.filter((a) => a.prismaProtocolStatus === 'needs_iteration' || a.decision === 'uncertain' || (a.reviewIterations?.length || 0) > 0).length})` },
               { id: 'duplicate', label: `Duplicates (${subLibraryArticles.filter((a) => a.isDuplicate).length})` },
             ].map((st) => (
               <button
@@ -1946,13 +2038,62 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                     </div>
                   )}
 
-                  {/* Page evidence count */}
+                    {/* Page evidence count */}
                   {art.evidenceCitations && art.evidenceCitations.length > 0 && (
                     <div className="pt-1 flex items-center gap-1.5 text-[11px] text-teal-400">
                       <FileCheck2 className="w-3.5 h-3.5" />
                       <span>{art.evidenceCitations.length} Grounded Page-Level Evidence Citations Pinned</span>
                     </div>
                   )}
+
+                  {/* PRISMA Protocol & Review Iteration Controls (Preserve Data) */}
+                  <div className="pt-2 flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={(e) => handlePrismaIterationAction(art.id, 'included', e)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 border cursor-pointer transition ${
+                        art.prismaProtocolStatus === 'included' || art.decision === 'include'
+                          ? 'bg-emerald-600/25 border-emerald-500/60 text-emerald-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-emerald-600/50 hover:text-emerald-300'
+                      }`}
+                      title="Include in PRISMA Protocol and log iteration (no deletion)"
+                    >
+                      <CheckCircle2 className="w-3 h-3" />
+                      <span>Include PRISMA</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => handlePrismaIterationAction(art.id, 'excluded_archived', e)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 border cursor-pointer transition ${
+                        art.prismaProtocolStatus === 'excluded_archived' ||
+                        (art.decision === 'exclude' && !art.isDuplicate)
+                          ? 'bg-rose-600/20 border-rose-500/50 text-rose-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-rose-600/50 hover:text-rose-300'
+                      }`}
+                      title="Exclude from PRISMA synthesis while preserving full record in database"
+                    >
+                      <XCircle className="w-3 h-3" />
+                      <span>Exclude (Keep Data)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => handlePrismaIterationAction(art.id, 'needs_iteration', e)}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 border cursor-pointer transition ${
+                        art.prismaProtocolStatus === 'needs_iteration' || art.decision === 'uncertain'
+                          ? 'bg-amber-600/25 border-amber-500/60 text-amber-300'
+                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-amber-600/50 hover:text-amber-300'
+                      }`}
+                      title="Flag for Review Iteration / Re-Check without deleting data"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Iterate</span>
+                    </button>
+                    {art.reviewIterations && art.reviewIterations.length > 0 && (
+                      <span className="px-2 py-0.5 rounded-md bg-indigo-500/15 border border-indigo-500/30 text-[10px] font-mono text-indigo-300">
+                        Iter #{art.reviewIterations.length}
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Right actions */}

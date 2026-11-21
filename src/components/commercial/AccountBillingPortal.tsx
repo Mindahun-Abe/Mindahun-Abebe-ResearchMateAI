@@ -18,6 +18,11 @@ import {
 import { AccountPlan, useAuth } from '../../contexts/AuthContext';
 import { storage } from '../../lib/firebase';
 import { ReviewProject } from '../../types';
+import {
+  getStagePriceAmount,
+  PricingTenureStage,
+  resolveUserTenureSummary,
+} from '../../utils/pricingSchedule';
 import { OfflineSyncOperation, SyncStatus } from '../../utils/syncEngine';
 
 interface AccountBillingPortalProps {
@@ -54,6 +59,7 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
   const [documents, setDocuments] = useState<any[]>([]);
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'annual'>('monthly');
   const [currency, setCurrency] = useState<'ETB' | 'USD'>('ETB');
+  const [previewStage, setPreviewStage] = useState<'active' | PricingTenureStage>('active');
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [busyAction, setBusyAction] = useState(false);
@@ -75,7 +81,7 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
   const loadBillingAndCloud = async (token: string) => {
     try {
       const [plansRes, txRes, cloudRes, docsRes] = await Promise.all([
-        fetch('/api/plans'),
+        fetch('/api/plans', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/billing/transactions', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/cloud/projects', { headers: { Authorization: `Bearer ${token}` } }),
         fetch('/api/storage/documents', { headers: { Authorization: `Bearer ${token}` } }),
@@ -312,6 +318,10 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
 
   const currentPlan = accountOverview?.entitlement.plan;
   const sub = accountOverview?.entitlement.subscription;
+  const tenureSummary =
+    accountOverview?.pricingTenure || resolveUserTenureSummary(accountOverview?.user.createdAt);
+  const displayStage: PricingTenureStage =
+    previewStage === 'active' ? tenureSummary.stage : previewStage;
   const storageUsedMb = ((accountOverview?.user.storageUsedBytes || 0) / (1024 * 1024)).toFixed(2);
 
   return (
@@ -458,19 +468,52 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
               </div>
             </div>
 
+            <div className="rounded-xl bg-slate-950/80 border border-slate-800 p-3.5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+              <div className="space-y-0.5">
+                <p className="text-xs font-bold text-teal-400">
+                  Your Active Tier: {tenureSummary.label} ({tenureSummary.badgeText})
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  Usage experience: {tenureSummary.usageDays} day{tenureSummary.usageDays === 1 ? '' : 's'}
+                  {tenureSummary.nextStageLabel && tenureSummary.daysUntilNextTransition
+                    ? ` · Next adjustment (${tenureSummary.nextStageLabel}) in ${tenureSummary.daysUntilNextTransition} days`
+                    : ' · Mature experience tier active'}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-1 bg-slate-900 border border-slate-800 rounded-xl p-1">
+                {(
+                  [
+                    { id: 'active', label: `My Active (${tenureSummary.shortLabel})` },
+                    { id: 'startup', label: 'Start-Up (-80%)' },
+                    { id: 'year_1_plus', label: 'After 1 Yr (+50%)' },
+                    { id: 'year_2_plus', label: 'After 2 Yrs (2×)' },
+                  ] as { id: 'active' | PricingTenureStage; label: string }[]
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setPreviewStage(opt.id)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition cursor-pointer ${
+                      previewStage === opt.id
+                        ? 'bg-teal-600 text-white'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {plans
                 .filter((p) => p.code !== 'free')
                 .map((plan) => {
-                  const amount =
-                    currency === 'USD'
-                      ? `$${Math.round(
-                          (billingCycle === 'annual' ? plan.annualPriceUsd : plan.monthlyPriceUsd) / 100
-                        )}`
-                      : `${(billingCycle === 'annual'
-                          ? plan.annualPriceEtb
-                          : plan.monthlyPriceEtb
-                        ).toLocaleString()} ETB`;
+                  const stagePrice = getStagePriceAmount(plan, displayStage, billingCycle, currency);
+                  const basePrice = getStagePriceAmount(plan, 'standard', billingCycle, currency);
+                  const startupPrice = getStagePriceAmount(plan, 'startup', billingCycle, currency).formattedUnitOnly;
+                  const year1Price = getStagePriceAmount(plan, 'year_1_plus', billingCycle, currency).formattedUnitOnly;
+                  const year2Price = getStagePriceAmount(plan, 'year_2_plus', billingCycle, currency).formattedUnitOnly;
                   const isCurrent = currentPlan?.code === plan.code;
                   return (
                     <div
@@ -479,23 +522,54 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
                         isCurrent ? 'bg-slate-950 border-teal-500/60' : 'bg-slate-950/60 border-slate-800'
                       }`}
                     >
-                      <div className="space-y-1.5">
+                      <div className="space-y-2">
                         <div className="flex items-center justify-between">
                           <h4 className="text-sm font-bold text-white">{plan.name}</h4>
                           {isCurrent && (
                             <span className="text-[10px] font-bold text-teal-400">ACTIVE</span>
                           )}
                         </div>
-                        <p className="text-xl font-extrabold text-white tabular-nums">
-                          {amount}
-                          <span className="text-xs font-normal text-slate-400">
-                            /{billingCycle === 'annual' ? 'yr' : 'mo'}
+                        <div className="flex items-baseline gap-2 flex-wrap">
+                          <p className="text-xl font-extrabold text-white tabular-nums">
+                            {stagePrice.formattedUnitOnly}
+                            <span className="text-xs font-normal text-slate-400">
+                              /{billingCycle === 'annual' ? 'yr' : 'mo'}
+                            </span>
+                          </p>
+                          <span className="text-[11px] text-slate-500 line-through tabular-nums">
+                            {basePrice.formatted}
                           </span>
-                        </p>
+                        </div>
                         <p className="text-[11px] text-slate-400">
                           {plan.maxProjects} projects · {plan.monthlyAiCredits.toLocaleString()} AI credits ·{' '}
                           {plan.storageQuotaMb} MB
                         </p>
+                        <div className="rounded-xl bg-slate-900/90 border border-slate-800 p-2 space-y-1 text-[10px]">
+                          <div
+                            className={`flex justify-between ${
+                              displayStage === 'startup' ? 'text-teal-300 font-bold' : 'text-slate-400'
+                            }`}
+                          >
+                            <span>Start-Up (-80%)</span>
+                            <span className="tabular-nums">{startupPrice}</span>
+                          </div>
+                          <div
+                            className={`flex justify-between ${
+                              displayStage === 'year_1_plus' ? 'text-indigo-300 font-bold' : 'text-slate-400'
+                            }`}
+                          >
+                            <span>After 1 Yr (+50%)</span>
+                            <span className="tabular-nums">{year1Price}</span>
+                          </div>
+                          <div
+                            className={`flex justify-between ${
+                              displayStage === 'year_2_plus' ? 'text-amber-300 font-bold' : 'text-slate-400'
+                            }`}
+                          >
+                            <span>After 2 Yrs (2×)</span>
+                            <span className="tabular-nums">{year2Price}</span>
+                          </div>
+                        </div>
                       </div>
 
                       <div className="space-y-2">
@@ -505,7 +579,7 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
                           onClick={() => void handleCheckout(plan.code, 'chapa')}
                           className="w-full py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition cursor-pointer"
                         >
-                          Pay via Chapa
+                          Pay {getStagePriceAmount(plan, tenureSummary.stage, billingCycle, currency).formattedUnitOnly} via Chapa
                         </button>
                         <button
                           type="button"
@@ -540,20 +614,34 @@ export const AccountBillingPortal: React.FC<AccountBillingPortalProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/70">
-                    {transactions.map((tx) => (
-                      <tr key={tx.id}>
-                        <td className="py-2.5 pr-4 font-mono text-slate-200">{tx.invoiceNumber}</td>
-                        <td className="py-2.5 pr-4 capitalize text-white">{tx.planCode}</td>
-                        <td className="py-2.5 pr-4 uppercase text-slate-300">{tx.provider}</td>
-                        <td className="py-2.5 pr-4 tabular-nums text-white">
-                          {tx.amount} {tx.currency}
-                        </td>
-                        <td className="py-2.5 pr-4 capitalize text-teal-400">{tx.status}</td>
-                        <td className="py-2.5 text-slate-400">
-                          {new Date(tx.createdAt).toLocaleDateString()}
-                        </td>
-                      </tr>
-                    ))}
+                    {transactions.map((tx) => {
+                      let parsedMeta: any = {};
+                      try {
+                        parsedMeta = tx.metadataJson ? JSON.parse(tx.metadataJson) : {};
+                      } catch {}
+                      const displayAmount = parsedMeta?.exactAmount ?? tx.amount;
+                      return (
+                        <tr key={tx.id}>
+                          <td className="py-2.5 pr-4 font-mono text-slate-200">{tx.invoiceNumber}</td>
+                          <td className="py-2.5 pr-4 capitalize text-white">
+                            {tx.planCode}
+                            {parsedMeta?.tenureLabel ? (
+                              <span className="block text-[10px] text-slate-400">
+                                {parsedMeta.tenureLabel}
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="py-2.5 pr-4 uppercase text-slate-300">{tx.provider}</td>
+                          <td className="py-2.5 pr-4 tabular-nums text-white">
+                            {displayAmount} {tx.currency}
+                          </td>
+                          <td className="py-2.5 pr-4 capitalize text-teal-400">{tx.status}</td>
+                          <td className="py-2.5 text-slate-400">
+                            {new Date(tx.createdAt).toLocaleDateString()}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

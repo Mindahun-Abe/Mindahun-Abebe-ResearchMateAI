@@ -12,6 +12,7 @@ import {
 } from 'firebase/auth';
 import { doc, getDoc, serverTimestamp, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db, googleAuthProvider, handleFirestoreError, OperationType } from '../lib/firebase';
+import { PlanPricingSchedule, PricingTenureStage, UserTenureSummary } from '../utils/pricingSchedule';
 
 export interface AccountPlan {
   code: string;
@@ -29,6 +30,12 @@ export interface AccountPlan {
   prismaAutomationEnabled: boolean;
   teamSeats: number;
   priorityProcessing: boolean;
+  pricingSchedule?: PlanPricingSchedule;
+  effectivePricingStage?: PricingTenureStage;
+  effectiveMonthlyPriceUsd?: number;
+  effectiveAnnualPriceUsd?: number;
+  effectiveMonthlyPriceEtb?: number;
+  effectiveAnnualPriceEtb?: number;
 }
 
 export interface AccountOverview {
@@ -62,6 +69,7 @@ export interface AccountOverview {
     };
     inGracePeriod: boolean;
   };
+  pricingTenure?: UserTenureSummary;
   loginHistory: {
     id: number;
     email: string;

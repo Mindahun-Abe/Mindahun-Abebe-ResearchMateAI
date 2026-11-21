@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import http from 'http';
 import { createServer as createViteServer } from 'vite';
-import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, ThinkingLevel, Type } from '@google/genai';
 import { WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -28,6 +28,14 @@ import {
   evaluateIntegratedConceptAlignment,
   evaluateRuleWithPhraseInterconnection,
 } from './src/utils/conceptScreeningEngine.ts';
+import {
+  applyProtocolSnapshotToProject,
+  computeProtocolCompletenessScore,
+  computeProtocolFingerprint,
+  extractProtocolSnapshot,
+  mergeProtocolSnapshotsPreservingData,
+  PROTOCOL_SCHEMA_VERSION,
+} from './src/utils/protocolVault.ts';
 
 dotenv.config();
 
@@ -46,6 +54,94 @@ function ensureDir(dirPath: string) {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
   }
+}
+
+function writeJsonAtomicSync(filePath: string, data: unknown) {
+  const dir = path.dirname(filePath);
+  ensureDir(dir);
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+  const serialized = JSON.stringify(data, null, 2);
+  fs.writeFileSync(tmpPath, serialized, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function safeReadJsonSync<T = any>(filePath: string): T | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    if (!raw || !raw.trim()) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function readProtocolVaultFile(folderPath: string): {
+  schemaVersion: number;
+  updatedAt: string;
+  current: any;
+  revisions: any[];
+} | null {
+  const vaultPath = path.join(folderPath, 'protocol_vault.json');
+  const parsed = safeReadJsonSync<any>(vaultPath);
+  if (!parsed || typeof parsed !== 'object') return null;
+  return {
+    schemaVersion: Number(parsed.schemaVersion || PROTOCOL_SCHEMA_VERSION),
+    updatedAt: parsed.updatedAt || '',
+    current: parsed.current || null,
+    revisions: Array.isArray(parsed.revisions) ? parsed.revisions : [],
+  };
+}
+
+function saveProtocolVaultFile(
+  folderPath: string,
+  projectOrSnapshot: any,
+  options?: {
+    reason?: string;
+    source?: 'auto' | 'manual' | 'recovery' | 'sync';
+    forceCheckpoint?: boolean;
+    minAutoIntervalMs?: number;
+  }
+) {
+  ensureDir(folderPath);
+  const vaultPath = path.join(folderPath, 'protocol_vault.json');
+  const existingVault = readProtocolVaultFile(folderPath);
+  const snapshot = extractProtocolSnapshot(projectOrSnapshot);
+  const fingerprint = computeProtocolFingerprint(snapshot);
+  const nowIso = new Date().toISOString();
+  const prevRevs = existingVault?.revisions || [];
+  const latestRev = prevRevs[0];
+  const minInterval = options?.minAutoIntervalMs ?? 20000;
+  const elapsedSinceLatest = latestRev?.timestamp
+    ? Date.now() - new Date(latestRev.timestamp).getTime()
+    : Infinity;
+
+  let nextRevisions = prevRevs;
+  const shouldCreateRevision =
+    options?.forceCheckpoint ||
+    !latestRev ||
+    (latestRev.fingerprint !== fingerprint && elapsedSinceLatest >= minInterval);
+
+  if (shouldCreateRevision) {
+    const rev = {
+      revisionId: `rev_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: nowIso,
+      reason: options?.reason || (options?.forceCheckpoint ? 'Manual protocol checkpoint' : 'Auto-saved protocol checkpoint'),
+      source: options?.source || (options?.forceCheckpoint ? 'manual' : 'auto'),
+      fingerprint,
+      snapshot,
+    };
+    nextRevisions = [rev, ...prevRevs].slice(0, 25);
+  }
+
+  const nextVault = {
+    schemaVersion: PROTOCOL_SCHEMA_VERSION,
+    updatedAt: nowIso,
+    current: snapshot,
+    revisions: nextRevisions,
+  };
+  writeJsonAtomicSync(vaultPath, nextVault);
+  return nextVault;
 }
 
 function sanitizeCustomFolderName(rawName: string): string {
@@ -327,45 +423,49 @@ function writeProjectToFolder(project: any, options?: { allowClearArticles?: boo
     }));
 
   const nowIso = new Date().toISOString();
+  const projectJsonPath = path.join(targetFolderPath, 'project.json');
+  const existingDiskMeta = safeReadJsonSync<any>(projectJsonPath);
+  if (existingDiskMeta) {
+    try {
+      writeJsonAtomicSync(path.join(targetFolderPath, 'project.json.bak'), existingDiskMeta);
+    } catch {}
+  }
+
   const metaWithFolder = {
     ...projectMeta,
+    protocolSchemaVersion: PROTOCOL_SCHEMA_VERSION,
+    protocolUpdatedAt: projectMeta.protocolUpdatedAt || nowIso,
     databaseFolderName: finalFolderName,
     databaseFolderPath: `database/reviews/${finalFolderName}`,
     updatedAt: nowIso,
   };
 
-  fs.writeFileSync(path.join(targetFolderPath, 'project.json'), JSON.stringify(metaWithFolder, null, 2), 'utf-8');
-  fs.writeFileSync(articlesPath, JSON.stringify(isolatedArticles, null, 2), 'utf-8');
+  writeJsonAtomicSync(projectJsonPath, metaWithFolder);
+  writeJsonAtomicSync(articlesPath, isolatedArticles);
+  saveProtocolVaultFile(targetFolderPath, metaWithFolder, {
+    reason: 'Project metadata & protocol update',
+    source: 'auto',
+  });
   const workbenchPath = path.join(targetFolderPath, 'workbench_state.json');
   let resolvedWorkbenchState = workbenchState;
   if (workbenchState && typeof workbenchState === 'object') {
     const stampedWb = { ...workbenchState, lastAutoSavedAt: workbenchState.lastAutoSavedAt || nowIso };
-    fs.writeFileSync(workbenchPath, JSON.stringify(stampedWb, null, 2), 'utf-8');
+    writeJsonAtomicSync(workbenchPath, stampedWb);
     resolvedWorkbenchState = stampedWb;
   } else if (fs.existsSync(workbenchPath)) {
-    try {
-      resolvedWorkbenchState = JSON.parse(fs.readFileSync(workbenchPath, 'utf-8'));
-    } catch {}
+    resolvedWorkbenchState = safeReadJsonSync(workbenchPath) || undefined;
   }
   updatePartitionMetaFile(targetFolderPath, project.id, project.title, isolatedArticles.length);
 
   const manifestPath = path.join(targetFolderPath, 'sources_manifest.json');
-  fs.writeFileSync(
-    manifestPath,
-    JSON.stringify(
-      {
-        reviewId: project.id,
-        reviewTitle: project.title,
-        folderName: finalFolderName,
-        importedFiles: isolatedArticles.map((a: any) => a.sourceFileName || a.title).filter(Boolean),
-        totalArticles: isolatedArticles.length,
-        updatedAt: nowIso,
-      },
-      null,
-      2
-    ),
-    'utf-8'
-  );
+  writeJsonAtomicSync(manifestPath, {
+    reviewId: project.id,
+    reviewTitle: project.title,
+    folderName: finalFolderName,
+    importedFiles: isolatedArticles.map((a: any) => a.sourceFileName || a.title).filter(Boolean),
+    totalArticles: isolatedArticles.length,
+    updatedAt: nowIso,
+  });
 
   return {
     ...metaWithFolder,
@@ -391,26 +491,36 @@ function seedAndLoadAllReviewFolders(): any[] {
     }
 
     const metaPath = path.join(folderPath, 'project.json');
+    const metaBackupPath = path.join(folderPath, 'project.json.bak');
     const partPath = path.join(folderPath, 'database.partition.json');
     const manifestFallbackPath = path.join(folderPath, 'sources_manifest.json');
     const articlesPath = path.join(folderPath, 'articles.json');
 
-    let meta: any = null;
-    if (fs.existsSync(metaPath)) {
-      try {
-        meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-      } catch {}
+    let meta: any = safeReadJsonSync(metaPath);
+    const existingVault = readProtocolVaultFile(folderPath);
+
+    // Recover intact metadata/protocol from backup or protocol_vault.json before ever using fallback stub
+    if (!meta) {
+      const bakMeta = safeReadJsonSync<any>(metaBackupPath);
+      if (bakMeta && typeof bakMeta === 'object' && bakMeta.id) {
+        meta = bakMeta;
+      } else if (existingVault?.current && typeof existingVault.current === 'object') {
+        meta = {
+          ...existingVault.current,
+          databaseFolderName: dir.name,
+          databaseFolderPath: `database/reviews/${dir.name}`,
+        };
+      }
+      if (meta) {
+        try {
+          writeJsonAtomicSync(metaPath, meta);
+        } catch {}
+      }
     }
 
     if (!meta) {
-      let partData: any = null;
-      let manData: any = null;
-      if (fs.existsSync(partPath)) {
-        try { partData = JSON.parse(fs.readFileSync(partPath, 'utf-8')); } catch {}
-      }
-      if (fs.existsSync(manifestFallbackPath)) {
-        try { manData = JSON.parse(fs.readFileSync(manifestFallbackPath, 'utf-8')); } catch {}
-      }
+      let partData: any = safeReadJsonSync(partPath);
+      let manData: any = safeReadJsonSync(manifestFallbackPath);
       const recoveredId = partData?.partitionId || manData?.reviewId || dir.name.split('__').pop() || dir.name;
       const recoveredTitle = partData?.reviewTitle || manData?.reviewTitle || dir.name.replace(/__[^_]+$/, '').replace(/-/g, ' ');
       if (!partData && !manData && !fs.existsSync(articlesPath)) continue;
@@ -461,7 +571,29 @@ function seedAndLoadAllReviewFolders(): any[] {
         databaseFolderPath: `database/reviews/${dir.name}`,
         updatedAt: partData?.updatedAt || new Date().toISOString(),
       };
-      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+      writeJsonAtomicSync(metaPath, meta);
+    }
+
+    // Reconcile meta with protocol_vault.json so any newer keepalive protocol edit or backup is preserved
+    if (existingVault?.current) {
+      const mergedProto = mergeProtocolSnapshotsPreservingData(meta, existingVault.current);
+      const beforeFp = computeProtocolFingerprint(extractProtocolSnapshot(meta));
+      const nextMeta = { ...meta, ...mergedProto };
+      const afterFp = computeProtocolFingerprint(extractProtocolSnapshot(nextMeta));
+      if (beforeFp !== afterFp) {
+        meta = nextMeta;
+        try {
+          writeJsonAtomicSync(metaPath, meta);
+        } catch {}
+      }
+    } else {
+      // Seed initial protocol_vault.json on boot for pre-existing review folders without overwriting project.json
+      try {
+        saveProtocolVaultFile(folderPath, meta, {
+          reason: 'Initial protocol vault baseline',
+          source: 'recovery',
+        });
+      } catch {}
     }
 
     try {
@@ -748,7 +880,7 @@ app.put('/api/projects/:id', (req: Request, res: Response) => {
     let existingArticles = Array.isArray(project.articles) ? project.articles : undefined;
     if (folderPath) {
       const artFile = path.join(folderPath, 'articles.json');
-      const diskArts = fs.existsSync(artFile) ? JSON.parse(fs.readFileSync(artFile, 'utf-8')) : [];
+      const diskArts = safeReadJsonSync<any[]>(artFile) || [];
       if (!Array.isArray(existingArticles) || (existingArticles.length === 0 && Array.isArray(diskArts) && diskArts.length > 0)) {
         existingArticles = diskArts;
       }
@@ -758,6 +890,144 @@ app.put('/api/projects/:id', (req: Request, res: Response) => {
   } catch (err: any) {
     const status = err?.statusCode || 500;
     return res.status(status).json({ error: err.message || 'Failed to update review folder' });
+  }
+});
+
+app.get('/api/projects/:id/protocol-vault', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    let vault = readProtocolVaultFile(folderPath);
+    if (!vault) {
+      const meta = safeReadJsonSync<any>(path.join(folderPath, 'project.json'));
+      if (meta) {
+        vault = saveProtocolVaultFile(folderPath, meta, {
+          reason: 'Initialized protocol vault',
+          source: 'recovery',
+        });
+      }
+    }
+    const relFolder = path.relative(__dirname, folderPath).replace(/\\/g, '/');
+    return res.json({
+      projectId,
+      databaseFolderPath: relFolder,
+      vault: vault || { schemaVersion: PROTOCOL_SCHEMA_VERSION, updatedAt: '', current: null, revisions: [] },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to load protocol vault' });
+  }
+});
+
+app.post('/api/projects/:id/protocol-vault', express.text({ type: 'text/plain', limit: '5mb' }), (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    let bodyObj: any = req.body;
+    if (typeof bodyObj === 'string') {
+      try {
+        bodyObj = JSON.parse(bodyObj);
+      } catch {
+        bodyObj = {};
+      }
+    }
+    const incoming = bodyObj?.snapshot || bodyObj?.project || bodyObj;
+    if (!incoming || typeof incoming !== 'object') {
+      return res.status(400).json({ error: 'Protocol snapshot payload is required' });
+    }
+
+    let folderPath = findFolderForProjectId(projectId);
+    if (!folderPath) {
+      const created = writeProjectToFolder({ ...incoming, id: projectId, articles: [] });
+      folderPath = findFolderForProjectId(projectId);
+      if (!folderPath) {
+        return res.json({ success: true, projectId, snapshot: extractProtocolSnapshot(created) });
+      }
+    }
+
+    const metaPath = path.join(folderPath, 'project.json');
+    const diskMeta = safeReadJsonSync<any>(metaPath) || { id: projectId };
+    const snap = extractProtocolSnapshot({ ...diskMeta, ...incoming, id: projectId });
+    const allowReplace = Boolean(bodyObj?.allowReplace);
+    const mergedMeta = allowReplace
+      ? { ...diskMeta, ...snap }
+      : { ...diskMeta, ...mergeProtocolSnapshotsPreservingData(snap, diskMeta) };
+
+    if (computeProtocolCompletenessScore(mergedMeta) >= computeProtocolCompletenessScore(diskMeta) || allowReplace) {
+      if (diskMeta && fs.existsSync(metaPath)) {
+        try {
+          writeJsonAtomicSync(path.join(folderPath, 'project.json.bak'), diskMeta);
+        } catch {}
+      }
+      const nowIso = new Date().toISOString();
+      mergedMeta.updatedAt = nowIso;
+      mergedMeta.protocolUpdatedAt = snap.protocolUpdatedAt || nowIso;
+      mergedMeta.protocolSchemaVersion = PROTOCOL_SCHEMA_VERSION;
+      writeJsonAtomicSync(metaPath, mergedMeta);
+    }
+
+    const vault = saveProtocolVaultFile(folderPath, mergedMeta, {
+      reason: bodyObj?.reason || (bodyObj?.createCheckpoint ? 'Manual protocol checkpoint' : 'Auto-saved protocol backup'),
+      source: bodyObj?.source || (bodyObj?.createCheckpoint ? 'manual' : 'auto'),
+      forceCheckpoint: Boolean(bodyObj?.createCheckpoint),
+    });
+
+    const relFolder = path.relative(__dirname, folderPath).replace(/\\/g, '/');
+    return res.json({
+      success: true,
+      projectId,
+      databaseFolderPath: relFolder,
+      vault,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to save protocol vault' });
+  }
+});
+
+app.post('/api/projects/:id/protocol-vault/restore', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const { revisionId, snapshot } = req.body || {};
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+
+    const vault = readProtocolVaultFile(folderPath);
+    let targetSnapshot = snapshot || null;
+    if (!targetSnapshot && revisionId && vault?.revisions) {
+      const found = vault.revisions.find((r: any) => r.revisionId === revisionId);
+      if (found?.snapshot) targetSnapshot = found.snapshot;
+    }
+    if (!targetSnapshot) {
+      return res.status(404).json({ error: 'Requested protocol checkpoint revision not found' });
+    }
+
+    const metaPath = path.join(folderPath, 'project.json');
+    const diskMeta = safeReadJsonSync<any>(metaPath) || { id: projectId };
+    // Save safety pre-restore checkpoint first
+    saveProtocolVaultFile(folderPath, diskMeta, {
+      reason: 'Pre-restore automatic safety checkpoint',
+      source: 'recovery',
+      forceCheckpoint: true,
+    });
+
+    const restoredProject = applyProtocolSnapshotToProject(diskMeta, targetSnapshot, true);
+    writeJsonAtomicSync(metaPath, restoredProject);
+    const updatedVault = saveProtocolVaultFile(folderPath, restoredProject, {
+      reason: `Restored protocol checkpoint (${revisionId || 'imported'})`,
+      source: 'recovery',
+      forceCheckpoint: true,
+    });
+
+    return res.json({
+      success: true,
+      project: restoredProject,
+      vault: updatedVault,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to restore protocol checkpoint' });
   }
 });
 
@@ -5417,19 +5687,36 @@ app.post('/api/gemini/chat', optionalAuth, async (req: AuthRequest, res: Respons
         return res.status(402).json({ error: creditCheck.reason || 'Insufficient AI credits.' });
       }
     }
-    const { message, history = [], model = 'gemini-4-hydrogen', systemInstruction } = req.body || {};
+    const {
+      message,
+      history = [],
+      model = 'gemini-4-hydrogen',
+      taskMode = 'general',
+      systemInstruction,
+    } = req.body || {};
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message text is required' });
     }
-    // Enforce permitted standard non-paid models when paid key flow is not active
-    const allowedModels = new Set(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
-    const selectedModel = allowedModels.has(model) ? model : 'gemini-4-hydrogen';
 
     if (!ai || !apiKey) {
       return res.status(503).json({
         error: 'Gemini API key is not configured. Set GEMINI_API_KEY in AI Studio Secrets.',
       });
     }
+
+    // Free-tier model & thinking-level routing (paid-only models disabled per user selection)
+    const normalizedMode = String(taskMode || 'general').toLowerCase();
+    const isFastMode =
+      normalizedMode === 'fast' || model === 'gemini-3.1-flash-lite';
+    const isHighReasoningMode =
+      normalizedMode === 'deep_reasoning' || normalizedMode === 'complex_interactive';
+
+    const selectedModel = isFastMode ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen';
+    const thinkingConfig = isFastMode
+      ? { thinkingLevel: ThinkingLevel.MINIMAL }
+      : isHighReasoningMode
+      ? { thinkingLevel: ThinkingLevel.HIGH }
+      : undefined;
 
     const formattedHistory = Array.isArray(history)
       ? history
@@ -5440,22 +5727,32 @@ app.post('/api/gemini/chat', optionalAuth, async (req: AuthRequest, res: Respons
           }))
       : [];
 
-    const response = await ai.models.generateContent({
+    const chatConfig: Record<string, any> = {};
+    if (systemInstruction && typeof systemInstruction === 'string') {
+      chatConfig.systemInstruction = systemInstruction;
+    }
+    if (thinkingConfig) {
+      chatConfig.thinkingConfig = thinkingConfig;
+    }
+
+    const chat = ai.chats.create({
       model: selectedModel,
-      contents: [
-        ...formattedHistory,
-        { role: 'user', parts: [{ text: message }] },
-      ],
-      config: systemInstruction ? { systemInstruction } : undefined,
+      history: formattedHistory,
+      config: Object.keys(chatConfig).length > 0 ? chatConfig : undefined,
     });
+
+    const response = await chat.sendMessage({ message });
 
     return res.json({
       text: response?.text || '',
       model: selectedModel,
+      taskMode: normalizedMode,
     });
   } catch (err: any) {
     console.error('Gemini chat error:', err);
-    return res.status(500).json({ error: err?.message || 'Chat generation failed' });
+    const status = Number(err?.status || err?.statusCode);
+    const httpStatus = Number.isFinite(status) && status >= 400 && status < 600 ? status : 500;
+    return res.status(httpStatus).json({ error: err?.message || 'Chat generation failed' });
   }
 });
 

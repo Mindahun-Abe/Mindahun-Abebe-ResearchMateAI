@@ -1,6 +1,11 @@
 import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { ReviewProject } from '../types';
+import { Article, ReviewIterationEntry, ReviewProject, WorkbenchState } from '../types';
+import {
+  loadProtocolVaultMap,
+  mergeProtocolSnapshotsPreservingData,
+  saveAllProjectProtocolsToVault,
+} from './protocolVault';
 
 export type SyncStatus = 'Synced' | 'Synchronizing' | 'Offline' | 'Sync Failed';
 
@@ -13,9 +18,44 @@ export interface OfflineSyncOperation {
   device: 'web' | 'android';
 }
 
+export interface WorkspaceUiState {
+  currentProjectId?: string;
+  currentTab?: string;
+  selectedArticleId?: string;
+  deviceMode?: 'desktop' | 'mobile';
+  updatedAt?: string;
+}
+
 const QUEUE_KEY = 'researchmate_offline_sync_queue_v1';
 const VERSIONS_KEY = 'researchmate_project_versions_v1';
 const CACHE_KEY = 'researchmate_offline_projects_v1';
+const WORKSPACE_UI_KEY = 'researchmate_workspace_ui_v1';
+
+export function loadWorkspaceUiState(): WorkspaceUiState {
+  try {
+    const raw = localStorage.getItem(WORKSPACE_UI_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveWorkspaceUiState(state: WorkspaceUiState) {
+  try {
+    localStorage.setItem(
+      WORKSPACE_UI_KEY,
+      JSON.stringify({
+        ...loadWorkspaceUiState(),
+        ...state,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // Ignore storage quota errors
+  }
+}
 
 export function loadOfflineQueue(): OfflineSyncOperation[] {
   try {
@@ -72,9 +112,19 @@ export function setProjectVersion(projectId: string, version: number) {
 }
 
 export function cacheProjectsOffline(projects: ReviewProject[]) {
+  saveAllProjectProtocolsToVault(projects);
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify(projects));
-  } catch {}
+  } catch {
+    // Fallback if heavy fullText PDFs exceed browser 5MB localStorage quota: keep full protocol + lightweight articles
+    try {
+      const compact = projects.map((p) => ({
+        ...p,
+        articles: (p.articles || []).map(({ fullText: _ft, pages: _pg, ...rest }) => rest),
+      }));
+      localStorage.setItem(CACHE_KEY, JSON.stringify(compact));
+    } catch {}
+  }
 }
 
 export function loadCachedOfflineProjects(): ReviewProject[] {
@@ -85,6 +135,232 @@ export function loadCachedOfflineProjects(): ReviewProject[] {
   } catch {
     return [];
   }
+}
+
+function countNonEmptyValues(obj?: Record<string, any> | null): number {
+  if (!obj || typeof obj !== 'object') return 0;
+  return Object.values(obj).filter((v) => v !== undefined && v !== null && v !== '').length;
+}
+
+function mergeReviewIterations(
+  a?: ReviewIterationEntry[],
+  b?: ReviewIterationEntry[]
+): ReviewIterationEntry[] | undefined {
+  const combined = [...(a || []), ...(b || [])];
+  if (combined.length === 0) return undefined;
+  const byId = new Map<string, ReviewIterationEntry>();
+  for (const entry of combined) {
+    if (!entry || !entry.id) continue;
+    byId.set(entry.id, entry);
+  }
+  return Array.from(byId.values())
+    .sort((x, y) => new Date(x.timestamp || 0).getTime() - new Date(y.timestamp || 0).getTime())
+    .map((entry, idx) => ({ ...entry, iterationNumber: idx + 1 }));
+}
+
+export function mergeArticleRecordsPreservingData(primary: Article, secondary: Article): Article {
+  const pIterTime = primary.lastReviewedIterationAt
+    ? new Date(primary.lastReviewedIterationAt).getTime()
+    : 0;
+  const sIterTime = secondary.lastReviewedIterationAt
+    ? new Date(secondary.lastReviewedIterationAt).getTime()
+    : 0;
+
+  // Prefer whichever version has an explicit processed decision or newer iteration timestamp
+  const primaryProcessed = primary.decision && primary.decision !== 'unscreened';
+  const secondaryProcessed = secondary.decision && secondary.decision !== 'unscreened';
+  const preferSecondaryDecision =
+    sIterTime > pIterTime || (!primaryProcessed && secondaryProcessed);
+
+  const citationMap = new Map<string, any>();
+  for (const c of [...(secondary.evidenceCitations || []), ...(primary.evidenceCitations || [])]) {
+    if (c?.id) citationMap.set(c.id, c);
+  }
+
+  const pExtractedCount = countNonEmptyValues(primary.extractedData as any);
+  const sExtractedCount = countNonEmptyValues(secondary.extractedData as any);
+  const mergedExtracted =
+    sExtractedCount > pExtractedCount
+      ? { ...(primary.extractedData || {}), ...(secondary.extractedData || {}) }
+      : { ...(secondary.extractedData || {}), ...(primary.extractedData || {}) };
+
+  const mergedAppraisal =
+    (secondary.appraisalWorksheet?.length || 0) > (primary.appraisalWorksheet?.length || 0)
+      ? secondary.appraisalWorksheet
+      : primary.appraisalWorksheet;
+
+  const mergedIterations = mergeReviewIterations(primary.reviewIterations, secondary.reviewIterations);
+  const latestIterAt =
+    sIterTime > pIterTime ? secondary.lastReviewedIterationAt : primary.lastReviewedIterationAt;
+
+  return {
+    ...secondary,
+    ...primary,
+    decision: preferSecondaryDecision ? secondary.decision : primary.decision,
+    screeningStage: preferSecondaryDecision ? secondary.screeningStage : primary.screeningStage,
+    decisionReason: preferSecondaryDecision
+      ? secondary.decisionReason || primary.decisionReason
+      : primary.decisionReason || secondary.decisionReason,
+    prismaProtocolStatus: preferSecondaryDecision
+      ? secondary.prismaProtocolStatus || primary.prismaProtocolStatus
+      : primary.prismaProtocolStatus || secondary.prismaProtocolStatus,
+    reviewerNotes: primary.reviewerNotes || secondary.reviewerNotes,
+    screeningNotes: primary.screeningNotes || secondary.screeningNotes,
+    codeAnalysisNotes: primary.codeAnalysisNotes || secondary.codeAnalysisNotes,
+    isStarred: Boolean(primary.isStarred || secondary.isStarred),
+    institutionConfirmed: Boolean(primary.institutionConfirmed || secondary.institutionConfirmed),
+    appraisalScore:
+      primary.appraisalScore !== undefined ? primary.appraisalScore : secondary.appraisalScore,
+    appraisalWorksheet: mergedAppraisal,
+    evidenceCitations: Array.from(citationMap.values()),
+    extractedData: countNonEmptyValues(mergedExtracted) > 0 ? mergedExtracted : undefined,
+    reviewIterations: mergedIterations,
+    lastReviewedIterationAt: latestIterAt,
+    prismaExclusionFlags: Array.from(
+      new Set([...(primary.prismaExclusionFlags || []), ...(secondary.prismaExclusionFlags || [])])
+    ),
+  };
+}
+
+function mergeWorkbenchState(a?: WorkbenchState, b?: WorkbenchState): WorkbenchState | undefined {
+  if (!a && !b) return undefined;
+  if (!a) return b;
+  if (!b) return a;
+  const aTime = a.lastAutoSavedAt ? new Date(a.lastAutoSavedAt).getTime() : 0;
+  const bTime = b.lastAutoSavedAt ? new Date(b.lastAutoSavedAt).getTime() : 0;
+  const newer = bTime > aTime ? b : a;
+  const older = bTime > aTime ? a : b;
+
+  const aTurns = a.geminiChat?.turns || [];
+  const bTurns = b.geminiChat?.turns || [];
+  const mergedChat = bTurns.length > aTurns.length ? b.geminiChat : a.geminiChat || b.geminiChat;
+
+  return {
+    ...older,
+    ...newer,
+    qaRescans: { ...(older.qaRescans || {}), ...(newer.qaRescans || {}) },
+    moduleLastSavedAt: { ...(older.moduleLastSavedAt || {}), ...(newer.moduleLastSavedAt || {}) },
+    geminiChat: mergedChat,
+  };
+}
+
+/**
+ * Merges projects across local server disk, browser localStorage cache, and signed-in cloud DB
+ * so code updates, server restarts, page refreshes, and logins never discard imported articles,
+ * screening decisions, extractions, or protocol settings.
+ */
+export function mergeProjectsPreservingData(
+  serverProjects: ReviewProject[],
+  localCachedProjects: ReviewProject[] = [],
+  cloudProjects: ReviewProject[] = []
+): ReviewProject[] {
+  const byId = new Map<string, ReviewProject>();
+
+  const mergeTwoProjects = (existing: ReviewProject, incoming: ReviewProject): ReviewProject => {
+    const existingUpdated = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+    const incomingUpdated = incoming.updatedAt ? new Date(incoming.updatedAt).getTime() : 0;
+    const newer = incomingUpdated > existingUpdated ? incoming : existing;
+    const older = incomingUpdated > existingUpdated ? existing : incoming;
+
+    const articleMap = new Map<string, Article>();
+    for (const art of older.articles || []) {
+      if (!art?.id) continue;
+      articleMap.set(art.id, { ...art, projectId: existing.id });
+    }
+    for (const art of newer.articles || []) {
+      if (!art?.id) continue;
+      const prev = articleMap.get(art.id);
+      articleMap.set(
+        art.id,
+        prev
+          ? mergeArticleRecordsPreservingData({ ...art, projectId: existing.id }, prev)
+          : { ...art, projectId: existing.id }
+      );
+    }
+
+    const mergedProtocol = mergeProtocolSnapshotsPreservingData(newer, older);
+
+    return {
+      ...older,
+      ...newer,
+      ...mergedProtocol,
+      geographicSelections:
+        mergedProtocol.geographicSelections ||
+        (countNonEmptyValues(newer.geographicSelections as any) >=
+        countNonEmptyValues(older.geographicSelections as any)
+          ? newer.geographicSelections || older.geographicSelections
+          : older.geographicSelections),
+      studyAreaBoundary: mergedProtocol.studyAreaBoundary || newer.studyAreaBoundary || older.studyAreaBoundary,
+      workbenchState: mergeWorkbenchState(older.workbenchState, newer.workbenchState),
+      articles: Array.from(articleMap.values()),
+    };
+  };
+
+  // Priority ingest: server first, then local cache, then cloud
+  for (const sourceList of [serverProjects, localCachedProjects, cloudProjects]) {
+    for (const proj of sourceList || []) {
+      if (!proj || !proj.id) continue;
+      const normalizedProj: ReviewProject = {
+        ...proj,
+        articles: (proj.articles || [])
+          .filter((a) => !a.projectId || a.projectId === proj.id)
+          .map((a) => ({ ...a, projectId: proj.id })),
+      };
+      const existing = byId.get(proj.id);
+      byId.set(proj.id, existing ? mergeTwoProjects(existing, normalizedProj) : normalizedProj);
+    }
+  }
+
+  // Reconcile against the dedicated lightweight local Protocol Vault (survives article quota limits & restarts)
+  const vaultMap = loadProtocolVaultMap();
+  for (const [projectId, proj] of byId.entries()) {
+    const vaultSnap = vaultMap[projectId];
+    if (!vaultSnap) continue;
+    const reconciled = mergeProtocolSnapshotsPreservingData(proj, vaultSnap);
+    byId.set(projectId, {
+      ...proj,
+      ...reconciled,
+    });
+  }
+
+  return Array.from(byId.values());
+}
+
+export async function fetchCloudProjectsWithPayloads(token: string): Promise<ReviewProject[]> {
+  if (!token) return [];
+  const listRes = await fetch('/api/cloud/projects', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!listRes.ok) return [];
+  const listData = await listRes.json();
+  const rows: Array<{ localProjectId: string; version?: number }> = Array.isArray(listData?.projects)
+    ? listData.projects
+    : [];
+  if (rows.length === 0) return [];
+
+  const loaded: ReviewProject[] = [];
+  for (const row of rows) {
+    if (!row?.localProjectId) continue;
+    try {
+      const detailRes = await fetch(
+        `/api/cloud/projects/${encodeURIComponent(row.localProjectId)}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      if (!detailRes.ok) continue;
+      const detail = await detailRes.json();
+      if (detail?.payload && detail.payload.id) {
+        if (detail.version || row.version) {
+          setProjectVersion(detail.payload.id, Number(detail.version || row.version || 1));
+        }
+        loaded.push(detail.payload as ReviewProject);
+      }
+    } catch {
+      // Skip malformed/unreachable project record without blocking others
+    }
+  }
+  return loaded;
 }
 
 export async function syncProjectToCloudBackend(params: {

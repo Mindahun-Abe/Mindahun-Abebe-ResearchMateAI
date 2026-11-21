@@ -195,6 +195,45 @@ export interface Article {
   paperSubType?: string;
   codeAnalysisNotes?: string;
   prismaExclusionFlags?: string[];
+  prismaProtocolStatus?: 'included' | 'excluded_archived' | 'needs_iteration';
+  reviewIterations?: ReviewIterationEntry[];
+  lastReviewedIterationAt?: string;
+}
+
+export interface ReviewIterationEntry {
+  id: string;
+  iterationNumber: number;
+  timestamp: string;
+  actor: string;
+  previousDecision: ScreeningDecision;
+  newDecision: ScreeningDecision;
+  prismaStatus: 'included' | 'excluded_archived' | 'needs_iteration';
+  reason: string;
+  stage: string;
+}
+
+export interface GeographicSelections {
+  continent?: string;
+  country?: string;
+  region?: string;
+  zone?: string;
+  woreda?: string;
+  watershed?: string;
+  excludedAreas?: string;
+}
+
+export interface StudyAreaBoundaryData {
+  fileName: string;
+  format: string;
+  featureCount: number;
+  bbox?: [number, number, number, number];
+  placeNames: string[];
+  extractedByScale?: Partial<
+    Record<'continental' | 'country' | 'regional' | 'zonal' | 'woreda' | 'watershed', string[]>
+  >;
+  attributeColumns?: string[];
+  uploadedAt: string;
+  summaryText?: string;
 }
 
 export interface PicocFramework {
@@ -252,11 +291,10 @@ export type ProtocolStandardType =
   | 'scoping_review'
   | 'meta_analysis';
 
-export interface ReviewProject {
+export interface ProtocolVaultSnapshot {
   id: string;
-  databaseFolderName?: string;
-  databaseFolderPath?: string;
-  updatedAt?: string;
+  schemaVersion: number;
+  protocolUpdatedAt: string;
   title: string;
   subtitle: string;
   scope: string;
@@ -265,6 +303,8 @@ export interface ReviewProject {
   articleTypes: string;
   geographicEligibility: string;
   geographicTargetScale?: GeographicScaleTier | 'any';
+  geographicSelections?: GeographicSelections;
+  studyAreaBoundary?: StudyAreaBoundaryData;
   methodologyFocus: string;
   frameworkType?: ReviewFrameworkType;
   frameworkFields?: Record<string, string>;
@@ -276,6 +316,47 @@ export interface ReviewProject {
   standardExclusionReasons: string[];
   uncertainCasesGuidance: string;
   booleanQuery: string;
+  booleanDatabaseQueries?: Record<string, string>;
+}
+
+export interface ProtocolVaultRevision {
+  revisionId: string;
+  timestamp: string;
+  reason: string;
+  source: 'auto' | 'manual' | 'recovery' | 'sync';
+  fingerprint: string;
+  snapshot: ProtocolVaultSnapshot;
+}
+
+export interface ReviewProject {
+  id: string;
+  databaseFolderName?: string;
+  databaseFolderPath?: string;
+  updatedAt?: string;
+  protocolUpdatedAt?: string;
+  protocolSchemaVersion?: number;
+  title: string;
+  subtitle: string;
+  scope: string;
+  discipline: string;
+  publicationYears: string;
+  articleTypes: string;
+  geographicEligibility: string;
+  geographicTargetScale?: GeographicScaleTier | 'any';
+  geographicSelections?: GeographicSelections;
+  studyAreaBoundary?: StudyAreaBoundaryData;
+  methodologyFocus: string;
+  frameworkType?: ReviewFrameworkType;
+  frameworkFields?: Record<string, string>;
+  reviewType?: LiteratureReviewTypeId;
+  protocolStandard?: ProtocolStandardType;
+  picoc: PicocFramework;
+  researchQuestions: ResearchQuestion[];
+  inclusionCriteria: EligibilityCriterion[];
+  standardExclusionReasons: string[];
+  uncertainCasesGuidance: string;
+  booleanQuery: string;
+  booleanDatabaseQueries?: Record<string, string>;
   articles: Article[];
   workbenchState?: WorkbenchState;
 }
@@ -691,6 +772,26 @@ export interface ExportConfigSavedState {
   updatedAt?: string;
 }
 
+export interface GeminiChatbotTurn {
+  id: string;
+  role: 'user' | 'model';
+  text: string;
+  timestamp: string;
+  modelUsed?: string;
+  taskMode?: 'deep_reasoning' | 'complex_interactive' | 'general' | 'fast';
+  rolePreset?: string;
+  sources?: { title: string; uri: string }[];
+}
+
+export interface GeminiChatSavedState {
+  activeRole?: string;
+  customSystemInstruction?: string;
+  activeTaskMode?: 'deep_reasoning' | 'complex_interactive' | 'general' | 'fast';
+  includeProjectContext?: boolean;
+  turns?: GeminiChatbotTurn[];
+  updatedAt?: string;
+}
+
 export interface WorkbenchState {
   lastAutoSavedAt?: string;
   lastSavedModule?: WorkbenchModuleId;
@@ -704,6 +805,7 @@ export interface WorkbenchState {
   exportConfig?: ExportConfigSavedState;
   quantSynthesis?: QuantSynthesisSavedState;
   protocolBuilder?: ProtocolBuilderSavedState;
+  geminiChat?: GeminiChatSavedState;
   moduleNotes?: Record<string, string>;
   moduleLastSavedAt?: Record<string, string>;
   qaRescans?: Partial<Record<WorkbenchModuleId, ModuleQaRescanRecord[]>>;

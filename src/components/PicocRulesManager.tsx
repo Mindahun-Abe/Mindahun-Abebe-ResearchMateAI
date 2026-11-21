@@ -1,10 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   EligibilityCriterion,
   GeographicScaleTier,
   LiteratureReviewTypeId,
   ModuleQaRescanRecord,
   ProtocolStandardType,
+  ProtocolVaultRevision,
   ResearchQuestion,
   ReviewFrameworkType,
   ReviewProject,
@@ -25,20 +26,34 @@ import {
   summarizeProjectGeographicOutcomes,
 } from '../utils/geographicSensing';
 import {
+  appendLocalProtocolRevision,
+  applyProtocolSnapshotToProject,
+  extractProtocolSnapshot,
+  loadLocalProtocolRevisions,
+  saveProjectProtocolToVault,
+} from '../utils/protocolVault';
+import { apiService } from '../services/apiService';
+import {
   AlertTriangle,
   BookOpen,
   Check,
   Compass,
   Copy,
+  Download,
   Globe,
+  History,
   Layers,
   MapPin,
   Plus,
+  RotateCcw,
+  ShieldCheck,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from 'lucide-react';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import { GeographicEligibilitySelector } from './GeographicEligibilitySelector';
 
 interface PicocRulesManagerProps {
   project: ReviewProject;
@@ -46,6 +61,7 @@ interface PicocRulesManagerProps {
   onAutoSyncScreening?: () => void;
   onOpenProtocolBuilder?: () => void;
   autoSaveStatus?: AutoSaveStatusInfo;
+  isCloudSynced?: boolean;
   onResetWorkbenchModule?: (params: {
     target: WorkbenchModuleId;
     resetArticleFields?: boolean;
@@ -70,6 +86,7 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
   onAutoSyncScreening,
   onOpenProtocolBuilder,
   autoSaveStatus,
+  isCloudSynced = false,
   onResetWorkbenchModule,
   onDirectAddDataFiles,
   onRescanWithQueryQA,
@@ -79,6 +96,141 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
   const [activeSubTab, setActiveSubTab] = useState<'picoc' | 'rq' | 'criteria' | 'exclusions' | 'query'>('picoc');
   const [copiedQuery, setCopiedQuery] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [showVaultDrawer, setShowVaultDrawer] = useState(false);
+  const [checkpointLabel, setCheckpointLabel] = useState('');
+  const [serverRevisions, setServerRevisions] = useState<ProtocolVaultRevision[]>([]);
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const importProtocolFileRef = useRef<HTMLInputElement | null>(null);
+
+  const localRevisions = useMemo(
+    () => loadLocalProtocolRevisions(project.id),
+    [project.id, project.protocolUpdatedAt, showVaultDrawer]
+  );
+
+  const mergedRevisions = useMemo(() => {
+    const byId = new Map<string, ProtocolVaultRevision>();
+    for (const r of [...localRevisions, ...serverRevisions]) {
+      if (!r?.revisionId) continue;
+      if (!byId.has(r.revisionId)) byId.set(r.revisionId, r);
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+    );
+  }, [localRevisions, serverRevisions]);
+
+  useEffect(() => {
+    let active = true;
+    apiService
+      .getProtocolVault(project.id)
+      .then((res) => {
+        if (active && Array.isArray(res?.vault?.revisions)) {
+          setServerRevisions(res.vault.revisions);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [project.id]);
+
+  const handleSaveManualCheckpoint = async () => {
+    setVaultBusy(true);
+    try {
+      const reason =
+        checkpointLabel.trim() ||
+        `Manual Checkpoint (${activeFramework.name} · ${project.researchQuestions.length} RQs · ${project.inclusionCriteria.length} Rules)`;
+      const snap = extractProtocolSnapshot(project);
+      saveProjectProtocolToVault(project, { authoritative: true });
+      const localRev = appendLocalProtocolRevision(project, reason, 'manual');
+      try {
+        const res = await apiService.saveProtocolVault(project.id, {
+          snapshot: snap,
+          reason,
+          source: 'manual',
+          createCheckpoint: true,
+          allowReplace: true,
+        });
+        if (Array.isArray(res?.vault?.revisions)) {
+          setServerRevisions(res.vault.revisions);
+        }
+      } catch {
+        if (localRev) {
+          setServerRevisions((prev) => [localRev, ...prev]);
+        }
+      }
+      setCheckpointLabel('');
+      setSyncFeedback('Saved Protocol & Framework Checkpoint across Local Vault + Server Atomic Vault.');
+      setTimeout(() => setSyncFeedback(null), 3500);
+    } finally {
+      setVaultBusy(false);
+    }
+  };
+
+  const handleRestoreCheckpoint = async (rev: ProtocolVaultRevision) => {
+    setVaultBusy(true);
+    try {
+      let restoredProject = applyProtocolSnapshotToProject(project, rev.snapshot, true);
+      try {
+        const res = await apiService.restoreProtocolRevision(project.id, {
+          revisionId: rev.revisionId,
+          snapshot: rev.snapshot,
+        });
+        if (res?.project) {
+          restoredProject = { ...project, ...res.project, articles: project.articles };
+        }
+        if (Array.isArray(res?.vault?.revisions)) {
+          setServerRevisions(res.vault.revisions);
+        }
+      } catch {
+        // Offline recovery fallback
+      }
+      onUpdateProject(restoredProject);
+      setSyncFeedback(
+        `Restored Protocol & Framework from "${rev.reason}" (${new Date(rev.timestamp).toLocaleString()}). Articles untouched.`
+      );
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } finally {
+      setVaultBusy(false);
+    }
+  };
+
+  const handleExportProtocolBackup = () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      protocolSchemaVersion: 2,
+      projectTitle: project.title,
+      snapshot: extractProtocolSnapshot(project),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(project.databaseFolderName || project.id).replace(/[^a-zA-Z0-9_-]/g, '_')}_protocol_backup.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportProtocolBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const snap = parsed?.snapshot || parsed;
+      if (!snap || typeof snap !== 'object' || (!snap.picoc && !snap.researchQuestions && !snap.inclusionCriteria)) {
+        throw new Error('Invalid protocol backup JSON.');
+      }
+      const restored = applyProtocolSnapshotToProject(project, snap, true);
+      onUpdateProject(restored);
+      setSyncFeedback(`Imported and applied Protocol & Framework backup from "${file.name}".`);
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } catch (err: any) {
+      setSyncFeedback(err?.message || 'Could not import protocol backup file.');
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } finally {
+      e.target.value = '';
+    }
+  };
 
   // Criterion addition state
   const [newDimension, setNewDimension] = useState('');
@@ -398,6 +550,130 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
           </div>
         </div>
 
+        {/* Disruption-Proof Protocol Vault Bar & Checkpoint Recovery Drawer */}
+        <div className="bg-slate-950/90 border border-emerald-900/50 rounded-xl p-3 space-y-3">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 text-xs">
+            <div className="flex items-start sm:items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5 sm:mt-0" />
+              <div>
+                <span className="font-bold text-emerald-300">
+                  Disruption-Proof Protocol &amp; Framework Vault Active
+                </span>
+                <p className="text-[11px] text-slate-400">
+                  Protected across Browser Vault + Atomic Server Disk ({`protocol_vault.json`})
+                  {isCloudSynced ? ' + Cloud Sync' : ''} for {activeFramework.name},{' '}
+                  {project.researchQuestions.length} RQs, {project.inclusionCriteria.length} Eligibility Rules,{' '}
+                  {project.standardExclusionReasons.length} Exclusion Reasons &amp; Boolean Syntax.
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={vaultBusy}
+                onClick={() => void handleSaveManualCheckpoint()}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-white text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Save Checkpoint</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowVaultDrawer((v) => !v)}
+                className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-200 border border-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <History className="w-3.5 h-3.5 text-indigo-400" />
+                <span>Checkpoints &amp; Restore ({mergedRevisions.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleExportProtocolBackup}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                title="Download Protocol & Framework JSON backup"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Export JSON</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => importProtocolFileRef.current?.click()}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                title="Restore Protocol & Framework from a JSON backup file"
+              >
+                <Upload className="w-3.5 h-3.5" />
+                <span>Import JSON</span>
+              </button>
+              <input
+                ref={importProtocolFileRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={(e) => void handleImportProtocolBackup(e)}
+                className="hidden"
+              />
+            </div>
+          </div>
+
+          {showVaultDrawer && (
+            <div className="border-t border-slate-800 pt-3 space-y-2.5">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  value={checkpointLabel}
+                  onChange={(e) => setCheckpointLabel(e.target.value)}
+                  placeholder="Optional checkpoint label (e.g., Before feature update / Approved PICOC & RQs)..."
+                  className="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="button"
+                  disabled={vaultBusy}
+                  onClick={() => void handleSaveManualCheckpoint()}
+                  className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+                >
+                  Create Named Checkpoint
+                </button>
+              </div>
+              {mergedRevisions.length === 0 ? (
+                <p className="text-[11px] text-slate-400">
+                  Auto-checkpoints record automatically as you edit PICOC/Framework, RQs, Eligibility Matrix, Exclusion Reasons, or Boolean Syntax.
+                </p>
+              ) : (
+                <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                  {mergedRevisions.map((rev) => (
+                    <div
+                      key={rev.revisionId}
+                      className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-900/90 border border-slate-800 rounded-lg px-3 py-2 text-[11px]"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-white">{rev.reason}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] uppercase font-mono text-teal-300">
+                            {rev.source}
+                          </span>
+                          <span className="text-slate-400 font-mono text-[10px]">
+                            {new Date(rev.timestamp).toLocaleString()}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-400">
+                          Framework: {rev.snapshot.frameworkType || 'PICOC'} · RQs: {rev.snapshot.researchQuestions?.length || 0} · Matrix Rules: {rev.snapshot.inclusionCriteria?.length || 0} · Exclusions: {rev.snapshot.standardExclusionReasons?.length || 0} · Query: {rev.snapshot.booleanQuery ? `${rev.snapshot.booleanQuery.length} chars` : 'empty'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={vaultBusy}
+                        onClick={() => void handleRestoreCheckpoint(rev)}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-indigo-600 text-slate-200 hover:text-white border border-slate-700 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0 disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Restore</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {/* 2 Primary Dropdowns: Framework Type & Review Type */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-2 border-t border-slate-800/80">
           {/* Dropdown 1: Framework Type */}
@@ -558,44 +834,24 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-3">
-              <div className="lg:col-span-5 space-y-1.5">
-                <label className="block text-[11px] font-semibold text-slate-300">
-                  Target Study Place / Geographic Eligibility (Editable)
-                </label>
-                <input
-                  type="text"
-                  value={project.geographicEligibility || ''}
-                  onChange={(e) =>
-                    onUpdateProject({
-                      ...project,
-                      geographicEligibility: e.target.value,
-                    })
-                  }
-                  placeholder="e.g., Global, Ethiopia, Amhara Region, North Gondar Zone, Mecha Woreda, Debre Mawi Watershed..."
-                  className="w-full bg-slate-900 border border-slate-700 focus:border-teal-500 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none"
-                />
-                <div className="flex flex-wrap items-center gap-1 pt-0.5">
-                  <span className="text-[10px] text-slate-500">Quick scope:</span>
-                  {['Global', 'East Africa', 'Ethiopia', 'Amhara Region', 'East Gojjam Zone', 'Mecha Woreda', 'Debre Mawi Watershed'].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() =>
-                        onUpdateProject({
-                          ...project,
-                          geographicEligibility: preset,
-                        })
-                      }
-                      className="px-1.5 py-0.5 rounded bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] text-slate-300 cursor-pointer"
-                    >
-                      {preset}
-                    </button>
-                  ))}
-                </div>
-              </div>
+            <div className="space-y-3">
+              <GeographicEligibilitySelector
+                geographicEligibility={project.geographicEligibility || ''}
+                geographicTargetScale={project.geographicTargetScale || 'any'}
+                geographicSelections={project.geographicSelections}
+                studyAreaBoundary={project.studyAreaBoundary}
+                onChange={(patch) =>
+                  onUpdateProject({
+                    ...project,
+                    geographicEligibility: patch.geographicEligibility,
+                    geographicTargetScale: patch.geographicTargetScale,
+                    geographicSelections: patch.geographicSelections,
+                    studyAreaBoundary: patch.studyAreaBoundary,
+                  })
+                }
+              />
 
-              <div className="lg:col-span-7 space-y-1.5">
+              <div className="space-y-1.5">
                 <label className="block text-[11px] font-semibold text-slate-300">
                   Target Spatial Resolution / Scale Constraint
                 </label>
@@ -1166,6 +1422,41 @@ export const PicocRulesManager: React.FC<PicocRulesManagerProps> = ({
             }
             className="w-full bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-xs text-indigo-200 leading-relaxed focus:outline-none focus:border-indigo-500"
           />
+
+          <div className="space-y-2.5 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-200 uppercase tracking-wider">
+                Per-Database Adapted Syntax Overrides (Auto-Saved to Vault)
+              </span>
+              <span className="text-[11px] text-slate-400">
+                Persist database-specific field tags (TITLE-ABS-KEY, TS=, MeSH, etc.)
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {['Scopus', 'Web of Science', 'PubMed', 'ScienceDirect', 'IEEE Xplore', 'Google Scholar'].map(
+                (dbName) => (
+                  <div key={dbName} className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 space-y-1.5">
+                    <label className="block text-[11px] font-bold text-teal-300">{dbName} Query</label>
+                    <textarea
+                      rows={2}
+                      value={project.booleanDatabaseQueries?.[dbName] || ''}
+                      onChange={(e) =>
+                        onUpdateProject({
+                          ...project,
+                          booleanDatabaseQueries: {
+                            ...(project.booleanDatabaseQueries || {}),
+                            [dbName]: e.target.value,
+                          },
+                        })
+                      }
+                      placeholder={`Optional ${dbName}-adapted Boolean syntax...`}
+                      className="w-full bg-slate-900 border border-slate-800 focus:border-teal-500 rounded-lg p-2 font-mono text-[11px] text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                    />
+                  </div>
+                )
+              )}
+            </div>
+          </div>
 
           <div className="text-xs text-slate-400 bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-1">
             <span className="font-semibold text-slate-300">Methodological Recommendation:</span>

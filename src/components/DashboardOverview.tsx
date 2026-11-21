@@ -1,6 +1,7 @@
 import React from 'react';
 import { ModuleQaRescanRecord, ReviewProject, WorkbenchModuleId } from '../types';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import { DocumentationDropdown } from './DocumentationDropdown';
 import {
   Compass,
   FileSearch,
@@ -218,9 +219,11 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   return (
     <div className="space-y-6">
       {/* Top Banner / Welcome */}
-      <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-slate-800 rounded-3xl p-6 relative overflow-hidden shadow-xl">
-        <div className="absolute right-0 top-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
+      <div className="bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-slate-800 rounded-3xl p-6 relative shadow-xl">
+        <div className="absolute inset-0 overflow-hidden rounded-3xl pointer-events-none">
+          <div className="absolute right-0 top-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl" />
+        </div>
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-20">
           <div className="space-y-1.5 max-w-2xl">
             <div className="flex flex-wrap items-center gap-2">
               <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
@@ -249,6 +252,13 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            <DocumentationDropdown
+              onNavigateTab={onNavigateTab}
+              onOpenAddModal={onOpenAddModal}
+              onCreateNewReview={onCreateNewReview}
+              onOpenFastBatchScreener={onOpenFastBatchScreener}
+            />
+
             {onOpenResearchSuite && (
               <button
                 onClick={onOpenResearchSuite}

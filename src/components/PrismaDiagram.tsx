@@ -23,23 +23,29 @@ import {
   Code2,
   Database,
   Download,
+  Edit3,
   ExternalLink,
   FileCheck2,
   FileSpreadsheet,
   Filter,
   GitFork,
   Globe,
+  History,
   Lock,
   MapPin,
+  RotateCcw,
   Search,
   ShieldAlert,
   ShieldCheck,
+  XCircle,
 } from 'lucide-react';
 import { ArticleCodeDetailModal } from './ArticleCodeDetailModal';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import { GeographicEligibilitySelector } from './GeographicEligibilitySelector';
 
 interface PrismaDiagramProps {
   project: ReviewProject;
+  onUpdateProject?: (updated: ReviewProject) => void;
   onUpdateArticle?: (article: Article) => void;
   onOpenSynthesis?: (mode: 'qualitative' | 'quantitative') => void;
   autoSaveStatus?: AutoSaveStatusInfo;
@@ -63,6 +69,7 @@ interface PrismaDiagramProps {
 
 export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
   project,
+  onUpdateProject,
   onUpdateArticle,
   onOpenSynthesis,
   autoSaveStatus,
@@ -83,12 +90,67 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
   const [selectedGeoTierFilter, setSelectedGeoTierFilter] = useState<
     'all' | GeographicScaleTier
   >('all');
+  const [selectedProtocolFilter, setSelectedProtocolFilter] = useState<
+    'all' | 'included' | 'excluded_archived' | 'needs_iteration' | 'has_iterations'
+  >('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [detailArticleId, setDetailArticleId] = useState<string | null>(null);
+  const [showGeoEditor, setShowGeoEditor] = useState(false);
+  const [expandedIterationArticleId, setExpandedIterationArticleId] = useState<string | null>(null);
+  const [iterationNoteDrafts, setIterationNoteDrafts] = useState<Record<string, string>>({});
 
   const showToast = (msg: string) => {
     setStatusMessage(msg);
     setTimeout(() => setStatusMessage(null), 4000);
+  };
+
+  const handlePrismaIterationAction = (
+    art: Article,
+    targetDecision: 'include' | 'exclude' | 'uncertain',
+    prismaStatus: 'included' | 'excluded_archived' | 'needs_iteration',
+    defaultReason: string
+  ) => {
+    if (!onUpdateArticle) return;
+    const nowIso = new Date().toISOString();
+    const prevList = Array.isArray(art.reviewIterations) ? art.reviewIterations : [];
+    const customReason = (iterationNoteDrafts[art.id] || '').trim();
+    const resolvedReason = customReason || defaultReason;
+    const nextEntry = {
+      id: `iter-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      iterationNumber: prevList.length + 1,
+      timestamp: nowIso,
+      actor: 'Reviewer (PRISMA Protocol)',
+      previousDecision: art.decision,
+      newDecision: targetDecision,
+      prismaStatus,
+      reason: resolvedReason,
+      stage: targetDecision === 'include' ? 'final_included' : targetDecision === 'exclude' ? 'excluded' : 'full_text',
+    };
+
+    onUpdateArticle({
+      ...art,
+      decision: targetDecision,
+      screeningStage:
+        targetDecision === 'include'
+          ? 'final_included'
+          : targetDecision === 'exclude'
+          ? 'excluded'
+          : 'full_text',
+      decisionReason: resolvedReason,
+      prismaProtocolStatus: prismaStatus,
+      lastReviewedIterationAt: nowIso,
+      reviewIterations: [...prevList, nextEntry],
+    });
+    setIterationNoteDrafts((prev) => ({ ...prev, [art.id]: '' }));
+    showToast(
+      `Iteration #${nextEntry.iterationNumber} saved (data preserved): "${art.title.slice(0, 38)}..." → ${
+        prismaStatus === 'included'
+          ? 'Included in PRISMA'
+          : prismaStatus === 'excluded_archived'
+          ? 'Excluded in PRISMA (Preserved)'
+          : 'Queued for Review Iteration'
+      }`
+    );
   };
 
   // Precompute protocol-adaptive analysis + 8-point PRISMA diagnostics for all project articles
@@ -310,6 +372,24 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
         return false;
       }
 
+      if (selectedProtocolFilter !== 'all') {
+        if (selectedProtocolFilter === 'included' && art.decision !== 'include') return false;
+        if (selectedProtocolFilter === 'excluded_archived' && art.decision !== 'exclude') return false;
+        if (
+          selectedProtocolFilter === 'needs_iteration' &&
+          art.decision !== 'uncertain' &&
+          art.prismaProtocolStatus !== 'needs_iteration'
+        ) {
+          return false;
+        }
+        if (
+          selectedProtocolFilter === 'has_iterations' &&
+          !(Array.isArray(art.reviewIterations) && art.reviewIterations.length > 0)
+        ) {
+          return false;
+        }
+      }
+
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const hay = [
@@ -338,6 +418,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
     selectedDiagnosticFilter,
     selectedNotPrimarySubFilter,
     selectedGeoTierFilter,
+    selectedProtocolFilter,
     searchQuery,
   ]);
 
@@ -1054,16 +1135,53 @@ Total included studies: n = ${liveCounts.includedCount}
               </p>
             </div>
 
-            {selectedGeoTierFilter !== 'all' && (
-              <button
-                type="button"
-                onClick={() => setSelectedGeoTierFilter('all')}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-teal-300 border border-slate-700 text-[11px] font-semibold shrink-0 cursor-pointer"
-              >
-                Show All Spatial Scales
-              </button>
-            )}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {onUpdateProject && (
+                <button
+                  type="button"
+                  onClick={() => setShowGeoEditor((v) => !v)}
+                  className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer border transition ${
+                    showGeoEditor
+                      ? 'bg-teal-600 text-white border-teal-500'
+                      : 'bg-slate-900 hover:bg-slate-800 text-teal-300 border-teal-700/60'
+                  }`}
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  <span>{showGeoEditor ? 'Hide Area & Map Selector' : 'Select Area / Import Map'}</span>
+                </button>
+              )}
+              {selectedGeoTierFilter !== 'all' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedGeoTierFilter('all')}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-teal-300 border border-slate-700 text-[11px] font-semibold cursor-pointer"
+                >
+                  Show All Spatial Scales
+                </button>
+              )}
+            </div>
           </div>
+
+          {showGeoEditor && onUpdateProject && (
+            <div className="bg-slate-900/90 border border-teal-700/40 rounded-xl p-3.5">
+              <GeographicEligibilitySelector
+                compact
+                geographicEligibility={project.geographicEligibility || ''}
+                geographicTargetScale={project.geographicTargetScale || 'any'}
+                geographicSelections={project.geographicSelections}
+                studyAreaBoundary={project.studyAreaBoundary}
+                onChange={(patch) =>
+                  onUpdateProject({
+                    ...project,
+                    geographicEligibility: patch.geographicEligibility,
+                    geographicTargetScale: patch.geographicTargetScale,
+                    geographicSelections: patch.geographicSelections,
+                    studyAreaBoundary: patch.studyAreaBoundary,
+                  })
+                }
+              />
+            </div>
+          )}
 
           {/* Interpretive Verdict Summary Pills */}
           <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono">
@@ -1141,8 +1259,39 @@ Total included studies: n = ${liveCounts.includedCount}
           </div>
         </div>
 
-        {/* Search & Article Inspection Table */}
+        {/* Search & PRISMA Protocol Iteration Filter Bar */}
         <div className="space-y-3">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              <span className="text-slate-400 font-semibold mr-1">PRISMA Decision / Iteration:</span>
+              {(
+                [
+                  { id: 'all', label: 'All Records' },
+                  { id: 'included', label: 'PRISMA Included' },
+                  { id: 'excluded_archived', label: 'PRISMA Excluded (Preserved)' },
+                  { id: 'needs_iteration', label: 'Review Iteration / Uncertain' },
+                  { id: 'has_iterations', label: 'Has Iteration Log' },
+                ] as const
+              ).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setSelectedProtocolFilter(tab.id)}
+                  className={`px-2.5 py-1 rounded-lg font-semibold border transition cursor-pointer ${
+                    selectedProtocolFilter === tab.id
+                      ? 'bg-teal-600 text-white border-teal-500'
+                      : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-700'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+            <span className="text-[10px] text-slate-400 font-mono">
+              Showing {filteredAuditArticles.length} records (Non-destructive: excluded studies remain archived &amp; inspectable)
+            </span>
+          </div>
+
           <div className="relative">
             <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-2.5 pointer-events-none" />
             <input
@@ -1160,7 +1309,7 @@ Total included studies: n = ${liveCounts.includedCount}
                 <tr className="bg-slate-950 border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-400 font-semibold">
                   <th className="py-3 px-3">Study / Year</th>
                   <th className="py-3 px-3">Type &amp; Database</th>
-                  <th className="py-3 px-3">Decision / Stage</th>
+                  <th className="py-3 px-3">PRISMA Protocol &amp; Iterations</th>
                   <th className="py-3 px-3">PRISMA Retrieval / Access</th>
                   <th className="py-3 px-3">Detected PRISMA 8-Point Flags</th>
                   <th className="py-3 px-3">Protocol Fit</th>
@@ -1235,21 +1384,145 @@ Total included studies: n = ${liveCounts.includedCount}
                           </div>
                         </td>
 
-                        <td className="py-3 px-3 whitespace-nowrap">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                              art.decision === 'include'
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : art.decision === 'exclude'
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                            }`}
-                          >
-                            {art.decision}
-                          </span>
-                          <span className="block text-[10px] text-slate-500 mt-0.5 font-mono">
-                            {art.screeningStage}
-                          </span>
+                        <td className="py-3 px-3 min-w-[230px]">
+                          <div className="space-y-1.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                  art.decision === 'include'
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    : art.decision === 'exclude'
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                }`}
+                              >
+                                {art.decision === 'include'
+                                  ? 'PRISMA Included'
+                                  : art.decision === 'exclude'
+                                  ? 'Excluded (Preserved)'
+                                  : art.prismaProtocolStatus === 'needs_iteration'
+                                  ? 'Review Iteration'
+                                  : art.decision}
+                              </span>
+                              {Array.isArray(art.reviewIterations) && art.reviewIterations.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setExpandedIterationArticleId(
+                                      expandedIterationArticleId === art.id ? null : art.id
+                                    )
+                                  }
+                                  className="px-1.5 py-0.5 rounded bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-300 border border-indigo-500/30 text-[10px] font-mono inline-flex items-center gap-1 cursor-pointer"
+                                  title="Inspect review iteration history"
+                                >
+                                  <History className="w-2.5 h-2.5" />
+                                  Iter #{art.reviewIterations.length}
+                                </button>
+                              )}
+                            </div>
+
+                            {onUpdateArticle && (
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handlePrismaIterationAction(
+                                        art,
+                                        'include',
+                                        'included',
+                                        'Verified eligible & included in PRISMA protocol'
+                                      )
+                                    }
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border cursor-pointer transition inline-flex items-center gap-0.5 ${
+                                      art.decision === 'include'
+                                        ? 'bg-emerald-600 text-white border-emerald-500'
+                                        : 'bg-slate-900 hover:bg-emerald-950/60 text-emerald-300 border-slate-700'
+                                    }`}
+                                    title="Include in PRISMA Protocol"
+                                  >
+                                    <Check className="w-2.5 h-2.5" /> Include
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handlePrismaIterationAction(
+                                        art,
+                                        'exclude',
+                                        'excluded_archived',
+                                        diag.primaryExclusionSummary ||
+                                          art.decisionReason ||
+                                          'Excluded from PRISMA synthesis (data preserved)'
+                                      )
+                                    }
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border cursor-pointer transition inline-flex items-center gap-0.5 ${
+                                      art.decision === 'exclude'
+                                        ? 'bg-rose-600 text-white border-rose-500'
+                                        : 'bg-slate-900 hover:bg-rose-950/60 text-rose-300 border-slate-700'
+                                    }`}
+                                    title="Exclude in PRISMA (never deletes data)"
+                                  >
+                                    <XCircle className="w-2.5 h-2.5" /> Exclude
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handlePrismaIterationAction(
+                                        art,
+                                        'uncertain',
+                                        'needs_iteration',
+                                        'Flagged for next review iteration / team re-check'
+                                      )
+                                    }
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border cursor-pointer transition inline-flex items-center gap-0.5 ${
+                                      art.prismaProtocolStatus === 'needs_iteration' || art.decision === 'uncertain'
+                                        ? 'bg-amber-600 text-white border-amber-500'
+                                        : 'bg-slate-900 hover:bg-amber-950/60 text-amber-300 border-slate-700'
+                                    }`}
+                                    title="Send to Review Iteration rather than deleting"
+                                  >
+                                    <RotateCcw className="w-2.5 h-2.5" /> Iterate
+                                  </button>
+                                </div>
+                                <input
+                                  type="text"
+                                  value={iterationNoteDrafts[art.id] || ''}
+                                  onChange={(e) =>
+                                    setIterationNoteDrafts((prev) => ({
+                                      ...prev,
+                                      [art.id]: e.target.value,
+                                    }))
+                                  }
+                                  placeholder="Optional iteration / exclusion note..."
+                                  className="w-full bg-slate-900/90 border border-slate-800 focus:border-indigo-500 rounded px-2 py-0.5 text-[10px] text-slate-200 placeholder:text-slate-600 focus:outline-none"
+                                />
+                              </div>
+                            )}
+
+                            {expandedIterationArticleId === art.id &&
+                              Array.isArray(art.reviewIterations) &&
+                              art.reviewIterations.length > 0 && (
+                                <div className="bg-slate-900 border border-indigo-500/30 rounded-lg p-2 space-y-1 text-[10px]">
+                                  <span className="font-bold text-indigo-300 block">
+                                    Iteration Audit Log:
+                                  </span>
+                                  {art.reviewIterations
+                                    .slice()
+                                    .reverse()
+                                    .map((it) => (
+                                      <div key={it.id} className="border-t border-slate-800 pt-1 text-slate-300">
+                                        <span className="font-mono text-teal-300">#{it.iterationNumber}</span>{' '}
+                                        <span>
+                                          {it.previousDecision} → <strong>{it.newDecision}</strong>
+                                        </span>
+                                        <p className="text-slate-400 truncate" title={it.reason}>
+                                          {it.reason}
+                                        </p>
+                                      </div>
+                                    ))}
+                                </div>
+                              )}
+                          </div>
                         </td>
 
                         <td className="py-3 px-3 whitespace-nowrap">

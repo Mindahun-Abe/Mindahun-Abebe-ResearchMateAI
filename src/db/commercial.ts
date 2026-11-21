@@ -15,6 +15,12 @@ import {
   users,
 } from './schema.ts';
 import { getOrCreateUser } from './users.ts';
+import {
+  computePlanPricingSchedule,
+  getStagePointFromSchedule,
+  PricingTenureStage,
+  resolveUserTenureSummary,
+} from '../utils/pricingSchedule.ts';
 
 export const DEFAULT_PLANS = [
   {
@@ -122,6 +128,28 @@ export async function getPlanByCode(code: string) {
   return plans.find((p) => p.code === code) || plans.find((p) => p.code === 'free')!;
 }
 
+export function enrichPlanWithPricingSchedule<
+  T extends {
+    code: string;
+    monthlyPriceUsd: number;
+    annualPriceUsd: number;
+    monthlyPriceEtb: number;
+    annualPriceEtb: number;
+  }
+>(plan: T, stage: PricingTenureStage = 'startup') {
+  const pricingSchedule = computePlanPricingSchedule(plan);
+  const activePoint = getStagePointFromSchedule(pricingSchedule, stage);
+  return {
+    ...plan,
+    pricingSchedule,
+    effectivePricingStage: stage,
+    effectiveMonthlyPriceUsd: activePoint.monthlyUsdCents,
+    effectiveAnnualPriceUsd: activePoint.annualUsdCents,
+    effectiveMonthlyPriceEtb: activePoint.monthlyEtb,
+    effectiveAnnualPriceEtb: activePoint.annualEtb,
+  };
+}
+
 export async function writeAuditLog(params: {
   actorUid: string;
   actorEmail?: string;
@@ -217,6 +245,12 @@ export async function getAccountOverview(
     .orderBy(desc(storageDocuments.createdAt))
     .limit(50);
 
+  const pricingTenure = resolveUserTenureSummary(user.createdAt);
+  const enrichedEntitlement = {
+    ...entitlement,
+    plan: enrichPlanWithPricingSchedule(entitlement.plan, pricingTenure.stage),
+  };
+
   return {
     user: {
       id: user.id,
@@ -225,7 +259,7 @@ export async function getAccountOverview(
       displayName: user.displayName,
       role: user.role,
       status: user.status,
-      planCode: entitlement.plan.code,
+      planCode: enrichedEntitlement.plan.code,
       aiCreditsBalance: user.aiCreditsBalance,
       aiCreditsUsed: user.aiCreditsUsed,
       storageUsedBytes: user.storageUsedBytes,
@@ -236,7 +270,8 @@ export async function getAccountOverview(
       lastLoginAt: user.lastLoginAt,
       createdAt: user.createdAt,
     },
-    entitlement,
+    entitlement: enrichedEntitlement,
+    pricingTenure,
     loginHistory: logins,
     storageDocumentsCount: docs.length,
   };

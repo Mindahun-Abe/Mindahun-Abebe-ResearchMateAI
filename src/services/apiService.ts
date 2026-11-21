@@ -20,6 +20,8 @@ import {
   ProtocolValidationIssue,
   ProtocolAmendmentRecord,
   ProtocolVersionSnapshot,
+  ProtocolVaultRevision,
+  ProtocolVaultSnapshot,
 } from '../types';
 import { getActiveFrameworkFieldEntries, getFrameworkDefinition } from '../utils/protocolFrameworks';
 import { assessGeographicEligibility } from '../utils/geographicSensing';
@@ -657,6 +659,87 @@ export const apiService = {
     }
     const data = await res.json();
     return data.project;
+  },
+
+  async getProtocolVault(projectId: string): Promise<{
+    projectId: string;
+    databaseFolderPath?: string;
+    vault: {
+      schemaVersion: number;
+      updatedAt: string;
+      current: ProtocolVaultSnapshot | null;
+      revisions: ProtocolVaultRevision[];
+    };
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/protocol-vault`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to load protocol vault (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async saveProtocolVault(
+    projectId: string,
+    params: {
+      snapshot: ProtocolVaultSnapshot;
+      reason?: string;
+      source?: 'auto' | 'manual' | 'recovery' | 'sync';
+      createCheckpoint?: boolean;
+      allowReplace?: boolean;
+      keepalive?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    vault?: {
+      schemaVersion: number;
+      updatedAt: string;
+      current: ProtocolVaultSnapshot | null;
+      revisions: ProtocolVaultRevision[];
+    };
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/protocol-vault`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        snapshot: params.snapshot,
+        reason: params.reason,
+        source: params.source,
+        createCheckpoint: Boolean(params.createCheckpoint),
+        allowReplace: Boolean(params.allowReplace),
+      }),
+      ...(params.keepalive ? { keepalive: true } : {}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to save protocol vault (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async restoreProtocolRevision(
+    projectId: string,
+    params: { revisionId?: string; snapshot?: ProtocolVaultSnapshot }
+  ): Promise<{
+    success: boolean;
+    project: ReviewProject;
+    vault?: {
+      schemaVersion: number;
+      updatedAt: string;
+      current: ProtocolVaultSnapshot | null;
+      revisions: ProtocolVaultRevision[];
+    };
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/protocol-vault/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to restore protocol checkpoint (${res.status})`);
+    }
+    return res.json();
   },
 
   async renameProjectFolder(

@@ -5,6 +5,7 @@ import {
   GeographicEligibilityVerdict,
   GeographicLocationConnection,
   GeographicScaleTier,
+  GeographicSelections,
   ReviewProject,
 } from '../types';
 
@@ -1269,6 +1270,35 @@ function synthesizeProtocolGeographicPolicy(project: ReviewProject): ProtocolGeo
     }
   }
 
+  // Incorporate structured multi-scale dropdown/placeholder selections
+  const sel = project.geographicSelections;
+  if (sel) {
+    const selPositive = [
+      sel.watershed,
+      sel.woreda,
+      sel.zone,
+      sel.region,
+      sel.country,
+      sel.continent && !/^global$/i.test(sel.continent.trim()) ? sel.continent : '',
+    ]
+      .map((s) => (s || '').trim())
+      .filter(Boolean);
+    if (selPositive.length > 0) {
+      positiveTargetSegments.push(...selPositive);
+      hasOnlyOrOutsideConstraint = true;
+    }
+    if (sel.excludedAreas?.trim()) {
+      negativeExclusionSegments.push(sel.excludedAreas.trim());
+      hasOnlyOrOutsideConstraint = true;
+    }
+  }
+
+  // Incorporate imported Study Area Map / Boundary file places (.shp, .dbf, .geojson, .csv, .kml)
+  if (project.studyAreaBoundary?.placeNames?.length) {
+    positiveTargetSegments.push(project.studyAreaBoundary.placeNames.slice(0, 60).join(', '));
+    hasOnlyOrOutsideConstraint = true;
+  }
+
   // Inspect ALL inclusionCriteria rules for geographic inclusions AND exclusions
   for (const crit of project.inclusionCriteria || []) {
     const dim = crit.dimension || '';
@@ -1354,6 +1384,13 @@ function synthesizeProtocolGeographicPolicy(project: ReviewProject): ProtocolGeo
   // Extract custom proper-noun target chunks (for local places not in curated dictionary, e.g. "Kersa", "Guder")
   const explicitTargetSource = [
     !isPrimaryPlaceholderGlobal ? rawPrimaryGeo : '',
+    sel?.watershed || '',
+    sel?.woreda || '',
+    sel?.zone || '',
+    sel?.region || '',
+    sel?.country || '',
+    sel?.continent && !/^global$/i.test(sel.continent.trim()) ? sel.continent : '',
+    ...(project.studyAreaBoundary?.placeNames || []).slice(0, 40),
     ...(project.inclusionCriteria || [])
       .filter((c) => GEO_CRITERION_DIMENSION_REGEX.test(`${c.dimension || ''} ${c.includeRule || ''}`))
       .map((c) => c.includeRule || ''),
@@ -2050,3 +2087,164 @@ export function summarizeProjectGeographicOutcomes(
     suggestedGeoRuleText,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Cascading Multi-Scale Geographic Dropdown Options (Globally -> Watershed)
+// ---------------------------------------------------------------------------
+export const CONTINENT_DROPDOWN_OPTIONS: string[] = [
+  'Global',
+  'Africa',
+  'East Africa',
+  'Sub-Saharan Africa',
+  'West Africa',
+  'North Africa',
+  'Southern Africa',
+  'Asia',
+  'South Asia',
+  'East Asia',
+  'Southeast Asia',
+  'Middle East',
+  'Europe',
+  'North America',
+  'South America',
+  'Oceania',
+];
+
+export const COUNTRY_OPTIONS_BY_CONTINENT: Record<string, string[]> = {
+  Africa: ['Ethiopia', 'Kenya', 'Tanzania', 'Uganda', 'Rwanda', 'Nigeria', 'Ghana', 'Egypt', 'Morocco', 'South Africa', 'Sudan', 'Malawi', 'Zambia'],
+  'East Africa': ['Ethiopia', 'Kenya', 'Tanzania', 'Uganda', 'Rwanda', 'Burundi', 'Sudan', 'South Sudan', 'Eritrea', 'Somalia'],
+  'Sub-Saharan Africa': ['Ethiopia', 'Kenya', 'Tanzania', 'Uganda', 'Rwanda', 'Nigeria', 'Ghana', 'Cameroon', 'South Africa', 'Malawi', 'Zambia'],
+  'West Africa': ['Nigeria', 'Ghana', 'Senegal', 'Mali', 'Burkina Faso', 'Benin', 'Cameroon'],
+  'North Africa': ['Egypt', 'Morocco', 'Tunisia', 'Algeria', 'Libya'],
+  'Southern Africa': ['South Africa', 'Malawi', 'Zambia', 'Zimbabwe', 'Mozambique', 'Botswana', 'Namibia'],
+  Asia: ['China', 'India', 'Nepal', 'Pakistan', 'Bangladesh', 'Japan', 'South Korea', 'Vietnam', 'Indonesia', 'Thailand', 'Iran', 'Turkey'],
+  'South Asia': ['India', 'Nepal', 'Pakistan', 'Bangladesh', 'Sri Lanka'],
+  'East Asia': ['China', 'Japan', 'South Korea', 'Taiwan', 'Mongolia'],
+  'Southeast Asia': ['Vietnam', 'Indonesia', 'Thailand', 'Malaysia', 'Philippines', 'Cambodia'],
+  'Middle East': ['Iran', 'Turkey', 'Saudi Arabia', 'Jordan', 'Israel', 'Iraq'],
+  Europe: ['Spain', 'Italy', 'Germany', 'France', 'United Kingdom', 'Portugal', 'Greece', 'Netherlands', 'Poland', 'Switzerland'],
+  'North America': ['United States', 'Canada', 'Mexico'],
+  'South America': ['Brazil', 'Colombia', 'Peru', 'Argentina', 'Chile', 'Ecuador'],
+  Oceania: ['Australia', 'New Zealand', 'Papua New Guinea'],
+};
+
+export const ALL_COUNTRY_DROPDOWN_OPTIONS: string[] = Array.from(
+  new Set(Object.values(COUNTRY_OPTIONS_BY_CONTINENT).flat())
+).sort();
+
+export const REGIONS_BY_COUNTRY: Record<string, string[]> = {
+  Ethiopia: [
+    'Amhara Region',
+    'Oromia Region',
+    'Tigray Region',
+    'SNNPR',
+    'Sidama Region',
+    'Benishangul-Gumuz Region',
+    'Afar Region',
+    'Somali Region',
+    'Gambela Region',
+    'Central Ethiopia Region',
+    'South Ethiopia Region',
+    'Addis Ababa',
+  ],
+  Kenya: ['Rift Valley', 'Central Highlands', 'Nyanza', 'Western Kenya', 'Coastal Region', 'Eastern Kenya'],
+  China: ['Loess Plateau', 'Sichuan Basin', 'Yunnan-Guizhou Plateau', 'Northeast China', 'North China Plain', 'Yangtze River Region'],
+  India: ['Western Ghats', 'Himalayan Foothills', 'Deccan Plateau', 'Indo-Gangetic Plain', 'Rajasthan', 'Karnataka', 'Maharashtra'],
+  Brazil: ['Mato Grosso', 'Minas Gerais', 'São Paulo', 'Bahia', 'Paraná', 'Amazon Basin'],
+  Iran: ['Fars Province', 'Golestan Province', 'Mazandaran', 'Kermanshah', 'Lorestan', 'Khuzestan'],
+  Spain: ['Andalusia', 'Murcia', 'Valencia', 'Catalonia', 'Aragon'],
+  'United States': ['Midwest', 'Great Plains', 'California', 'Pacific Northwest', 'Southeast US', 'Texas'],
+};
+
+export const ZONES_BY_REGION: Record<string, string[]> = {
+  'Amhara Region': [
+    'East Gojjam Zone',
+    'West Gojjam Zone',
+    'North Gondar Zone',
+    'South Gondar Zone',
+    'Central Gondar Zone',
+    'South Wollo Zone',
+    'North Wollo Zone',
+    'North Shewa Zone',
+    'Awi Zone',
+    'Wag Hemra Zone',
+    'Oromia Special Zone',
+  ],
+  'Oromia Region': ['East Shewa Zone', 'West Shewa Zone', 'North Shewa Zone', 'Jimma Zone', 'East Wollega Zone', 'West Wollega Zone', 'Arsi Zone', 'Bale Zone', 'East Hararghe Zone'],
+  'Tigray Region': ['Central Tigray Zone', 'Eastern Tigray Zone', 'Southern Tigray Zone', 'North Western Tigray Zone'],
+  'SNNPR': ['Gurage Zone', 'Hadiya Zone', 'Kembata Tembaro Zone', 'Wolayita Zone', 'Gamo Zone'],
+};
+
+export const WOREDAS_BY_ZONE: Record<string, string[]> = {
+  'West Gojjam Zone': ['Mecha Woreda', 'Yilmana Densa Woreda', 'Bahir Dar Zuria Woreda', 'Jabitehnan Woreda', 'Bure Woreda', 'Sekela Woreda'],
+  'East Gojjam Zone': ['Gozamin Woreda', 'Aneded Woreda', 'Machakel Woreda', 'Enebsie Sar Midir Woreda', 'Hulet Eju Enesie Woreda', 'Sinan Woreda', 'Baso Liben Woreda'],
+  'South Gondar Zone': ['Fogera Woreda', 'Farta Woreda', 'Libo Kemkem Woreda', 'Ebenat Woreda', 'Este Woreda', 'Lay Gayint Woreda'],
+  'North Gondar Zone': ['Dabat Woreda', 'Debark Woreda', 'Wogera Woreda', 'Lay Armachiho Woreda', 'Gondar Zuria Woreda'],
+  'Central Gondar Zone': ['Gondar Zuria Woreda', 'Lay Armachiho Woreda', 'Chilga Woreda', 'Takusa Woreda'],
+  'South Wollo Zone': ['Dessie Zuria Woreda', 'Kalu Woreda', 'Tehuledere Woreda', 'Kutaber Woreda', 'Legambo Woreda'],
+  'Jimma Zone': ['Kersa Woreda', 'Omo Nada Woreda', 'Mana Woreda', 'Deddo Woreda'],
+};
+
+export const WATERSHED_DROPDOWN_OPTIONS: string[] = [
+  'Upper Blue Nile (Abay) Basin',
+  'Debre Mawi Watershed',
+  'Gumara Watershed',
+  'Ribb Watershed',
+  'Jedeb Watershed',
+  'Anjeni Watershed',
+  'Chemoga Watershed',
+  'Gilgel Abay Catchment',
+  'Lake Tana Basin',
+  'Guder Watershed',
+  'Awash River Basin',
+  'Tekezé River Basin',
+  'Omo-Gibe Basin',
+  'Rift Valley Lakes Basin',
+  'Koga Watershed',
+  'Andit Tid Watershed',
+  'Maybar Watershed',
+  'Enabered Watershed',
+];
+
+export function composeGeographicEligibilityString(
+  sel?: GeographicSelections,
+  boundaryPlaces?: string[]
+): { displayText: string; finestScale: GeographicScaleTier | 'any' } {
+  const orderedParts = [
+    sel?.watershed?.trim(),
+    sel?.woreda?.trim(),
+    sel?.zone?.trim(),
+    sel?.region?.trim(),
+    sel?.country?.trim(),
+    sel?.continent?.trim(),
+  ].filter((v): v is string => Boolean(v));
+
+  let finestScale: GeographicScaleTier | 'any' = 'any';
+  if (sel?.watershed?.trim()) finestScale = 'watershed';
+  else if (sel?.woreda?.trim()) finestScale = 'woreda';
+  else if (sel?.zone?.trim()) finestScale = 'zonal';
+  else if (sel?.region?.trim()) finestScale = 'regional';
+  else if (sel?.country?.trim()) finestScale = 'country';
+  else if (sel?.continent?.trim()) {
+    finestScale = /^global$/i.test(sel.continent.trim()) ? 'global' : 'continental';
+  }
+
+  const uniqueParts: string[] = [];
+  for (const p of orderedParts) {
+    if (!uniqueParts.some((u) => u.toLowerCase() === p.toLowerCase())) {
+      uniqueParts.push(p);
+    }
+  }
+
+  if (boundaryPlaces && boundaryPlaces.length > 0 && uniqueParts.length === 0) {
+    uniqueParts.push(...boundaryPlaces.slice(0, 5));
+  }
+
+  const base = uniqueParts.join(', ') || 'Global';
+  const excl = sel?.excludedAreas?.trim();
+  return {
+    displayText: excl ? `${base} (excluding ${excl})` : base,
+    finestScale,
+  };
+}
+

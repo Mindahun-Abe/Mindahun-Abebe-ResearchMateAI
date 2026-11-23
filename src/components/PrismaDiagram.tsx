@@ -42,6 +42,10 @@ import {
 import { ArticleCodeDetailModal } from './ArticleCodeDetailModal';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 import { GeographicEligibilitySelector } from './GeographicEligibilitySelector';
+import {
+  applyManualScreeningDecision,
+  computeAuthoritativePrismaCounts,
+} from '../utils/deterministicScreeningEngine';
 
 interface PrismaDiagramProps {
   project: ReviewProject;
@@ -129,8 +133,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
       stage: targetDecision === 'include' ? 'final_included' : targetDecision === 'exclude' ? 'excluded' : 'full_text',
     };
 
-    onUpdateArticle({
-      ...art,
+    const stamped = applyManualScreeningDecision(art, project, {
       decision: targetDecision,
       screeningStage:
         targetDecision === 'include'
@@ -138,7 +141,11 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
           : targetDecision === 'exclude'
           ? 'excluded'
           : 'full_text',
-      decisionReason: resolvedReason,
+      reason: resolvedReason,
+    });
+
+    onUpdateArticle({
+      ...stamped,
       prismaProtocolStatus: prismaStatus,
       lastReviewedIterationAt: nowIso,
       reviewIterations: [...prevList, nextEntry],
@@ -170,6 +177,11 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
     );
     return summarizeProjectGeographicOutcomes(project, geoMap);
   }, [project, analysisMap]);
+
+  const authoritativeCounts = useMemo(
+    () => computeAuthoritativePrismaCounts(project),
+    [project]
+  );
 
   // Compute numbers from actual project articles with Original Research vs Review, Database Provenance, and 8 PRISMA Diagnostic checks
   const liveCounts = useMemo(() => {
@@ -725,6 +737,45 @@ Total included studies: n = ${liveCounts.includedCount}
             <Download className="w-3.5 h-3.5" />
             <span>{copiedText ? 'Copied Summary!' : 'Export PRISMA Counts'}</span>
           </button>
+        </div>
+      </div>
+
+      {/* Authoritative PRISMA 2020 Equation Validation & Batch Sync Bar */}
+      <div
+        className={`rounded-xl border px-4 py-3 text-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3 ${
+          authoritativeCounts.prismaEquationsValid
+            ? 'bg-emerald-950/25 border-emerald-500/35 text-emerald-100'
+            : 'bg-rose-950/30 border-rose-500/40 text-rose-100'
+        }`}
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          {authoritativeCounts.prismaEquationsValid ? (
+            <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+          ) : (
+            <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+          )}
+          <span className="font-bold">
+            PRISMA 2020 Equation Validation:{' '}
+            {authoritativeCounts.prismaEquationsValid ? 'SYNCHRONIZED (PASS)' : 'DRIFT DETECTED'}
+          </span>
+          <span className="text-[11px] font-mono tabular-nums text-slate-300">
+            Screened: {authoritativeCounts.screenedRecords} · Pending: {authoritativeCounts.pendingRecords} · Excl (T/A): {authoritativeCounts.excludedAtTitleAbstract} · Excl (FT): {authoritativeCounts.excludedAtFullText} · Included: {authoritativeCounts.includedStudies} · Manual Overrides: {authoritativeCounts.manualOverridesCount}
+          </span>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono tabular-nums">
+          {authoritativeCounts.equationChecks.map((eq) => (
+            <span
+              key={eq.id}
+              title={`${eq.label}: ${eq.detail}`}
+              className={`px-2 py-0.5 rounded border ${
+                eq.passed
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
+                  : 'bg-rose-500/15 border-rose-500/30 text-rose-300'
+              }`}
+            >
+              {eq.passed ? 'PASS' : 'FAIL'} ({eq.detail})
+            </span>
+          ))}
         </div>
       </div>
 

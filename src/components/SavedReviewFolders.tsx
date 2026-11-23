@@ -330,7 +330,7 @@ export const SavedReviewFolders: React.FC<SavedReviewFoldersProps> = ({
             const folderArticles = (proj.articles || []).filter(
               (a) => !a.projectId || a.projectId === proj.id
             );
-            const includedCount = folderArticles.filter((a) => a.decision === 'include').length;
+            const includedCount = folderArticles.filter((a) => !a.isDuplicate && a.decision === 'include').length;
             const unscreenedCount = folderArticles.filter(
               (a) => a.decision === 'unscreened' && !a.isDuplicate
             ).length;

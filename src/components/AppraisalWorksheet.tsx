@@ -111,7 +111,7 @@ export const AppraisalWorksheet: React.FC<AppraisalWorksheetProps> = ({
   const [exportStatus, setExportStatus] = useState<string>('');
 
   const includedArticles = useMemo(
-    () => articles.filter((a) => a.decision === 'include'),
+    () => articles.filter((a) => !a.isDuplicate && a.decision === 'include'),
     [articles]
   );
 

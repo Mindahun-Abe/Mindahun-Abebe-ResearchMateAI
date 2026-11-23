@@ -29,7 +29,17 @@ import {
   RecoveryPreviewSummary,
   RecoveryStagingBatch,
   ScannedDiskPdf,
+  ScreeningConsistencyReport,
+  ScreeningDecisionRecord,
+  ScreeningRunRecord,
+  ScreeningStageType,
+  ProposedReevaluationItem,
 } from '../types';
+import {
+  computeScreeningFingerprint,
+  executeDeterministicBatchScreening,
+  sortArticlesDeterministically,
+} from '../utils/deterministicScreeningEngine';
 import type { RecoveryApprovalPayload, RecoveryDeliverableBundle } from '../utils/recoveryEngine';
 import { getActiveFrameworkFieldEntries, getFrameworkDefinition } from '../utils/protocolFrameworks';
 import { assessGeographicEligibility } from '../utils/geographicSensing';
@@ -1393,41 +1403,204 @@ export const apiService = {
     return deterministicEval;
   },
 
-  // High-Throughput Batch Screener: Process up to 10,000+ articles in 15-60 seconds!
+  // High-Throughput Deterministic Batch Screener: Process up to 10,000+ articles deterministically!
   async batchScreenArticles(
     articles: Article[],
     project: ReviewProject,
-    onProgress?: (processed: number, total: number, stats: { included: number; excluded: number; uncertain: number }) => void
+    onProgress?: (processed: number, total: number, stats: { included: number; excluded: number; uncertain: number }) => void,
+    options?: {
+      mode?: 'incremental' | 'rescreen';
+      targetStage?: ScreeningStageType;
+      batchSize?: number;
+      confirmReplaceDecisions?: boolean;
+      preserveManualOverrides?: boolean;
+    }
   ): Promise<Map<string, ScreeningResult>> {
     const results = new Map<string, ScreeningResult>();
-    const total = articles.length;
+    const sorted = sortArticlesDeterministically(articles);
+    const total = sorted.length;
     let included = 0;
     let excluded = 0;
     let uncertain = 0;
 
-    // Process in asynchronous chunks of 150 items so the browser UI thread remains responsive and smooth
-    const chunkSize = 150;
-    for (let i = 0; i < total; i += chunkSize) {
-      const chunk = articles.slice(i, i + chunkSize);
-      for (const art of chunk) {
-        const evalResult = evaluateArticleClient(art, project);
-        results.set(art.id, evalResult);
-        if (evalResult.decision === 'include') included++;
-        else if (evalResult.decision === 'exclude') excluded++;
-        else uncertain++;
-      }
+    const batchRes = await executeDeterministicBatchScreening({
+      articles: sorted,
+      project,
+      mode: options?.mode || 'rescreen',
+      targetStage: options?.targetStage || 'final_included',
+      batchSize: options?.batchSize || 150,
+      confirmReplaceDecisions: options?.confirmReplaceDecisions ?? true,
+      preserveManualOverrides: options?.preserveManualOverrides ?? true,
+      evaluator: (art, proj) => evaluateArticleClient(art, proj),
+      mergeInsights: (existing, res) => mergeScreeningInsightsIntoExtractedData(existing, res),
+      onChunkProgress: onProgress,
+    });
 
-      if (onProgress) {
-        onProgress(Math.min(i + chunkSize, total), total, { included, excluded, uncertain });
+    for (const art of batchRes.updatedArticles) {
+      if (art.isDuplicate) {
+        results.set(art.id, {
+          decision: 'exclude',
+          confidenceScore: 99,
+          primaryReason: art.decisionReason || 'Duplicate: Redundant record across database imports',
+          detailedExplanation: 'Duplicate excluded prior to screening.',
+          metInclusions: [],
+          violatedExclusions: ['Duplicate'],
+          pageEvidence: [],
+          operationalLatencyFound: false,
+        });
+        excluded++;
+        continue;
       }
+      results.set(art.id, {
+        decision: art.decision === 'unscreened' ? 'uncertain' : art.decision,
+        confidenceScore: art.aiConfidence || 85,
+        primaryReason: art.decisionReason || art.aiReason || 'Screened deterministically',
+        detailedExplanation: art.aiReason || '',
+        metInclusions: art.matchedEligibilityCriteria || [],
+        violatedExclusions: art.violatedEligibilityCriteria || [],
+        pageEvidence: (art.evidenceCitations || []).map((c) => ({
+          pageNumber: c.pageNumber,
+          sectionName: c.section,
+          section: c.section,
+          exactQuote: c.quote,
+          relevance: c.relevance,
+        })),
+        operationalLatencyFound: Boolean(art.extractedData?.latencyReported),
+      });
+      if (art.decision === 'include') included++;
+      else if (art.decision === 'exclude') excluded++;
+      else uncertain++;
+    }
 
-      // Small yield to render progress updates
-      if (i + chunkSize < total) {
-        await new Promise((resolve) => setTimeout(resolve, 8));
-      }
+    if (onProgress && total > 0) {
+      onProgress(total, total, { included, excluded, uncertain });
     }
 
     return results;
+  },
+
+  async runDeterministicBatchScreeningClient(params: {
+    articles: Article[];
+    project: ReviewProject;
+    mode: 'incremental' | 'rescreen';
+    targetStage?: ScreeningStageType;
+    batchSize?: number;
+    confirmReplaceDecisions?: boolean;
+    preserveManualOverrides?: boolean;
+    onProgress?: (processed: number, total: number, stats: { included: number; excluded: number; uncertain: number }) => void;
+  }) {
+    return executeDeterministicBatchScreening({
+      articles: params.articles,
+      project: params.project,
+      mode: params.mode,
+      targetStage: params.targetStage || 'final_included',
+      batchSize: params.batchSize || 150,
+      confirmReplaceDecisions: params.confirmReplaceDecisions,
+      preserveManualOverrides: params.preserveManualOverrides ?? true,
+      evaluator: (art, proj) => evaluateArticleClient(art, proj),
+      mergeInsights: (existing, res) => mergeScreeningInsightsIntoExtractedData(existing, res),
+      onChunkProgress: params.onProgress,
+    });
+  },
+
+  async fetchAuthoritativeScreeningState(projectId: string): Promise<{
+    projectId: string;
+    ledger: ScreeningDecisionRecord[];
+    runs: ScreeningRunRecord[];
+    consistencyReport: ScreeningConsistencyReport;
+    interruptedCheckpoint: { runId: string; processedIds: string[]; mode: string; timestamp: string } | null;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/screening/state`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch screening state (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async executeAuthoritativeBatchRun(
+    projectId: string,
+    params: {
+      mode: 'incremental' | 'rescreen';
+      targetStage?: ScreeningStageType;
+      batchSize?: number;
+      confirmReplaceDecisions?: boolean;
+      preserveManualOverrides?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    requiresConfirmation: boolean;
+    proposedReevaluations: ProposedReevaluationItem[];
+    articles: Article[];
+    runs: ScreeningRunRecord[];
+    runRecord: ScreeningRunRecord;
+    ledger: ScreeningDecisionRecord[];
+    workbenchState: WorkbenchState;
+    consistencyReport: ScreeningConsistencyReport;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/screening/batch-run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Batch screening run failed (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async saveAuthoritativeManualDecision(
+    projectId: string,
+    params: {
+      articleId: string;
+      decision: ScreeningDecision;
+      screeningStage?: ScreeningStageType;
+      reason?: string;
+      reviewerNotes?: string;
+      clearManualOverride?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    article: Article;
+    articles: Article[];
+    ledger: ScreeningDecisionRecord[];
+    workbenchState: WorkbenchState;
+    consistencyReport: ScreeningConsistencyReport;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/screening/manual-decision`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to save manual screening decision (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async reconcileAuthoritativeScreening(
+    projectId: string,
+    options?: { clearModifiedFlagsOnly?: boolean }
+  ): Promise<{
+    success: boolean;
+    fixedCount: number;
+    articles: Article[];
+    runs: ScreeningRunRecord[];
+    ledger: ScreeningDecisionRecord[];
+    workbenchState: WorkbenchState;
+    consistencyReport: ScreeningConsistencyReport;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/screening/reconcile`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(options || {}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to reconcile screening ledger (${res.status})`);
+    }
+    return res.json();
   },
 
   // AI 13-Point critical appraisal

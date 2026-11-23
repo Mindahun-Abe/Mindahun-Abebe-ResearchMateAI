@@ -76,7 +76,7 @@ export const VisualMediaStudioPanel: React.FC<VisualMediaStudioPanelProps> = ({ 
     project.title || 'Systematic Evidence Synthesis Diagram'
   );
   const [imgSubtitle, setImgSubtitle] = useState<string>(
-    `${project.frameworkType || 'PICOC'} Protocol • ${(project.articles || []).filter((a) => a.decision === 'include').length} Included Studies`
+    `${project.frameworkType || 'PICOC'} Protocol • ${(project.articles || []).filter((a) => !a.isDuplicate && a.decision === 'include').length} Included Studies`
   );
   const [paletteKey, setPaletteKey] = useState<string>('indigo_slate');
   const [brightness, setBrightness] = useState<number>(100);
@@ -156,8 +156,8 @@ export const VisualMediaStudioPanel: React.FC<VisualMediaStudioPanelProps> = ({ 
         const total = (project.articles || []).length;
         const dupes = (project.articles || []).filter((a) => a.isDuplicate).length;
         const screened = Math.max(total - dupes, 0);
-        const included = (project.articles || []).filter((a) => a.decision === 'include').length;
-        const excluded = (project.articles || []).filter((a) => a.decision === 'exclude').length;
+        const included = (project.articles || []).filter((a) => !a.isDuplicate && a.decision === 'include').length;
+        const excluded = (project.articles || []).filter((a) => !a.isDuplicate && a.decision === 'exclude').length;
 
         const boxes = [
           { label: 'IDENTIFIED', val: `${total} Records`, x: 110, y: 180, color: '#6366f1' },

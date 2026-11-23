@@ -283,9 +283,9 @@ export const ResearchBriefingModule: React.FC<ResearchBriefingModuleProps> = ({
   onOpenBulkImporter,
 }) => {
   const savedBriefing = project.workbenchState?.briefing;
-  const includedList = useMemo(() => articles.filter((a) => a.decision === 'include'), [articles]);
+  const includedList = useMemo(() => articles.filter((a) => !a.isDuplicate && a.decision === 'include'), [articles]);
   const includedOrStarredList = useMemo(
-    () => articles.filter((a) => a.decision === 'include' || a.isStarred),
+    () => articles.filter((a) => !a.isDuplicate && (a.decision === 'include' || a.isStarred)),
     [articles]
   );
   const selectedList = useMemo(

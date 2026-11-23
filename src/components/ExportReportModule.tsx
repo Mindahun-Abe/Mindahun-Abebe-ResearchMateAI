@@ -184,9 +184,9 @@ export const ExportReportModule: React.FC<ExportReportModuleProps> = ({
     includeReferences,
   ]);
 
-  // Included studies
+  // Included non-duplicate studies
   const includedArticles = useMemo(
-    () => project.articles.filter((a) => a.decision === 'include'),
+    () => project.articles.filter((a) => !a.isDuplicate && a.decision === 'include'),
     [project.articles]
   );
 

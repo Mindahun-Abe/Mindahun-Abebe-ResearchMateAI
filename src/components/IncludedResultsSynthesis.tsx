@@ -120,8 +120,8 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
   const [busyPdfArticleId, setBusyPdfArticleId] = useState<string | null>(null);
 
-  // All screened included studies
-  const includedArticles = articles.filter((a) => a.decision === 'include');
+  // All screened included non-duplicate studies
+  const includedArticles = articles.filter((a) => !a.isDuplicate && a.decision === 'include');
 
   // Distributions
   const sensorsCount: Record<string, number> = {};

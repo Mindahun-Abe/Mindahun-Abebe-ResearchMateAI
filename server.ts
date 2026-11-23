@@ -29,6 +29,19 @@ import {
   evaluateRuleWithPhraseInterconnection,
 } from './src/utils/conceptScreeningEngine.ts';
 import {
+  buildModelConfigSnapshot,
+  computeScreeningFingerprint,
+  DETERMINISTIC_PROMPT_VERSION,
+  DETERMINISTIC_SEED,
+  sortArticlesDeterministically,
+} from './src/utils/deterministicScreeningEngine.ts';
+import {
+  getScreeningStateForFolder,
+  reconcileServerScreening,
+  runServerBatchScreening,
+  saveServerManualScreeningDecision,
+} from './src/server/screeningRepositoryService.ts';
+import {
   applyProtocolSnapshotToProject,
   computeProtocolCompletenessScore,
   computeProtocolFingerprint,
@@ -721,8 +734,8 @@ const ai = apiKey
     })
   : null;
 
-// Safe AI runner with 6-second timeout race
-async function generateWithAi(prompt: string, timeoutMs = 6000): Promise<string | null> {
+// Safe AI runner with deterministic seed & 6-second timeout race
+async function generateWithAi(prompt: string, timeoutMs = 6000, seed = DETERMINISTIC_SEED): Promise<string | null> {
   if (!ai || !apiKey) return null;
   try {
     const timerPromise = new Promise<null>((_, reject) =>
@@ -732,6 +745,8 @@ async function generateWithAi(prompt: string, timeoutMs = 6000): Promise<string 
       model: 'gemini-4-hydrogen',
       contents: prompt,
       config: {
+        seed,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
         responseMimeType: 'application/json',
       },
     });
@@ -743,6 +758,8 @@ async function generateWithAi(prompt: string, timeoutMs = 6000): Promise<string 
     return null;
   }
 }
+
+const deterministicAiScreenCache = new Map<string, any>();
 
 // -------------------------------------------------------------
 // Crossref DOI & Metadata Lookup API
@@ -1926,6 +1943,134 @@ app.post('/api/projects/:id/recovery/apply', (req: Request, res: Response) => {
     });
   } catch (err: any) {
     return res.status(400).json({ error: err?.message || 'Failed to apply approved project recovery & reconciliation' });
+  }
+});
+
+// -------------------------------------------------------------
+// Authoritative Deterministic Fast Batch Screener & PRISMA 2020 Sync Endpoints
+// -------------------------------------------------------------
+app.get('/api/projects/:id/screening/state', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Review sub-library folder not found' });
+    }
+    const state = getScreeningStateForFolder(folderPath, projectId);
+    return res.json({ projectId, ...state });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to load authoritative screening state' });
+  }
+});
+
+app.post('/api/projects/:id/screening/batch-run', async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Review sub-library folder not found' });
+    }
+    const {
+      mode = 'incremental',
+      targetStage = 'final_included',
+      batchSize = 150,
+      confirmReplaceDecisions = false,
+      preserveManualOverrides = true,
+      simulateInterruptAfter = 0,
+    } = req.body || {};
+
+    const normalizedMode = mode === 'rescreen' ? 'rescreen' : 'incremental';
+    const result = await runServerBatchScreening({
+      folderPath,
+      projectId,
+      mode: normalizedMode,
+      targetStage,
+      batchSize: Number(batchSize) || 150,
+      confirmReplaceDecisions: Boolean(confirmReplaceDecisions),
+      preserveManualOverrides: preserveManualOverrides !== false,
+      simulateInterruptAfter: Number(simulateInterruptAfter) || 0,
+      evaluator: (art, proj) => {
+        const raw = evaluateArticleLocally(art, proj);
+        return {
+          ...raw,
+          decision: raw.decision as 'include' | 'exclude' | 'uncertain' | 'unscreened',
+        };
+      },
+      mergeInsights: (existing, evalRes) => ({
+        ...(existing || {}),
+        ...(evalRes.operationalLatencyFound !== undefined ? { latencyReported: evalRes.operationalLatencyFound } : {}),
+        ...(evalRes.geographicAssessment && evalRes.geographicAssessment.detectedScale !== 'unspecified'
+          ? {
+              geographicRegion: evalRes.geographicAssessment.primaryPlaceLabel,
+              geographicScale: evalRes.geographicAssessment.detectedScale,
+              geographicVerdict: evalRes.geographicAssessment.verdict,
+              geographicInterpretation: evalRes.geographicAssessment.interpretiveSummary,
+              geographicHierarchy: evalRes.geographicAssessment.hierarchy,
+              geographicStudyEvidence: evalRes.geographicAssessment.evidenceSnippet,
+            }
+          : {}),
+      }),
+    });
+
+    const meta = safeReadJsonSync<Record<string, any>>(path.join(folderPath, 'project.json')) || {};
+    updatePartitionMetaFile(folderPath, projectId, meta.title || projectId, result.articles.length);
+
+    return res.json({
+      success: true,
+      projectId,
+      ...result,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Batch screening execution failed' });
+  }
+});
+
+app.post('/api/projects/:id/screening/manual-decision', async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Review sub-library folder not found' });
+    }
+    const { articleId, decision, screeningStage, reason, reviewerNotes, clearManualOverride } = req.body || {};
+    if (!articleId || !decision) {
+      return res.status(400).json({ error: 'articleId and decision are required' });
+    }
+    const result = await saveServerManualScreeningDecision({
+      folderPath,
+      projectId,
+      articleId: String(articleId),
+      decision,
+      screeningStage,
+      reason,
+      reviewerNotes,
+      clearManualOverride: Boolean(clearManualOverride),
+    });
+    if (!result.article) {
+      return res.status(404).json({ error: `Article "${articleId}" not found` });
+    }
+    return res.json({ success: true, projectId, ...result });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to persist manual screening decision' });
+  }
+});
+
+app.post('/api/projects/:id/screening/reconcile', async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Review sub-library folder not found' });
+    }
+    const { clearModifiedFlagsOnly = false } = req.body || {};
+    const result = await reconcileServerScreening({
+      folderPath,
+      projectId,
+      clearModifiedFlagsOnly: Boolean(clearModifiedFlagsOnly),
+    });
+    return res.json({ success: true, projectId, ...result });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to reconcile screening ledger' });
   }
 });
 
@@ -5513,6 +5658,25 @@ Ensure the research questions span RQ1 to RQ7 (or 5-7 clear questions), identify
 // -------------------------------------------------------------
 app.post('/api/ai/screen', async (req: Request, res: Response) => {
   const { article, projectCriteria } = req.body;
+  const projectLike = buildServerProjectLike(projectCriteria || {});
+  const modelConfig = buildModelConfigSnapshot(projectLike, {
+    executionMode: ai && apiKey ? 'hybrid_gemini_cached' : 'deterministic_local',
+  });
+  const fingerprint = computeScreeningFingerprint(
+    article || ({ id: 'unknown', title: '', abstract: '', authors: [], journal: '', sourceDatabase: 'Manual', screeningStage: 'title_abstract', decision: 'unscreened', evidenceCitations: [] } as any),
+    projectLike,
+    article?.screeningStage === 'title_abstract' ? 'title_abstract' : 'final_included',
+    modelConfig
+  );
+
+  if (deterministicAiScreenCache.has(fingerprint)) {
+    return res.json({
+      ...deterministicAiScreenCache.get(fingerprint),
+      decisionFingerprint: fingerprint,
+      cached: true,
+    });
+  }
+
   const localResult = evaluateArticleLocally(article, projectCriteria || {});
   const geoAssessment = localResult.geographicAssessment;
   const conceptAlignment = (localResult as any).conceptAlignment;
@@ -5582,12 +5746,12 @@ Return a JSON object:
   "suggestedReviewerNotes": string
 }`;
 
-    const aiText = await generateWithAi(prompt, 5000);
+    const aiText = await generateWithAi(prompt, 5000, DETERMINISTIC_SEED);
     if (aiText) {
       const parsed = JSON.parse(aiText);
-      // Enforce deterministic geographic / local exclusion guardrail over cloud AI
+      let finalResponse: any;
       if (!geoAssessment?.isEligible || localResult.decision === 'exclude') {
-        return res.json({
+        finalResponse = {
           ...parsed,
           decision: 'exclude',
           confidenceScore: Math.max(parsed.confidenceScore || 90, localResult.confidenceScore),
@@ -5601,32 +5765,45 @@ Return a JSON object:
             (localResult.pageEvidence || []).length > 0 ? localResult.pageEvidence : parsed.pageEvidence || [],
           geographicAssessment: geoAssessment,
           conceptAlignment,
-        });
-      }
-      if (geoAssessment?.isStrictGeographicScope && !geoAssessment?.isGeographicConfirmed && parsed.decision === 'include') {
-        return res.json({
+          decisionFingerprint: fingerprint,
+          promptVersion: DETERMINISTIC_PROMPT_VERSION,
+        };
+      } else if (geoAssessment?.isStrictGeographicScope && !geoAssessment?.isGeographicConfirmed && parsed.decision === 'include') {
+        finalResponse = {
           ...parsed,
           decision: 'uncertain',
           primaryReason: localResult.primaryReason,
           geographicAssessment: geoAssessment,
           conceptAlignment,
-        });
+          decisionFingerprint: fingerprint,
+          promptVersion: DETERMINISTIC_PROMPT_VERSION,
+        };
+      } else {
+        finalResponse = {
+          ...parsed,
+          geographicAssessment: geoAssessment,
+          conceptAlignment,
+          decisionFingerprint: fingerprint,
+          promptVersion: DETERMINISTIC_PROMPT_VERSION,
+        };
       }
-      return res.json({
-        ...parsed,
-        geographicAssessment: geoAssessment,
-        conceptAlignment,
-      });
+      deterministicAiScreenCache.set(fingerprint, finalResponse);
+      return res.json(finalResponse);
     }
   } catch (err: any) {
     console.warn('Gemini cloud screening timed out or failed, falling back to local engine:', err?.message);
   }
 
-  // Resilient fallback rule evaluation
-  return res.json(localResult);
+  const deterministicResponse = {
+    ...localResult,
+    decisionFingerprint: fingerprint,
+    promptVersion: DETERMINISTIC_PROMPT_VERSION,
+  };
+  deterministicAiScreenCache.set(fingerprint, deterministicResponse);
+  return res.json(deterministicResponse);
 });
 
-// High-Throughput Batch Screener (Screens 1,000 - 10,000+ articles in 15-60 seconds)
+// High-Throughput Deterministic Batch Screener (Idempotent, Order-Independent, Fingerprint-Locked)
 app.post('/api/ai/batch-screen', async (req: Request, res: Response) => {
   const { articles, projectCriteria } = req.body;
   if (!Array.isArray(articles)) {
@@ -5634,10 +5811,21 @@ app.post('/api/ai/batch-screen', async (req: Request, res: Response) => {
   }
 
   const startTime = Date.now();
-  const results = articles.map((article: any) => {
+  const projectLike = buildServerProjectLike(projectCriteria || {});
+  const modelConfig = buildModelConfigSnapshot(projectLike);
+  const sorted = sortArticlesDeterministically(articles);
+  const results = sorted.map((article: any) => {
     const evaluation = evaluateArticleLocally(article, projectCriteria || {});
+    const fingerprint = computeScreeningFingerprint(
+      article,
+      projectLike,
+      article?.screeningStage === 'title_abstract' ? 'title_abstract' : 'final_included',
+      modelConfig
+    );
     return {
       articleId: article.id,
+      decisionFingerprint: fingerprint,
+      modelConfig,
       ...evaluation,
     };
   });
@@ -5647,6 +5835,7 @@ app.post('/api/ai/batch-screen', async (req: Request, res: Response) => {
     totalProcessed: results.length,
     durationMs,
     throughputPerSec: Math.round((results.length / (Math.max(durationMs, 1) / 1000))),
+    modelConfig,
     results,
   });
 });

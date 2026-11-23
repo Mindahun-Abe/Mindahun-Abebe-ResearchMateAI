@@ -78,8 +78,8 @@ export const ProposalGenerator: React.FC<ProposalGeneratorProps> = ({
     () => savedProposal?.customInstructions || ''
   );
 
-  // Included articles
-  const includedArticles = project.articles.filter((a) => a.decision === 'include');
+  // Included non-duplicate articles
+  const includedArticles = project.articles.filter((a) => !a.isDuplicate && a.decision === 'include');
   const hydratedProjRef = useRef<string>(project.id);
   const skipFirstAutoSaveRef = useRef<boolean>(true);
 

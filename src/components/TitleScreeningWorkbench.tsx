@@ -32,6 +32,7 @@ import {
   extractConceptPhrasesAndTokens,
 } from '../utils/conceptScreeningEngine';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import { applyManualScreeningDecision } from '../utils/deterministicScreeningEngine';
 
 interface TitleScreeningWorkbenchProps {
   project: ReviewProject;
@@ -121,12 +122,11 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
     const finalReason =
       reason || (decision === 'exclude' ? (selectedExclusionReason || project.standardExclusionReasons[0]) : undefined);
 
-    const updated: Article = {
-      ...activeArticle,
+    const updated = applyManualScreeningDecision(activeArticle, project, {
       decision,
-      decisionReason: finalReason,
-      screeningStage: decision === 'include' ? 'full_text' : decision === 'exclude' ? 'excluded' : 'title_abstract',
-    };
+      screeningStage: decision === 'include' ? 'full_text' : 'title_abstract',
+      reason: finalReason,
+    });
 
     onUpdateArticle(updated);
 
@@ -358,6 +358,12 @@ export const TitleScreeningWorkbench: React.FC<TitleScreeningWorkbenchProps> = (
                 >
                   Status: {activeArticle.decision}
                 </span>
+
+                {activeArticle.manualOverride && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                    Manual Override Protected
+                  </span>
+                )}
 
                 {activeArticle.doi && (
                   <a

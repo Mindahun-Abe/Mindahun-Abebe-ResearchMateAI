@@ -85,15 +85,16 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 }) => {
   const [backupBanner, setBackupBanner] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const articles = project.articles || [];
+  const uniqueArticles = articles.filter((a) => !a.isDuplicate);
   const totalIdentified = articles.length;
   const duplicatesCount = articles.filter((a) => a.isDuplicate).length;
-  const screenedCount = articles.filter((a) => a.decision !== 'unscreened').length;
-  const includedCount = articles.filter((a) => a.decision === 'include').length;
-  const excludedCount = articles.filter((a) => a.decision === 'exclude').length;
-  const uncertainCount = articles.filter((a) => a.decision === 'uncertain').length;
-  const appraisedCount = articles.filter((a) => a.appraisalScore !== undefined || (a.appraisalWorksheet && a.appraisalWorksheet.length > 0)).length;
-  const starredArticles = articles.filter((a) => a.isStarred);
-  const latencyReportedCount = articles.filter((a) => a.extractedData?.latencyReported || a.extractedData?.latency).length;
+  const screenedCount = uniqueArticles.filter((a) => a.decision !== 'unscreened').length;
+  const includedCount = uniqueArticles.filter((a) => a.decision === 'include').length;
+  const excludedCount = uniqueArticles.filter((a) => a.decision === 'exclude').length;
+  const uncertainCount = uniqueArticles.filter((a) => a.decision === 'uncertain').length;
+  const appraisedCount = uniqueArticles.filter((a) => a.appraisalScore !== undefined || (a.appraisalWorksheet && a.appraisalWorksheet.length > 0)).length;
+  const starredArticles = uniqueArticles.filter((a) => a.isStarred);
+  const latencyReportedCount = uniqueArticles.filter((a) => a.extractedData?.latencyReported || a.extractedData?.latency).length;
 
   // Funnel attrition calculation
   const uniqueRecords = Math.max(totalIdentified - duplicatesCount, 1);

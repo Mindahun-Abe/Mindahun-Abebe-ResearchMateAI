@@ -46,6 +46,7 @@ import {
   normalizeValidDoi,
   validateArticleMetadata,
 } from '../utils/citationFormatter';
+import { applyManualScreeningDecision } from '../utils/deterministicScreeningEngine';
 
 interface ScreeningWorkbenchProps {
   project: ReviewProject;
@@ -183,18 +184,18 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
     });
   };
 
-  // Screening decision handlers
+  // Screening decision handlers (enforces human reviewer precedence + audit history)
   const handleDecision = (decision: ScreeningDecision, reason?: string) => {
     const isExcluded = decision === 'exclude';
     const isIncluded = decision === 'include';
 
-    onUpdateArticle({
-      ...article,
+    const updated = applyManualScreeningDecision(article, project, {
       decision,
-      decisionReason: isExcluded ? reason || selectedReason : undefined,
-      reviewerNotes,
       screeningStage: isIncluded ? 'final_included' : isExcluded ? 'excluded' : 'full_text',
+      reason: isExcluded ? reason || selectedReason : undefined,
+      reviewerNotes,
     });
+    onUpdateArticle(updated);
   };
 
   // AI-assisted screening call (Fail-safe with instant client rule engine fallback)
@@ -1011,22 +1012,47 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
               Screening Decision & Action
             </h3>
 
-            {/* Current Decision Badge */}
-            <div className="flex items-center justify-between text-xs bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-              <span className="text-slate-400">Current Status:</span>
-              <span
-                className={`font-bold px-2 py-0.5 rounded uppercase text-[11px] ${
-                  article.decision === 'include'
-                    ? 'text-emerald-400 bg-emerald-500/20'
-                    : article.decision === 'exclude'
-                    ? 'text-rose-400 bg-rose-500/20'
-                    : article.decision === 'uncertain'
-                    ? 'text-amber-400 bg-amber-500/20'
-                    : 'text-slate-400 bg-slate-800'
-                }`}
-              >
-                {article.decision}
-              </span>
+            {/* Current Decision Badge & Manual Override Protection */}
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs bg-slate-950 p-2.5 rounded-xl border border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">Current Status:</span>
+                <span
+                  className={`font-bold px-2 py-0.5 rounded uppercase text-[11px] ${
+                    article.decision === 'include'
+                      ? 'text-emerald-400 bg-emerald-500/20'
+                      : article.decision === 'exclude'
+                      ? 'text-rose-400 bg-rose-500/20'
+                      : article.decision === 'uncertain'
+                      ? 'text-amber-400 bg-amber-500/20'
+                      : 'text-slate-400 bg-slate-800'
+                  }`}
+                >
+                  {article.decision}
+                </span>
+              </div>
+              {article.manualOverride && (
+                <div className="flex items-center gap-1.5">
+                  <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[10px] font-semibold">
+                    Manual Override Protected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateArticle(
+                        applyManualScreeningDecision(article, project, {
+                          decision: article.decision,
+                          screeningStage: article.screeningStage,
+                          clearManualOverride: true,
+                        })
+                      )
+                    }
+                    className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] border border-slate-700 transition cursor-pointer"
+                    title="Allow automated Mode B re-screen to re-evaluate this article"
+                  >
+                    Unlock
+                  </button>
+                </div>
+              )}
             </div>
 
             {/* Decision Buttons */}

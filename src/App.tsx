@@ -58,6 +58,7 @@ import {
   removeProjectProtocolFromVault,
   saveProjectProtocolToVault,
 } from './utils/protocolVault';
+import { applyManualScreeningDecision } from './utils/deterministicScreeningEngine';
 
 type SurfaceView = 'workbench' | 'website' | 'billing' | 'admin';
 
@@ -882,25 +883,34 @@ export default function App() {
       if (applyScreeningUpdates && res.screeningUpdates && res.screeningUpdates.length > 0) {
         const updateMap = new Map(res.screeningUpdates.map((u) => [u.articleId, u]));
         const nextArticles = (targetProj.articles || []).map((art) => {
+          if (art.isDuplicate || art.manualOverride) return art;
           const upd = updateMap.get(art.id);
           if (!upd) return art;
           updatedCount++;
           const localEval = evaluateArticleClient(art, targetProj);
-          return {
-            ...art,
-            decision: upd.decision,
-            decisionReason: upd.decision === 'exclude' ? upd.primaryReason : undefined,
-            aiSuggestedDecision: upd.decision,
-            aiConfidence: upd.confidenceScore,
-            aiReason: upd.primaryReason,
-            screeningStage:
-              upd.decision === 'include'
-                ? ('final_included' as const)
-                : upd.decision === 'exclude'
-                ? ('excluded' as const)
-                : ('full_text' as const),
-            extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, localEval),
-          };
+          const stamped = applyManualScreeningDecision(
+            {
+              ...art,
+              aiSuggestedDecision: upd.decision,
+              aiConfidence: upd.confidenceScore,
+              aiReason: upd.primaryReason,
+              extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, localEval),
+            },
+            targetProj,
+            {
+              decision: upd.decision,
+              screeningStage:
+                upd.decision === 'include'
+                  ? 'final_included'
+                  : upd.decision === 'exclude'
+                  ? 'excluded'
+                  : 'full_text',
+              reason: upd.decision === 'exclude' ? upd.primaryReason : undefined,
+              clearManualOverride: true,
+              actor: 'reconciler',
+            }
+          );
+          return stamped;
         });
         handleUpdateArticlesForProject(targetProjectId, nextArticles);
       }
@@ -1406,53 +1416,37 @@ export default function App() {
 
     let finalArticles = parsed;
     if (options?.autoScreen) {
-      let inc = 0;
-      let exc = 0;
-      let unc = 0;
-      const start = performance.now();
-      finalArticles = parsed.map((art) => {
-        const res = evaluateArticleClient(art, targetProj);
-        if (res.decision === 'include') inc++;
-        else if (res.decision === 'exclude') exc++;
-        else unc++;
-        return {
-          ...art,
-          decision: res.decision,
-          decisionReason: res.decision === 'exclude' ? res.primaryReason : undefined,
-          screeningStage:
-            res.decision === 'include'
-              ? ('final_included' as const)
-              : res.decision === 'exclude'
-              ? ('excluded' as const)
-              : ('full_text' as const),
-          aiSuggestedDecision: res.decision,
-          aiConfidence: res.confidenceScore,
-          aiReason: res.primaryReason,
-          extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, res),
-        };
+      const detResult = await apiService.runDeterministicBatchScreeningClient({
+        articles: parsed,
+        project: targetProj,
+        mode: 'incremental',
+        targetStage: 'full_text',
       });
-      const elapsed = parseFloat(((performance.now() - start) / 1000).toFixed(2));
-      const nowIso = new Date().toISOString();
+      finalArticles = detResult.updatedArticles;
+      const rr = detResult.runRecord;
+      const elapsedSec = rr.elapsedSeconds ?? 0.05;
       const runRecord = {
-        runId: `run-add-${Date.now()}`,
-        completedAt: nowIso,
+        runId: rr.runId,
+        completedAt: rr.completedAt || new Date().toISOString(),
         mode: 'newly_added_files' as const,
-        processed: finalArticles.length,
-        total: finalArticles.length,
-        included: inc,
-        excluded: exc,
-        uncertain: unc,
-        speed: Math.round(finalArticles.length / Math.max(elapsed, 0.05)),
-        elapsedSeconds: elapsed,
+        processed: rr.totalRecordsProcessed,
+        total: rr.totalRecordsProcessed,
+        included: rr.includedCount,
+        excluded: rr.excludedCount,
+        uncertain: rr.uncertainCount,
+        speed: Math.round(rr.totalRecordsProcessed / Math.max(elapsedSec, 0.05)),
+        elapsedSeconds: elapsedSec,
       };
       handleUpdateWorkbenchState(
         targetProjectId,
         (prevWs) => ({
           ...prevWs,
           batchScreener: {
+            ...(prevWs.batchScreener || {}),
             lastStats: runRecord,
-            lastRunAt: nowIso,
+            lastRunAt: runRecord.completedAt,
             history: [runRecord, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
+            runs: [rr, ...(prevWs.batchScreener?.runs || [])].slice(0, 20),
           },
         }),
         { immediate: true, moduleId: 'batch_screener', label: 'Auto-Screened Added Files' }
@@ -1685,58 +1679,22 @@ export default function App() {
     setIsAddModalOpen(true);
   };
 
-  // Auto-Sync Screening against current PICOC & Eligibility Criteria (strictly scoped to active review)
-  const handleAutoSyncScreeningCriteria = () => {
+  // Auto-Sync Screening against current PICOC & Eligibility Criteria (strictly scoped to active review, preserves manual overrides)
+  const handleAutoSyncScreeningCriteria = async () => {
     if (!isolatedCurrentProject) return;
-    const updated = isolatedCurrentProject.articles.map((art) => {
-      if (art.isDuplicate) return art;
-      const res = evaluateArticleClient(art, isolatedCurrentProject);
-      const preservedManualCitations = (art.evidenceCitations || []).filter(
-        (c) =>
-          !c.id?.startsWith('ev-') &&
-          !c.id?.startsWith('ai-ev-') &&
-          !/geographic\s+verification\s+needed|abstract\s*\/\s*eligibility\s+check|title\s*&\s*filename\s+screening/i.test(
-            c.section || ''
-          )
-      );
-      const mappedCitations =
-        res.pageEvidence && res.pageEvidence.length > 0
-          ? [
-              ...preservedManualCitations,
-              ...res.pageEvidence.map((ev, i) => ({
-                id: `ev-${art.id}-${i}-${Date.now()}`,
-                pageNumber: ev.pageNumber,
-                section: ev.section || ev.sectionName || 'Evidence Finding',
-                quote: ev.exactQuote,
-                relevance: ev.relevance,
-              })),
-            ]
-          : preservedManualCitations;
-
-      return {
-        ...art,
-        projectId: isolatedCurrentProject.id,
-        decision: res.decision,
-        decisionReason: res.primaryReason,
-        screeningStage:
-          res.decision === 'include'
-            ? ('final_included' as const)
-            : res.decision === 'exclude'
-            ? ('excluded' as const)
-            : ('title_abstract' as const),
-        aiSuggestedDecision: res.decision,
-        aiConfidence: res.confidenceScore,
-        aiReason: res.detailedExplanation,
-        evidenceCitations: mappedCitations,
-        extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, res),
-      };
+    const detResult = await apiService.runDeterministicBatchScreeningClient({
+      articles: isolatedCurrentProject.articles,
+      project: isolatedCurrentProject,
+      mode: 'rescreen',
+      targetStage: 'final_included',
+      confirmReplaceDecisions: true,
     });
-    handleUpdateArticles(updated);
+    handleUpdateArticles(detResult.updatedArticles);
   };
 
   const activeArticles = isolatedCurrentProject?.articles || [];
   const duplicatesCount = activeArticles.filter((a) => a.isDuplicate).length;
-  const includedCount = activeArticles.filter((a) => a.decision === 'include').length;
+  const includedCount = activeArticles.filter((a) => !a.isDuplicate && a.decision === 'include').length;
   const starredCount = activeArticles.filter((a) => a.isStarred).length;
   const unscreenedCount = activeArticles.filter(
     (a) => a.decision === 'unscreened' && !a.isDuplicate

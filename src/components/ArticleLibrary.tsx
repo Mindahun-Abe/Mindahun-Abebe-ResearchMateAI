@@ -3,8 +3,11 @@ import {
   Article,
   BatchScreenerRunRecord,
   ModuleQaRescanRecord,
+  ProposedReevaluationItem,
   ReviewIterationEntry,
   ReviewProject,
+  ScreeningConsistencyReport,
+  ScreeningRunRecord,
   SearchHistoryEntry,
   WorkbenchModuleId,
   WorkbenchState,
@@ -58,6 +61,12 @@ import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 import { NotebookStudioModal } from './NotebookStudioModal';
 import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import { ScreeningConsistencyPanel } from './ScreeningConsistencyPanel';
+import {
+  applyManualScreeningDecision,
+  computeAuthoritativePrismaCounts,
+  reconcileScreeningLedger,
+} from '../utils/deterministicScreeningEngine';
 import {
   isRawPdfOrPlaceholderAbstract,
   resolveFullArticleAbstract,
@@ -396,10 +405,16 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     return new Date(ts).toLocaleDateString();
   };
 
-  // High-Throughput Fast Batch Screener States (10,000+ articles in 15-60s)
+  // High-Throughput Deterministic Fast Batch Screener States
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [isBatchScreening, setIsBatchScreening] = useState(false);
+  const [isReconciling, setIsReconciling] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
+  const [batchSizeSetting, setBatchSizeSetting] = useState<number>(150);
+  const [proposedReevaluations, setProposedReevaluations] = useState<ProposedReevaluationItem[] | null>(null);
+  const [serverConsistencyReport, setServerConsistencyReport] = useState<ScreeningConsistencyReport | null>(null);
+  const [serverRuns, setServerRuns] = useState<ScreeningRunRecord[] | null>(null);
+  const [batchActionBanner, setBatchActionBanner] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
 
   useEffect(() => {
     if (autoOpenBatchScreener) {
@@ -409,6 +424,11 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   }, [autoOpenBatchScreener, onBatchScreenerOpened]);
 
   const savedBatchState = project.workbenchState?.batchScreener;
+  const authoritativeLiveCounts = useMemo(
+    () => computeAuthoritativePrismaCounts(project, serverRuns || savedBatchState?.runs),
+    [project, serverRuns, savedBatchState?.runs]
+  );
+
   const [batchStats, setBatchStats] = useState<{
     processed: number;
     total: number;
@@ -420,134 +440,248 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   }>(() =>
     savedBatchState?.lastStats
       ? savedBatchState.lastStats
-      : { processed: 0, total: 0, included: 0, excluded: 0, uncertain: 0, speed: 0, elapsedSeconds: 0 }
+      : {
+          processed: authoritativeLiveCounts.screenedRecords,
+          total: authoritativeLiveCounts.uniqueRecords,
+          included: authoritativeLiveCounts.includedStudies,
+          excluded:
+            authoritativeLiveCounts.excludedAtTitleAbstract +
+            authoritativeLiveCounts.excludedAtFullText +
+            authoritativeLiveCounts.reportsNotRetrieved,
+          uncertain: authoritativeLiveCounts.uncertainRecords,
+          speed: 0,
+          elapsedSeconds: 0,
+        }
   );
 
-  // Hydrate last auto-saved Fast Batch Screener results when project changes or modal opens
+  // Hydrate authoritative state whenever project changes or Batch Screener modal opens
   useEffect(() => {
-    const last = project.workbenchState?.batchScreener?.lastStats;
-    if (last) {
-      setBatchStats(last);
-    } else {
-      setBatchStats({ processed: 0, total: 0, included: 0, excluded: 0, uncertain: 0, speed: 0, elapsedSeconds: 0 });
-    }
-  }, [project.id, project.workbenchState?.batchScreener?.lastRunAt]);
+    setBatchStats({
+      processed: authoritativeLiveCounts.screenedRecords,
+      total: authoritativeLiveCounts.uniqueRecords,
+      included: authoritativeLiveCounts.includedStudies,
+      excluded:
+        authoritativeLiveCounts.excludedAtTitleAbstract +
+        authoritativeLiveCounts.excludedAtFullText +
+        authoritativeLiveCounts.reportsNotRetrieved,
+      uncertain: authoritativeLiveCounts.uncertainRecords,
+      speed: project.workbenchState?.batchScreener?.lastStats?.speed || 0,
+      elapsedSeconds: project.workbenchState?.batchScreener?.lastStats?.elapsedSeconds || 0,
+    });
+  }, [project.id, authoritativeLiveCounts, project.workbenchState?.batchScreener?.lastRunAt]);
 
-  // Run Batch Screener on all articles in the library (with live checkpoint & final auto-save)
+  useEffect(() => {
+    if (!showBatchModal) return;
+    let cancelled = false;
+    apiService
+      .fetchAuthoritativeScreeningState(project.id)
+      .then((res) => {
+        if (cancelled) return;
+        setServerRuns(res.runs);
+        setServerConsistencyReport(res.consistencyReport);
+      })
+      .catch(() => {
+        // Offline / local fallback uses computeAuthoritativePrismaCounts + investigateScreeningDiscrepancies
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showBatchModal, project.id]);
+
+  // Execute Deterministic Batch Screener (Mode A: incremental, Mode B: rescreen with confirmation)
   const handleExecuteBatchScreen = async (
     articlesToScreen: Article[],
-    runMode: 'unscreened_only' | 'full_library' = 'full_library'
+    runMode: 'unscreened_only' | 'full_library' = 'full_library',
+    confirmReplaceDecisions: boolean = false
   ) => {
+    const engineMode = runMode === 'unscreened_only' ? 'incremental' : 'rescreen';
     setIsBatchScreening(true);
-    setBatchProgress(0);
+    setBatchProgress(15);
+    setBatchActionBanner(null);
     const start = performance.now();
-    let finalSnapshot = {
-      processed: 0,
-      total: articlesToScreen.length,
-      included: 0,
-      excluded: 0,
-      uncertain: 0,
-      speed: 0,
-      elapsedSeconds: 0,
-    };
 
-    const resultMap = await apiService.batchScreenArticles(
-      articlesToScreen,
-      project,
-      (processed, total, stats) => {
-        const elapsed = (performance.now() - start) / 1000;
-        const currentSpeed = Math.round(processed / Math.max(elapsed, 0.05));
-        finalSnapshot = {
-          processed,
-          total,
-          included: stats.included,
-          excluded: stats.excluded,
-          uncertain: stats.uncertain,
-          speed: currentSpeed,
-          elapsedSeconds: parseFloat(elapsed.toFixed(1)),
+    try {
+      // Primary path: Server-authoritative transaction with concurrency lock & atomic ledger persistence
+      let serverRes: Awaited<ReturnType<typeof apiService.executeAuthoritativeBatchRun>> | null = null;
+      try {
+        serverRes = await apiService.executeAuthoritativeBatchRun(project.id, {
+          mode: engineMode,
+          targetStage: 'final_included',
+          batchSize: batchSizeSetting,
+          confirmReplaceDecisions,
+          preserveManualOverrides: true,
+        });
+      } catch {
+        serverRes = null;
+      }
+
+      if (serverRes) {
+        if (serverRes.requiresConfirmation) {
+          setProposedReevaluations(serverRes.proposedReevaluations);
+          setServerConsistencyReport(serverRes.consistencyReport);
+          setIsBatchScreening(false);
+          setBatchProgress(0);
+          return;
+        }
+
+        setProposedReevaluations(null);
+        setServerRuns(serverRes.runs);
+        setServerConsistencyReport(serverRes.consistencyReport);
+        const c = serverRes.consistencyReport.authoritativeCounts;
+        const elapsed = Number(((performance.now() - start) / 1000).toFixed(1));
+        const finalSnapshot = {
+          processed: c.screenedRecords,
+          total: c.uniqueRecords,
+          included: c.includedStudies,
+          excluded: c.excludedAtTitleAbstract + c.excludedAtFullText + c.reportsNotRetrieved,
+          uncertain: c.uncertainRecords,
+          speed: serverRes.runRecord.totalRecordsProcessed > 0
+            ? Math.round(serverRes.runRecord.totalRecordsProcessed / Math.max(elapsed, 0.05))
+            : 0,
+          elapsedSeconds: elapsed,
         };
-        setBatchProgress(Math.round((processed / total) * 100));
         setBatchStats(finalSnapshot);
-        if (processed % 450 === 0 && processed < total && onUpdateWorkbenchState) {
+        setBatchProgress(100);
+        onUpdateArticles(serverRes.articles);
+        if (onUpdateWorkbenchState) {
+          const nowIso = new Date().toISOString();
+          const legacyRecord: BatchScreenerRunRecord = {
+            ...finalSnapshot,
+            runId: serverRes.runRecord.runId,
+            completedAt: nowIso,
+            mode: runMode,
+          };
           onUpdateWorkbenchState(
             (prevWs) => ({
               ...prevWs,
               batchScreener: {
-                ...prevWs.batchScreener,
+                ...serverRes!.workbenchState?.batchScreener,
                 lastStats: finalSnapshot,
-                lastRunAt: new Date().toISOString(),
+                lastRunAt: nowIso,
+                runs: serverRes!.runs,
+                history: [legacyRecord, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
               },
             }),
-            { moduleId: 'batch_screener', label: 'Batch Checkpoint' }
+            { immediate: true, moduleId: 'batch_screener', label: 'Deterministic Batch Screener' }
           );
         }
+        setBatchActionBanner({
+          type: 'success',
+          text:
+            engineMode === 'incremental'
+              ? `Mode A (Incremental): ${serverRes.runRecord.newRecordsScreened} newly screened, ${serverRes.runRecord.existingDecisionsReused} unchanged decisions reused, ${serverRes.runRecord.manualOverridesPreserved} manual override(s) preserved. PRISMA Included = ${c.includedStudies}.`
+              : `Mode B (Re-screen Confirmed): ${serverRes.runRecord.modifiedRecordsRescreened + serverRes.runRecord.newRecordsScreened} evaluated, ${serverRes.runRecord.manualOverridesPreserved} manual override(s) protected. PRISMA Included = ${c.includedStudies}.`,
+        });
+        setIsBatchScreening(false);
+        return;
       }
-    );
 
-    const updatedArticles = subLibraryArticles.map((art) => {
-      const res = resultMap.get(art.id);
-      if (res) {
-        return {
-          ...art,
-          decision: res.decision,
-          decisionReason: res.decision === 'exclude' ? res.primaryReason : undefined,
-          screeningStage:
-            res.decision === 'include'
-              ? ('final_included' as const)
-              : res.decision === 'exclude'
-              ? ('excluded' as const)
-              : ('full_text' as const),
-          aiSuggestedDecision: res.decision,
-          aiConfidence: res.confidenceScore,
-          aiReason: res.primaryReason,
-          extractedData: mergeScreeningInsightsIntoExtractedData(art.extractedData, res),
-          evidenceCitations: [
-            ...(art.evidenceCitations || []).filter(
-              (c) =>
-                !c.id?.startsWith('ev-batch-') &&
-                !c.id?.startsWith('ev-') &&
-                !/geographic\s+verification\s+needed|abstract\s*\/\s*eligibility\s+check|title\s*&\s*filename\s+screening/i.test(
-                  c.section || ''
-                )
-            ),
-            ...(res.pageEvidence || []).map((pe, idx) => ({
-              id: `ev-batch-${art.id}-${idx}`,
-              pageNumber: pe.pageNumber,
-              section: pe.sectionName || pe.section || 'Evidence',
-              quote: pe.exactQuote,
-              relevance: pe.relevance,
-            })),
-          ],
-        };
+      // Deterministic client fallback if project folder does not yet exist on server
+      const clientRes = await apiService.runDeterministicBatchScreeningClient({
+        articles: subLibraryArticles.length > 0 ? subLibraryArticles : articlesToScreen,
+        project,
+        mode: engineMode,
+        targetStage: 'final_included',
+        batchSize: batchSizeSetting,
+        confirmReplaceDecisions,
+        preserveManualOverrides: true,
+        onProgress: (processed, total, stats) => {
+          const elapsed = (performance.now() - start) / 1000;
+          setBatchProgress(Math.round((processed / Math.max(total, 1)) * 100));
+          setBatchStats({
+            processed,
+            total,
+            included: stats.included,
+            excluded: stats.excluded,
+            uncertain: stats.uncertain,
+            speed: Math.round(processed / Math.max(elapsed, 0.05)),
+            elapsedSeconds: parseFloat(elapsed.toFixed(1)),
+          });
+        },
+      });
+
+      if (clientRes.requiresConfirmation) {
+        setProposedReevaluations(clientRes.proposedReevaluations);
+        setIsBatchScreening(false);
+        setBatchProgress(0);
+        return;
       }
-      return art;
-    });
 
-    onUpdateArticles(updatedArticles);
-    if (onUpdateWorkbenchState) {
-      const nowIso = new Date().toISOString();
-      const record: BatchScreenerRunRecord = {
-        ...finalSnapshot,
-        runId: `batch-${Date.now()}`,
-        completedAt: nowIso,
-        mode: runMode,
+      setProposedReevaluations(null);
+      const nextProj: ReviewProject = { ...project, articles: clientRes.updatedArticles };
+      const counts = computeAuthoritativePrismaCounts(nextProj, [clientRes.runRecord]);
+      const finalSnapshot = {
+        processed: counts.screenedRecords,
+        total: counts.uniqueRecords,
+        included: counts.includedStudies,
+        excluded: counts.excludedAtTitleAbstract + counts.excludedAtFullText + counts.reportsNotRetrieved,
+        uncertain: counts.uncertainRecords,
+        speed: Math.round(counts.uniqueRecords / Math.max((performance.now() - start) / 1000, 0.05)),
+        elapsedSeconds: Number(((performance.now() - start) / 1000).toFixed(1)),
       };
-      onUpdateWorkbenchState(
-        (prevWs) => ({
-          ...prevWs,
-          batchScreener: {
-            lastStats: finalSnapshot,
-            lastRunAt: nowIso,
-            history: [record, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
-          },
-        }),
-        { immediate: true, moduleId: 'batch_screener', label: 'Fast Batch Screener' }
-      );
+      setBatchStats(finalSnapshot);
+      onUpdateArticles(clientRes.updatedArticles);
+      if (onUpdateWorkbenchState) {
+        const nowIso = new Date().toISOString();
+        const record: BatchScreenerRunRecord = {
+          ...finalSnapshot,
+          runId: clientRes.runRecord.runId,
+          completedAt: nowIso,
+          mode: runMode,
+        };
+        onUpdateWorkbenchState(
+          (prevWs) => ({
+            ...prevWs,
+            batchScreener: {
+              lastStats: finalSnapshot,
+              lastRunAt: nowIso,
+              runs: [clientRes.runRecord, ...(prevWs.batchScreener?.runs || [])].slice(0, 30),
+              history: [record, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
+            },
+          }),
+          { immediate: true, moduleId: 'batch_screener', label: 'Deterministic Batch Screener' }
+        );
+      }
+    } finally {
+      setIsBatchScreening(false);
     }
-    setIsBatchScreening(false);
   };
 
-  // High-Throughput Stress-Test Generator (Injects & Screens 10,000 articles in 15-30s)
+  const handleReconcileScreening = async () => {
+    setIsReconciling(true);
+    setBatchActionBanner(null);
+    try {
+      try {
+        const res = await apiService.reconcileAuthoritativeScreening(project.id);
+        setServerRuns(res.runs);
+        setServerConsistencyReport(res.consistencyReport);
+        onUpdateArticles(res.articles);
+        if (onUpdateWorkbenchState) {
+          onUpdateWorkbenchState(
+            () => res.workbenchState,
+            { immediate: true, moduleId: 'batch_screener', label: 'PRISMA Consistency Sync' }
+          );
+        }
+        setBatchActionBanner({
+          type: 'success',
+          text: `Reconciled ${res.fixedCount} record(s) and synchronized PRISMA 2020 (${res.consistencyReport.authoritativeCounts.includedStudies} included / ${res.consistencyReport.authoritativeCounts.uniqueRecords} unique).`,
+        });
+        return;
+      } catch {
+        const localRec = reconcileScreeningLedger(project);
+        onUpdateArticles(localRec.updatedArticles);
+        setServerConsistencyReport(localRec.report);
+        setBatchActionBanner({
+          type: 'success',
+          text: `Synchronized ${localRec.fixedCount} record(s) locally with PRISMA 2020 (${localRec.report.authoritativeCounts.includedStudies} included).`,
+        });
+      }
+    } finally {
+      setIsReconciling(false);
+    }
+  };
+
+  // High-Throughput Stress-Test Generator (Injects & Screens 10,000 articles deterministically)
   const handleStressTest10k = async (count: number = 10000) => {
     setIsBatchScreening(true);
     setBatchProgress(0);
@@ -596,24 +730,19 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
       });
     }
 
-    // Now screen all 10,000 articles using high-speed vectorized engine
     const start = performance.now();
-    let finalSnapshot = {
-      processed: 0,
-      total: generatedBatch.length,
-      included: 0,
-      excluded: 0,
-      uncertain: 0,
-      speed: 0,
-      elapsedSeconds: 0,
-    };
-    const resultMap = await apiService.batchScreenArticles(
-      generatedBatch,
+    const batchRes = await apiService.runDeterministicBatchScreeningClient({
+      articles: generatedBatch,
       project,
-      (processed, total, stats) => {
+      mode: 'incremental',
+      targetStage: 'final_included',
+      batchSize: 250,
+      confirmReplaceDecisions: true,
+      onProgress: (processed, total, stats) => {
         const elapsed = (performance.now() - start) / 1000;
         const currentSpeed = Math.round(processed / Math.max(elapsed, 0.05));
-        finalSnapshot = {
+        setBatchProgress(Math.round((processed / total) * 100));
+        setBatchStats({
           processed,
           total,
           included: stats.included,
@@ -621,35 +750,29 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           uncertain: stats.uncertain,
           speed: currentSpeed,
           elapsedSeconds: parseFloat(elapsed.toFixed(1)),
-        };
-        setBatchProgress(Math.round((processed / total) * 100));
-        setBatchStats(finalSnapshot);
-      }
-    );
-
-    const screenedBatch = generatedBatch.map((art) => {
-      const res = resultMap.get(art.id);
-      if (res) {
-        return {
-          ...art,
-          projectId: project.id,
-          decision: res.decision,
-          decisionReason: res.decision === 'exclude' ? res.primaryReason : undefined,
-          screeningStage: res.decision === 'include' ? ('final_included' as const) : res.decision === 'exclude' ? ('excluded' as const) : ('full_text' as const),
-          aiSuggestedDecision: res.decision,
-          aiConfidence: res.confidenceScore,
-          aiReason: res.primaryReason,
-        };
-      }
-      return { ...art, projectId: project.id };
+        });
+      },
     });
 
-    onUpdateArticles([...subLibraryArticles, ...screenedBatch]);
+    const screenedBatch = batchRes.updatedArticles.map((art) => ({ ...art, projectId: project.id }));
+    const mergedAll = [...subLibraryArticles, ...screenedBatch];
+    const counts = computeAuthoritativePrismaCounts({ ...project, articles: mergedAll }, [batchRes.runRecord]);
+    const finalSnapshot = {
+      processed: counts.screenedRecords,
+      total: counts.uniqueRecords,
+      included: counts.includedStudies,
+      excluded: counts.excludedAtTitleAbstract + counts.excludedAtFullText + counts.reportsNotRetrieved,
+      uncertain: counts.uncertainRecords,
+      speed: Math.round(count / Math.max((performance.now() - start) / 1000, 0.05)),
+      elapsedSeconds: Number(((performance.now() - start) / 1000).toFixed(1)),
+    };
+    setBatchStats(finalSnapshot);
+    onUpdateArticles(mergedAll);
     if (onUpdateWorkbenchState) {
       const nowIso = new Date().toISOString();
       const record: BatchScreenerRunRecord = {
         ...finalSnapshot,
-        runId: `bench-${Date.now()}`,
+        runId: batchRes.runRecord.runId,
         completedAt: nowIso,
         mode: 'benchmark',
       };
@@ -659,6 +782,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           batchScreener: {
             lastStats: finalSnapshot,
             lastRunAt: nowIso,
+            runs: [batchRes.runRecord, ...(prevWs.batchScreener?.runs || [])].slice(0, 30),
             history: [record, ...(prevWs.batchScreener?.history || [])].slice(0, 15),
           },
         }),
@@ -840,11 +964,13 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         reason: reasonText,
         stage: stageFilter === 'starred' ? 'Interesting / Starred' : 'Article Library',
       };
-      return {
-        ...a,
+      const manualUpdated = applyManualScreeningDecision(a, project, {
         decision: nextDecision,
         screeningStage: nextStage,
-        decisionReason: prismaStatus === 'excluded_archived' ? reasonText : a.decisionReason,
+        reason: reasonText,
+      });
+      return {
+        ...manualUpdated,
         prismaProtocolStatus: prismaStatus,
         reviewIterations: [...prevIterations, entry],
         lastReviewedIterationAt: nowIso,
@@ -1060,21 +1186,21 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   };
 
   const includedSubLibraryCount = useMemo(
-    () => subLibraryArticles.filter((a) => a.decision === 'include').length,
+    () => subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'include').length,
     [subLibraryArticles]
   );
 
   const excludedSubLibraryCount = useMemo(
-    () => subLibraryArticles.filter((a) => a.decision === 'exclude').length,
+    () => subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'exclude').length,
     [subLibraryArticles]
   );
 
   const handleSelectAllIncluded = () => {
-    setSelectedIds(new Set(subLibraryArticles.filter((a) => a.decision === 'include').map((a) => a.id)));
+    setSelectedIds(new Set(subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'include').map((a) => a.id)));
   };
 
   const handleSelectAllExcluded = () => {
-    setSelectedIds(new Set(subLibraryArticles.filter((a) => a.decision === 'exclude').map((a) => a.id)));
+    setSelectedIds(new Set(subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'exclude').map((a) => a.id)));
   };
 
   const handleClearSelection = () => {
@@ -1934,13 +2060,13 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
             {[
               { id: 'all', label: `All (${subLibraryArticles.length})` },
               { id: 'starred', label: `★ Starred (${subLibraryArticles.filter((a) => a.isStarred).length})` },
-              { id: 'unscreened', label: `Unscreened (${subLibraryArticles.filter((a) => a.decision === 'unscreened').length})` },
-              { id: 'include', label: `Included (${subLibraryArticles.filter((a) => a.decision === 'include').length})` },
-              { id: 'exclude', label: `Excluded (${subLibraryArticles.filter((a) => a.decision === 'exclude').length})` },
-              { id: 'uncertain', label: `Uncertain (${subLibraryArticles.filter((a) => a.decision === 'uncertain').length})` },
-              { id: 'prisma_included', label: `PRISMA Included (${subLibraryArticles.filter((a) => a.prismaProtocolStatus === 'included' || a.decision === 'include').length})` },
-              { id: 'prisma_excluded', label: `PRISMA Excluded Saved (${subLibraryArticles.filter((a) => a.prismaProtocolStatus === 'excluded_archived' || (a.decision === 'exclude' && !a.isDuplicate)).length})` },
-              { id: 'needs_iteration', label: `Review Iteration (${subLibraryArticles.filter((a) => a.prismaProtocolStatus === 'needs_iteration' || a.decision === 'uncertain' || (a.reviewIterations?.length || 0) > 0).length})` },
+              { id: 'unscreened', label: `Unscreened (${subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'unscreened').length})` },
+              { id: 'include', label: `Included (${subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'include').length})` },
+              { id: 'exclude', label: `Excluded (${subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'exclude').length})` },
+              { id: 'uncertain', label: `Uncertain (${subLibraryArticles.filter((a) => !a.isDuplicate && a.decision === 'uncertain').length})` },
+              { id: 'prisma_included', label: `PRISMA Included (${subLibraryArticles.filter((a) => !a.isDuplicate && (a.prismaProtocolStatus === 'included' || a.decision === 'include')).length})` },
+              { id: 'prisma_excluded', label: `PRISMA Excluded Saved (${subLibraryArticles.filter((a) => !a.isDuplicate && (a.prismaProtocolStatus === 'excluded_archived' || a.decision === 'exclude')).length})` },
+              { id: 'needs_iteration', label: `Review Iteration (${subLibraryArticles.filter((a) => !a.isDuplicate && (a.prismaProtocolStatus === 'needs_iteration' || a.decision === 'uncertain' || (a.reviewIterations?.length || 0) > 0)).length})` },
               { id: 'duplicate', label: `Duplicates (${subLibraryArticles.filter((a) => a.isDuplicate).length})` },
             ].map((st) => (
               <button
@@ -2855,24 +2981,32 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         </div>
       )}
 
-      {/* High-Throughput Batch Screener Modal (10,000+ articles in 15-60s) */}
+      {/* High-Throughput Deterministic Batch Screener & PRISMA Sync Modal */}
       {showBatchModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-xs p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-5xl w-full max-h-[92vh] overflow-y-auto p-6 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 rounded-xl bg-teal-500/20 text-teal-400">
                   <Zap className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-white text-base">Fast Batch Screener (High-Throughput Engine)</h3>
+                  <h3 className="font-bold text-white text-base">
+                    Fast Batch Screener (Deterministic High-Throughput Engine)
+                  </h3>
                   <p className="text-xs text-slate-400">
-                    Auto-saves results &amp; history; deleted online DB files stay excluded unless built back
+                    SHA-256 fingerprint-locked reproducibility · Manual override protection · Synchronized with PRISMA 2020
                   </p>
                 </div>
               </div>
               {!isBatchScreening && (
-                <button onClick={() => setShowBatchModal(false)} className="text-slate-400 hover:text-white text-lg cursor-pointer">
+                <button
+                  onClick={() => {
+                    setProposedReevaluations(null);
+                    setShowBatchModal(false);
+                  }}
+                  className="text-slate-400 hover:text-white text-lg cursor-pointer"
+                >
                   ✕
                 </button>
               )}
@@ -2887,17 +3021,21 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
               resetFieldsLabel="Reset Screening Decisions -> Unscreened"
               deleteModes={['excluded', 'uncertain', 'unscreened']}
               onResetModule={onResetWorkbenchModule}
-              onResetLocalView={() =>
+              onResetLocalView={() => {
+                setProposedReevaluations(null);
                 setBatchStats({
-                  processed: 0,
-                  total: 0,
-                  included: 0,
-                  excluded: 0,
-                  uncertain: 0,
+                  processed: authoritativeLiveCounts.screenedRecords,
+                  total: authoritativeLiveCounts.uniqueRecords,
+                  included: authoritativeLiveCounts.includedStudies,
+                  excluded:
+                    authoritativeLiveCounts.excludedAtTitleAbstract +
+                    authoritativeLiveCounts.excludedAtFullText +
+                    authoritativeLiveCounts.reportsNotRetrieved,
+                  uncertain: authoritativeLiveCounts.uncertainRecords,
                   speed: 0,
                   elapsedSeconds: 0,
-                })
-              }
+                });
+              }}
               onAddDataFiles={onDirectAddDataFiles}
               onOpenBulkImporter={() => {
                 setShowBatchModal(false);
@@ -2907,28 +3045,78 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
               onDeleteQaEntry={onDeleteQaEntry}
             />
 
-            <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs space-y-2.5">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-300">Target Systematic Review:</span>
-                <span className="text-indigo-400 font-mono text-[11px] truncate max-w-xs">{project.title}</span>
+            {batchActionBanner && (
+              <div
+                className={`px-3.5 py-2.5 rounded-xl border text-xs font-medium flex items-center justify-between gap-2 ${
+                  batchActionBanner.type === 'success'
+                    ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-200'
+                    : batchActionBanner.type === 'warning'
+                    ? 'bg-amber-950/40 border-amber-700/60 text-amber-200'
+                    : 'bg-rose-950/40 border-rose-700/60 text-rose-200'
+                }`}
+              >
+                <span>{batchActionBanner.text}</span>
+                <button
+                  type="button"
+                  onClick={() => setBatchActionBanner(null)}
+                  className="text-slate-400 hover:text-white cursor-pointer"
+                >
+                  ✕
+                </button>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-300">Active Articles in Article Library:</span>
-                <span className="text-white font-mono font-bold tabular-nums">{subLibraryArticles.length} records</span>
+            )}
+
+            {/* Mode B Confirmation Dialog when finalized decisions would change */}
+            {proposedReevaluations && proposedReevaluations.length > 0 && (
+              <div className="p-4 rounded-xl bg-amber-950/40 border border-amber-600/70 space-y-3 text-xs">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h4 className="font-bold text-amber-200 text-sm flex items-center gap-1.5">
+                      <AlertTriangle className="w-4 h-4 text-amber-400" />
+                      <span>
+                        Confirm New Evaluation (Mode B): {proposedReevaluations.length} Finalized Decision(s) Would Change
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-amber-100/80 mt-0.5">
+                      Existing finalized decisions and audit history are preserved until you explicitly confirm. Manual human overrides remain protected.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="max-h-40 overflow-y-auto border border-amber-800/50 rounded-lg bg-slate-950/80 divide-y divide-slate-800/70">
+                  {proposedReevaluations.slice(0, 25).map((item) => (
+                    <div key={item.recordId} className="px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-semibold text-white truncate">{item.title}</div>
+                        <div className="font-mono text-[10px] text-slate-400">{item.recordId}</div>
+                      </div>
+                      <div className="font-mono text-[11px] shrink-0">
+                        <span className="text-amber-300">{item.previousDecision}</span>
+                        <span className="mx-1.5 text-slate-500">→</span>
+                        <span className="text-emerald-300">{item.proposedDecision}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setProposedReevaluations(null)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold cursor-pointer"
+                  >
+                    Keep Existing Decisions
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExecuteBatchScreen(subLibraryArticles, 'full_library', true)}
+                    className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold cursor-pointer"
+                  >
+                    Confirm &amp; Apply New Evaluation Run
+                  </button>
+                </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-300">Unscreened Records Ready to Screen:</span>
-                <span className="text-amber-400 font-mono font-bold tabular-nums">
-                  {subLibraryArticles.filter((a) => a.decision === 'unscreened').length} records
-                </span>
-              </div>
-              <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
-                <span className="font-semibold text-slate-400">Deleted Online Archive (Excluded from Screener):</span>
-                <span className="text-amber-300 font-mono font-bold tabular-nums">
-                  {deletedOnlineCount} archived
-                </span>
-              </div>
-            </div>
+            )}
 
             {/* Progress Bar & Live Stats when screening */}
             {isBatchScreening && (
@@ -2936,7 +3124,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-bold text-teal-300 flex items-center gap-1.5">
                     <Zap className="w-4 h-4" />
-                    High-Throughput Batch Processing (Auto-Saving Checkpoints)...
+                    Deterministic Batch Processing (Locked Ordering + Checkpoints)...
                   </span>
                   <span className="font-mono text-white font-bold tabular-nums">{batchProgress}%</span>
                 </div>
@@ -2947,104 +3135,47 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                     style={{ width: `${batchProgress}%` }}
                   />
                 </div>
-
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 text-center text-[11px]">
-                  <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block">Processed</span>
-                    <span className="font-mono font-bold text-white tabular-nums">
-                      {batchStats.processed} / {batchStats.total}
-                    </span>
-                  </div>
-                  <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block">Processing Speed</span>
-                    <span className="font-mono font-bold text-teal-400 tabular-nums">~{batchStats.speed} art/sec</span>
-                  </div>
-                  <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block">Time Elapsed</span>
-                    <span className="font-mono font-bold text-amber-300 tabular-nums">{batchStats.elapsedSeconds}s</span>
-                  </div>
-                  <div className="bg-slate-900 p-2 rounded-lg border border-slate-800">
-                    <span className="text-slate-500 block">Decisions</span>
-                    <span className="font-mono font-bold text-emerald-400 tabular-nums">{batchStats.included} Inc</span>
-                  </div>
-                </div>
               </div>
             )}
 
-            {/* Summary card after completion (persisted across reloads via workbench_state.json) */}
-            {!isBatchScreening && batchStats.processed > 0 && (
-              <div className="p-4 bg-emerald-950/30 border border-emerald-800/60 rounded-xl text-xs space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2 text-emerald-400 font-bold">
-                  <span className="inline-flex items-center gap-1.5">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>
-                      Auto-Saved Batch Result · {batchStats.processed} processed in {batchStats.elapsedSeconds}s
-                    </span>
-                  </span>
-                  {savedBatchState?.lastRunAt && (
-                    <span className="text-[11px] font-mono text-emerald-300/80 tabular-nums">
-                      Saved {new Date(savedBatchState.lastRunAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
-                  )}
-                </div>
-                <div className="grid grid-cols-3 gap-2 pt-1 text-center">
-                  <div className="p-2 rounded bg-emerald-900/30 border border-emerald-800">
-                    <span className="text-slate-400 block text-[10px]">Included</span>
-                    <span className="font-bold text-emerald-300 font-mono text-sm tabular-nums">{batchStats.included}</span>
-                  </div>
-                  <div className="p-2 rounded bg-rose-900/30 border border-rose-800">
-                    <span className="text-slate-400 block text-[10px]">Excluded</span>
-                    <span className="font-bold text-rose-300 font-mono text-sm tabular-nums">{batchStats.excluded}</span>
-                  </div>
-                  <div className="p-2 rounded bg-amber-900/30 border border-amber-800">
-                    <span className="text-slate-400 block text-[10px]">Uncertain / Review</span>
-                    <span className="font-bold text-amber-300 font-mono text-sm tabular-nums">{batchStats.uncertain}</span>
-                  </div>
-                </div>
-              </div>
-            )}
+            {/* Screening Consistency & PRISMA 2020 Synchronization Dashboard */}
+            <ScreeningConsistencyPanel
+              project={project}
+              runs={serverRuns || savedBatchState?.runs}
+              serverReport={serverConsistencyReport}
+              onReconcile={handleReconcileScreening}
+              onSelectArticleForScreening={(artId) => {
+                setShowBatchModal(false);
+                onSelectArticleForScreening(artId);
+              }}
+              isBusy={isReconciling || isBatchScreening}
+            />
 
-            {/* Recent Auto-Saved Run History */}
-            {savedBatchState?.history && savedBatchState.history.length > 0 && (
-              <div className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2 text-[11px]">
-                <div className="flex items-center justify-between text-slate-300 font-semibold">
-                  <span className="inline-flex items-center gap-1.5">
-                    <History className="w-3.5 h-3.5 text-teal-400" />
-                    <span>Auto-Saved Batch Run Log ({savedBatchState.history.length})</span>
-                  </span>
-                </div>
-                <div className="max-h-28 overflow-y-auto space-y-1 pr-1">
-                  {savedBatchState.history.slice(0, 6).map((h) => (
-                    <div
-                      key={h.runId}
-                      className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-800/80 font-mono text-[10px] tabular-nums"
-                    >
-                      <span className="text-slate-300">
-                        {h.mode} · {h.processed}/{h.total} articles
-                      </span>
-                      <span className="text-slate-400">
-                        <span className="text-emerald-400">{h.included} Inc</span> /{' '}
-                        <span className="text-rose-400">{h.excluded} Exc</span> /{' '}
-                        <span className="text-amber-300">{h.uncertain} Unc</span> ·{' '}
-                        {new Date(h.completedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Actions */}
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2">
+            {/* Controls & Actions */}
+            <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 pt-2 border-t border-slate-800">
               <div className="flex flex-wrap items-center gap-2">
+                <label className="text-[11px] text-slate-400 inline-flex items-center gap-1.5">
+                  <span>Batch chunk size:</span>
+                  <select
+                    value={batchSizeSetting}
+                    disabled={isBatchScreening}
+                    onChange={(e) => setBatchSizeSetting(Number(e.target.value))}
+                    className="bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-white font-mono text-[11px]"
+                  >
+                    <option value={32}>32</option>
+                    <option value={64}>64</option>
+                    <option value={150}>150</option>
+                    <option value={256}>256</option>
+                  </select>
+                </label>
                 <button
                   type="button"
                   disabled={isBatchScreening}
                   onClick={() => handleStressTest10k(10000)}
                   className="px-3 py-2 text-xs font-semibold bg-indigo-600/80 hover:bg-indigo-600 text-white rounded-xl disabled:opacity-50 transition whitespace-nowrap shrink-0 cursor-pointer"
-                  title="Benchmark test: generate and screen 10,000 articles in 15-30 seconds"
+                  title="Benchmark test: generate and screen 10,000 articles deterministically"
                 >
-                  ⚡ Benchmark 10,000 Articles (15-30s)
+                  ⚡ Benchmark 10,000 Articles
                 </button>
                 <button
                   type="button"
@@ -3060,38 +3191,35 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                 <button
                   type="button"
                   disabled={isBatchScreening}
-                  onClick={() => setShowBatchModal(false)}
+                  onClick={() => {
+                    setProposedReevaluations(null);
+                    setShowBatchModal(false);
+                  }}
                   className="px-4 py-2 text-xs rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 whitespace-nowrap shrink-0 cursor-pointer"
                 >
                   Close
                 </button>
                 <button
                   type="button"
-                  disabled={
-                    isBatchScreening ||
-                    subLibraryArticles.filter((a) => a.decision === 'unscreened').length === 0
-                  }
-                  onClick={() =>
-                    handleExecuteBatchScreen(
-                      subLibraryArticles.filter((a) => a.decision === 'unscreened'),
-                      'unscreened_only'
-                    )
-                  }
+                  disabled={isBatchScreening || authoritativeLiveCounts.uniqueRecords === 0}
+                  onClick={() => handleExecuteBatchScreen(subLibraryArticles, 'unscreened_only', false)}
                   className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl shadow-md disabled:opacity-40 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                  title="Mode A: Reuses unchanged decisions deterministically and screens only pending or modified records"
                 >
                   <Zap className="w-3.5 h-3.5" />
                   <span>
-                    Screen Unscreened Only ({subLibraryArticles.filter((a) => a.decision === 'unscreened').length})
+                    Mode A: Resume / Incremental ({authoritativeLiveCounts.pendingRecords} Pending)
                   </span>
                 </button>
                 <button
                   type="button"
-                  disabled={isBatchScreening || subLibraryArticles.length === 0}
-                  onClick={() => handleExecuteBatchScreen(subLibraryArticles, 'full_library')}
+                  disabled={isBatchScreening || authoritativeLiveCounts.uniqueRecords === 0}
+                  onClick={() => handleExecuteBatchScreen(subLibraryArticles, 'full_library', false)}
                   className="px-5 py-2 text-xs font-bold bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white rounded-xl shadow-md disabled:opacity-50 transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                  title="Mode B: Creates a new evaluation run and previews diffs before replacing finalized decisions"
                 >
                   <Zap className="w-4 h-4" />
-                  <span>Batch Screen Library Now</span>
+                  <span>Mode B: New Evaluation / Re-screen</span>
                 </button>
               </div>
             </div>

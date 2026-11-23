@@ -274,12 +274,27 @@ export interface Article {
   priority?: 'low' | 'medium' | 'high';
   screeningStage: 'title_abstract' | 'full_text' | 'final_included' | 'excluded';
   decision: ScreeningDecision;
+  canonicalScreeningStatus?: CanonicalScreeningStatus;
   decisionReason?: string;
   reviewerNotes?: string;
   screeningNotes?: string;
   aiSuggestedDecision?: ScreeningDecision;
   aiConfidence?: number;
   aiReason?: string;
+  screeningRunId?: string;
+  protocolId?: string;
+  protocolVersion?: string;
+  modelIdentifier?: string;
+  promptVersion?: string;
+  decisionFingerprint?: string;
+  decisionTimestamp?: string;
+  reviewerStatus?: ScreeningReviewerStatus;
+  manualOverride?: boolean;
+  previousDecision?: ScreeningDecision | null;
+  matchedEligibilityCriteria?: string[];
+  violatedEligibilityCriteria?: string[];
+  decisionHistory?: ScreeningDecisionHistoryEntry[];
+  needsReevaluation?: boolean;
   evidenceCitations: PageCitation[];
   appraisalWorksheet?: AppraisalItem[];
   appraisalScore?: number; // count of Yes
@@ -904,6 +919,11 @@ export interface WorkbenchState {
     lastStats?: BatchScreenerStatsSnapshot | null;
     lastRunAt?: string;
     history?: BatchScreenerRunRecord[];
+    runs?: ScreeningRunRecord[];
+    activeCriteriaHash?: string;
+    activeProtocolVersion?: string;
+    lastConsistencyStatus?: ScreeningConsistencyStatus;
+    lastSyncAt?: string;
   };
   briefing?: BriefingStudioSavedState;
   proposal?: ProposalSavedState;
@@ -1567,3 +1587,201 @@ export interface ReconciliationOperationRecord {
   rolledBackAt?: string;
   notes: string[];
 }
+
+export type CanonicalScreeningStatus =
+  | 'Include'
+  | 'Exclude'
+  | 'Maybe / Uncertain'
+  | 'Pending'
+  | 'Full-text assessment required';
+
+export type ScreeningReviewerStatus =
+  | 'ai_pending_review'
+  | 'ai_finalized'
+  | 'human_verified'
+  | 'manual_override'
+  | 'needs_reevaluation'
+  | 'pending';
+
+export type ScreeningStageType = 'title_abstract' | 'full_text' | 'final_included' | 'excluded';
+
+export type ScreeningConsistencyStatus = 'Consistent' | 'Warning' | 'Inconsistent' | 'Pending';
+
+export interface ScreeningDecisionHistoryEntry {
+  id: string;
+  runId: string;
+  timestamp: string;
+  actor: 'deterministic_engine' | 'gemini_ai' | 'human_reviewer' | 'reconciler' | 'migration';
+  decision: ScreeningDecision;
+  canonicalStatus: CanonicalScreeningStatus;
+  screeningStage: ScreeningStageType;
+  reason: string;
+  confidenceScore: number;
+  manualOverride: boolean;
+  decisionFingerprint: string;
+  modelIdentifier: string;
+  promptVersion: string;
+  note?: string;
+}
+
+export interface ScreeningDecisionRecord {
+  record_id: string;
+  screening_run_id: string;
+  protocol_id: string;
+  protocol_version: string;
+  screening_stage: ScreeningStageType;
+  decision: ScreeningDecision;
+  canonical_status: CanonicalScreeningStatus;
+  confidence_score: number;
+  inclusion_reason: string;
+  exclusion_reason: string;
+  matched_eligibility_criteria: string[];
+  violated_eligibility_criteria?: string[];
+  model_identifier: string;
+  prompt_version: string;
+  decision_fingerprint: string;
+  decision_timestamp: string;
+  reviewer_status: ScreeningReviewerStatus;
+  manual_override: boolean;
+  previous_decision: ScreeningDecision | null;
+  decision_history: ScreeningDecisionHistoryEntry[];
+  needs_reevaluation?: boolean;
+}
+
+export interface ScreeningModelConfigSnapshot {
+  modelIdentifier: string;
+  promptVersion: string;
+  seed: number;
+  executionMode: 'deterministic_local' | 'hybrid_gemini_cached';
+  criteriaHash: string;
+  protocolVersion: string;
+}
+
+export interface ScreeningRunRecord {
+  runId: string;
+  datasetVersion: string;
+  protocolId: string;
+  protocolVersion: string;
+  criteriaHash: string;
+  screeningStage: ScreeningStageType;
+  mode: 'incremental' | 'rescreen' | 'benchmark' | 'migration';
+  batchSize: number;
+  modelConfig: ScreeningModelConfigSnapshot;
+  timestamp: string;
+  completedAt?: string;
+  status: 'running' | 'completed' | 'interrupted' | 'failed';
+  totalRecordsProcessed: number;
+  newRecordsScreened: number;
+  existingDecisionsReused: number;
+  modifiedRecordsRescreened: number;
+  manualOverridesPreserved: number;
+  includedCount: number;
+  excludedCount: number;
+  uncertainCount: number;
+  pendingCount: number;
+  failedCount: number;
+  elapsedSeconds?: number;
+  processingErrors: string[];
+  decisionSnapshots?: Record<
+    string,
+    {
+      decision: ScreeningDecision;
+      screeningStage: ScreeningStageType;
+      fingerprint: string;
+      manualOverride: boolean;
+    }
+  >;
+}
+
+export interface ProposedReevaluationItem {
+  recordId: string;
+  title: string;
+  previousDecision: ScreeningDecision;
+  proposedDecision: ScreeningDecision;
+  previousStage: ScreeningStageType;
+  proposedStage: ScreeningStageType;
+  previousReason: string;
+  proposedReason: string;
+  previousFingerprint: string;
+  newFingerprint: string;
+  manualOverride: boolean;
+  fingerprintChanged: boolean;
+}
+
+export type DiscrepancyCauseCode =
+  | 'duplicate_record_counted'
+  | 'unscreened_pending_record'
+  | 'mixed_screening_stage'
+  | 'manual_vs_ai_override'
+  | 'criteria_fingerprint_changed'
+  | 'batch_stats_vs_library_mismatch'
+  | 'missing_ledger_record'
+  | 'previous_run_drift'
+  | 'stage_decision_inconsistency'
+  | 'interrupted_run_partial_commit';
+
+export interface ScreeningDiscrepancyItem {
+  record_id: string;
+  title: string;
+  previous_decision: string;
+  current_decision: string;
+  prisma_decision: string;
+  decision_source: string;
+  screening_stage: string;
+  difference_reason: string;
+  discrepancy_code: DiscrepancyCauseCode;
+  recommended_resolution: string;
+  is_duplicate?: boolean;
+  fingerprint_changed?: boolean;
+  manual_override?: boolean;
+}
+
+export interface AuthoritativePrismaCounts {
+  totalRecords: number;
+  duplicatesExcluded: number;
+  uniqueRecords: number;
+  screenedRecords: number;
+  pendingRecords: number;
+  excludedAtTitleAbstract: number;
+  reportsSoughtForRetrieval: number;
+  reportsNotRetrieved: number;
+  reportsAssessedForEligibility: number;
+  excludedAtFullText: number;
+  includedStudies: number;
+  reportsOfIncludedStudies: number;
+  uncertainRecords: number;
+  manualOverridesCount: number;
+  reusedDecisionsCount: number;
+  modifiedFlaggedCount: number;
+  prismaEquationsValid: boolean;
+  equationChecks: Array<{
+    id: string;
+    label: string;
+    expected: number;
+    actual: number;
+    passed: boolean;
+    detail: string;
+  }>;
+}
+
+export interface ScreeningConsistencyReport {
+  consistencyStatus: ScreeningConsistencyStatus;
+  checkedAt: string;
+  protocolId: string;
+  protocolVersion: string;
+  criteriaHash: string;
+  datasetVersion: string;
+  lastRunId?: string;
+  lastRunMode?: string;
+  authoritativeCounts: AuthoritativePrismaCounts;
+  discrepancies: ScreeningDiscrepancyItem[];
+  summaryCauses: string[];
+  totalConflictingRecords: number;
+  moduleSyncStatus: Array<{
+    moduleId: string;
+    moduleLabel: string;
+    includedCount: number;
+    synced: boolean;
+  }>;
+}
+

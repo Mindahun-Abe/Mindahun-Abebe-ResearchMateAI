@@ -61,7 +61,7 @@ export const CloudSyncPanel: React.FC<CloudSyncPanelProps> = ({ project }) => {
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
-  const includedCount = (project.articles || []).filter((a) => a.decision === 'include').length;
+  const includedCount = (project.articles || []).filter((a) => !a.isDuplicate && a.decision === 'include').length;
   const totalCount = (project.articles || []).length;
 
   useEffect(() => {

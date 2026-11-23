@@ -293,6 +293,15 @@ export interface Article {
   prismaProtocolStatus?: 'included' | 'excluded_archived' | 'needs_iteration';
   reviewIterations?: ReviewIterationEntry[];
   lastReviewedIterationAt?: string;
+  databaseSourceRecords?: DatabaseIdentificationRecord[];
+  fullTextStatusDetails?: FullTextStatusDetails;
+  recoveryAuditTrail?: Array<{
+    id: string;
+    timestamp: string;
+    action: string;
+    details: string;
+    batchId?: string;
+  }>;
 }
 
 export interface ReviewIterationEntry {
@@ -470,7 +479,8 @@ export type WorkbenchModuleId =
   | 'quant_synthesis'
   | 'briefing'
   | 'proposal'
-  | 'export';
+  | 'export'
+  | 'recovery';
 
 export type QuantEffectMeasure = 'SMD' | 'MD' | 'OR' | 'RR' | 'COR' | 'PROP';
 export type QuantModelType = 'random' | 'fixed';
@@ -904,6 +914,12 @@ export interface WorkbenchState {
   moduleNotes?: Record<string, string>;
   moduleLastSavedAt?: Record<string, string>;
   qaRescans?: Partial<Record<WorkbenchModuleId, ModuleQaRescanRecord[]>>;
+  recovery?: {
+    lastBackupId?: string;
+    lastReconciliationId?: string;
+    lastReconciledAt?: string;
+    prismaHistoricalLog?: PrismaHistoricalLog;
+  };
 }
 
 export type ProtocolStatus =
@@ -1263,4 +1279,291 @@ export interface DeletedOnlineArticleRecord {
   deletionMode?: string;
   reviewerInterestSelected?: boolean;
   reviewerInterestNote?: string;
+}
+
+export type FullTextAvailabilityClassification =
+  | 'full_text_retrieved'
+  | 'pdf_attached_extraction_failed'
+  | 'abstract_only'
+  | 'full_text_not_retrieved'
+  | 'unmatched_document';
+
+export interface FullTextStatusDetails {
+  abstractAvailable: boolean;
+  pdfAttached: boolean;
+  pdfAccessible: boolean;
+  fullTextRetrieved: boolean;
+  pdfTextExtracted: boolean;
+  pdfTextExtractionFailed: boolean;
+  fullTextNotRetrieved: boolean;
+  classification: FullTextAvailabilityClassification;
+  classificationLabel: string;
+  verifiedAt?: string;
+  notes?: string;
+}
+
+export type DatabaseExportFormat =
+  | 'ris'
+  | 'bibtex'
+  | 'csv'
+  | 'tsv'
+  | 'xlsx'
+  | 'xls'
+  | 'endnote'
+  | 'nbib'
+  | 'ciw'
+  | 'xml'
+  | 'json'
+  | 'txt';
+
+export interface DatabaseIdentificationRecord {
+  id: string;
+  databaseName: string;
+  databaseVerified: boolean;
+  searchBatchId: string;
+  searchDate?: string;
+  exportFilename: string;
+  exportFormat: DatabaseExportFormat;
+  recordIdentifier?: string;
+  doi?: string;
+  title: string;
+  authors: string[];
+  year?: number;
+  journal: string;
+  volume?: string;
+  issue?: string;
+  pagesStr?: string;
+  publisher?: string;
+  abstract: string;
+  url?: string;
+  rawMetadata?: Record<string, unknown>;
+  importedAt: string;
+}
+
+export interface RecoveryStagingBatch {
+  batchId: string;
+  databaseName: string;
+  databaseVerified: boolean;
+  searchDate?: string;
+  exportFilename: string;
+  exportFormat: DatabaseExportFormat;
+  recordsCount: number;
+  importedAt: string;
+  records: DatabaseIdentificationRecord[];
+}
+
+export type RecoveryMatchTier =
+  | 'exact_doi'
+  | 'exact_normalized_title'
+  | 'title_first_author_year'
+  | 'fuzzy_title_manual'
+  | 'unmatched';
+
+export interface RecoveryCandidateMatch {
+  matchId: string;
+  stagedRecordId: string;
+  stagedBatchId: string;
+  databaseName: string;
+  stagedTitle: string;
+  stagedDoi?: string;
+  stagedAuthors: string[];
+  stagedYear?: number;
+  stagedJournal: string;
+  targetArticleId?: string;
+  targetArticleTitle?: string;
+  targetOriginalFilename?: string;
+  targetHasPdf?: boolean;
+  targetDecision?: ScreeningDecision;
+  matchTier: RecoveryMatchTier;
+  confidence: number;
+  requiresManualConfirmation: boolean;
+  reason: string;
+  isDuplicateAcrossImports?: boolean;
+  duplicateClusterKey?: string;
+}
+
+export interface ScannedDiskPdf {
+  storedFilename: string;
+  relativePath: string;
+  originalFilename: string;
+  fileHash: string;
+  fileSize: number;
+  linkedArticleId?: string;
+  extractedDoi?: string;
+  extractedTitle?: string;
+  extractedAuthors?: string[];
+  extractedYear?: number;
+  textExtractedOk: boolean;
+  textExtractionFailed: boolean;
+  extractedTextSample?: string;
+}
+
+export interface PdfReconciliationCandidate {
+  candidateId: string;
+  pdfRelativePath: string;
+  pdfStoredFilename: string;
+  pdfOriginalFilename: string;
+  pdfFileHash: string;
+  pdfFileSize: number;
+  targetArticleId?: string;
+  targetArticleTitle?: string;
+  targetHasExistingPdf?: boolean;
+  targetExistingPdfHash?: string;
+  targetExistingPdfFilename?: string;
+  matchMethod:
+    | 'already_linked'
+    | 'file_hash'
+    | 'pdf_doi'
+    | 'pdf_title_author_year'
+    | 'filename_fuzzy_manual'
+    | 'unmatched';
+  confidence: number;
+  requiresManualConfirmation: boolean;
+  wouldReplaceExistingPdf: boolean;
+  alreadyMatchingHash: boolean;
+  textExtractionFailed: boolean;
+  reason: string;
+}
+
+export interface UnmatchedPdfDocument {
+  relativePath: string;
+  storedFilename: string;
+  originalFilename: string;
+  fileHash: string;
+  fileSize: number;
+  extractedDoi?: string;
+  extractedTitle?: string;
+  textExtractionFailed: boolean;
+  classification: 'unmatched_document';
+  notes: string;
+}
+
+export interface FullTextClassificationTransition {
+  articleId: string;
+  title: string;
+  previousAccessStatus?: PaperAccessStatus;
+  previousHadAbstractOnlyFlag: boolean;
+  newStatusDetails: FullTextStatusDetails;
+  changed: boolean;
+  explanation: string;
+}
+
+export interface PrismaHistoricalLog {
+  sourceNote?: string;
+  lastVerifiedAt?: string;
+  verifiedByResearcher: boolean;
+  identifiedByDatabase?: Record<string, number>;
+  totalRecordsIdentified?: number | null;
+  duplicatesRemoved?: number | null;
+  removedOtherReasons?: number | null;
+  recordsScreened?: number | null;
+  recordsExcludedAtScreening?: number | null;
+  reportsSoughtForRetrieval?: number | null;
+  reportsNotRetrieved?: number | null;
+  reportsAssessedForEligibility?: number | null;
+  reportsExcludedAtEligibility?: number | null;
+  reportsExcludedReasons?: Record<string, number>;
+  studiesIncluded?: number | null;
+  reportsOfIncludedStudies?: number | null;
+}
+
+export interface PrismaConsistencyCheck {
+  id: string;
+  equationLabel: string;
+  expectedValue: number | null;
+  actualValue: number | null;
+  status: 'pass' | 'warning' | 'discrepancy' | 'unverified';
+  explanation: string;
+}
+
+export interface PrismaReconciliationReport {
+  generatedAt: string;
+  distinctionSummary: {
+    databaseIdentificationRecords: number;
+    uniqueDeduplicatedRecords: number;
+    reportsSoughtOrAssessed: number | null;
+    reportsIncluded: number;
+    studiesIncluded: number;
+    currentDiskPdfCount: number;
+  };
+  identifiedByDatabase: Record<string, number>;
+  identifiedByDatabaseVerified: boolean;
+  totalRecordsIdentified: number;
+  duplicatesRemoved: number;
+  removedOtherReasons: number | null;
+  recordsScreened: number | null;
+  recordsExcludedAtScreening: number | null;
+  reportsSoughtForRetrieval: number | null;
+  reportsNotRetrieved: number | null;
+  reportsAssessedForEligibility: number | null;
+  reportsExcludedAtEligibility: number | null;
+  reportsExcludedReasons: Record<string, number>;
+  studiesIncluded: number;
+  reportsOfIncludedStudies: number;
+  unverifiedGaps: string[];
+  consistencyChecks: PrismaConsistencyCheck[];
+}
+
+export interface RecoveryPreviewSummary {
+  generatedAt: string;
+  originalProjectRecordCount: number;
+  importedDatabaseRecordCount: number;
+  identifiedDuplicatesCount: number;
+  proposedArticleMatchesCount: number;
+  autoConfirmedMatchesCount: number;
+  manualConfirmationMatchesCount: number;
+  unmatchedDatabaseRecordsCount: number;
+  existingPdfsMatchedCount: number;
+  unmatchedPdfsCount: number;
+  articlesWithoutPdfsCount: number;
+  abstractOnlyBeforeCount: number;
+  projectedAbstractOnlyAfterCount: number;
+  pdfWithExtractionFailureFullTextCount: number;
+  screeningRecordsAffectedCount: number;
+  prismaStatisticsAffected: string[];
+  matches: RecoveryCandidateMatch[];
+  pdfMatches: PdfReconciliationCandidate[];
+  unmatchedPdfs: UnmatchedPdfDocument[];
+  fullTextTransitions: FullTextClassificationTransition[];
+  duplicateGroups: Array<{
+    clusterKey: string;
+    canonicalArticleId?: string;
+    canonicalTitle: string;
+    databases: string[];
+    stagedRecordIds: string[];
+    existingArticleIds: string[];
+  }>;
+  prismaPreview: PrismaReconciliationReport;
+}
+
+export interface ProjectBackupManifest {
+  backupId: string;
+  projectId: string;
+  projectTitle: string;
+  createdAt: string;
+  reason: string;
+  articlesCount: number;
+  diskPdfCount: number;
+  backupFolderPath: string;
+  pdfHashes: Array<{ storedFilename: string; originalFilename?: string; fileHash: string; fileSize: number }>;
+}
+
+export interface ReconciliationOperationRecord {
+  reconciliationId: string;
+  backupId: string;
+  appliedAt: string;
+  appliedBy: string;
+  approvedMatchesApplied: number;
+  manualMatchesApplied: number;
+  rejectedMatchesCount: number;
+  newUnmatchedRecordsAdded: number;
+  pdfLinksApplied: number;
+  pdfReplacementsAuthorized: number;
+  fullTextReclassificationsApplied: number;
+  abstractOnlyBefore: number;
+  abstractOnlyAfter: number;
+  duplicatesConsolidated: number;
+  screeningDecisionsPreserved: number;
+  rolledBackAt?: string;
+  notes: string[];
 }

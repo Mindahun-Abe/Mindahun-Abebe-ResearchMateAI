@@ -30,6 +30,7 @@ import {
   HardDriveDownload,
   Upload,
   Check,
+  ArchiveRestore,
 } from 'lucide-react';
 
 interface DashboardOverviewProps {
@@ -171,6 +172,14 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
       icon: GitFork,
       color: 'from-pink-600 to-rose-600',
       badge: 'PRISMA 2020',
+    },
+    {
+      id: 'recovery',
+      label: 'Project Recovery & PRISMA Reconciliation',
+      desc: 'Multi-DB provenance staging, PDF reconciliation, rollback & PRISMA historical recovery',
+      icon: ArchiveRestore,
+      color: 'from-teal-600 to-emerald-600',
+      badge: project.workbenchState?.recovery?.lastReconciledAt ? 'Reconciled' : 'Recovery',
     },
     {
       id: 'results',

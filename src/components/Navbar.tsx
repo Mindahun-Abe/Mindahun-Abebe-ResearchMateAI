@@ -34,6 +34,7 @@ import {
   RefreshCw,
   HardDriveDownload,
   Check,
+  ArchiveRestore,
 } from 'lucide-react';
 import { SyncStatus } from '../utils/syncEngine';
 import { PWAInstallButton } from './PWAInstallButton';
@@ -167,6 +168,13 @@ export const Navbar: React.FC<NavbarProps> = ({
       id: 'prisma',
       label: 'PRISMA 2020 Flow',
       icon: GitFork,
+    },
+    {
+      id: 'recovery',
+      label: 'Recovery & PRISMA',
+      icon: ArchiveRestore,
+      badge: 'Safe',
+      badgeColor: 'bg-teal-500/20 text-teal-300 border border-teal-500/30',
     },
     {
       id: 'results',

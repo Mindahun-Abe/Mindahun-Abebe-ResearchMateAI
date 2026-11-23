@@ -22,7 +22,15 @@ import {
   ProtocolVersionSnapshot,
   ProtocolVaultRevision,
   ProtocolVaultSnapshot,
+  PrismaHistoricalLog,
+  PrismaReconciliationReport,
+  ProjectBackupManifest,
+  ReconciliationOperationRecord,
+  RecoveryPreviewSummary,
+  RecoveryStagingBatch,
+  ScannedDiskPdf,
 } from '../types';
+import type { RecoveryApprovalPayload, RecoveryDeliverableBundle } from '../utils/recoveryEngine';
 import { getActiveFrameworkFieldEntries, getFrameworkDefinition } from '../utils/protocolFrameworks';
 import { assessGeographicEligibility } from '../utils/geographicSensing';
 import {
@@ -2158,5 +2166,270 @@ export const apiService = {
       throw new Error(err?.error || `Failed to activate protocol (${res.status})`);
     }
     return res.json();
+  },
+
+  // -------------------------------------------------------------
+  // Project Recovery, Multi-Database Provenance & PRISMA 2020 Reconciliation API
+  // -------------------------------------------------------------
+  async loadRecoveryState(projectId: string): Promise<{
+    success: boolean;
+    projectId: string;
+    stagingBatches: RecoveryStagingBatch[];
+    backups: ProjectBackupManifest[];
+    scannedPdfs: ScannedDiskPdf[];
+    historicalLog?: PrismaHistoricalLog;
+    auditLog: ReconciliationOperationRecord[];
+    preview: RecoveryPreviewSummary;
+    deliverables: RecoveryDeliverableBundle;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/state`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to load recovery state (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async createRecoveryBackup(
+    projectId: string,
+    reason = 'Manual pre-reconciliation project snapshot',
+    createdBy = 'Researcher'
+  ) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason, createdBy }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to create project backup (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      manifest: ProjectBackupManifest;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async rollbackRecoveryBackup(projectId: string, backupId: string, actor = 'Researcher') {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/rollback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backupId, actor }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Rollback failed (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      safetyBackup: ProjectBackupManifest;
+      restoredManifest: ProjectBackupManifest;
+      intactPdfFilesCount: number;
+      project: ReviewProject;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async stageRecoveryExport(params: {
+    projectId: string;
+    file?: File;
+    exportFilename?: string;
+    databaseName: string;
+    searchBatchId?: string;
+    searchDate?: string;
+    textContent?: string;
+    binaryBase64?: string;
+  }) {
+    const { projectId, file, databaseName, searchBatchId, searchDate } = params;
+    let exportFilename = params.exportFilename || file?.name || 'export.ris';
+    let textContent = params.textContent;
+    let binaryBase64 = params.binaryBase64;
+
+    if (file && !textContent && !binaryBase64) {
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      if (ext === 'xlsx' || ext === 'xls') {
+        const buf = await file.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        }
+        binaryBase64 = btoa(binary);
+      } else {
+        textContent = await file.text();
+      }
+    }
+
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/stage-export`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        exportFilename,
+        databaseName,
+        searchBatchId,
+        searchDate,
+        textContent,
+        binaryBase64,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to stage database export (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      batch: RecoveryStagingBatch;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async updateRecoveryStagedBatch(params: {
+    projectId: string;
+    batchId: string;
+    databaseName?: string;
+    searchBatchId?: string;
+    searchDate?: string;
+  }) {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(params.projectId)}/recovery/stage-batch/${encodeURIComponent(params.batchId)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          databaseName: params.databaseName,
+          searchBatchId: params.searchBatchId,
+          searchDate: params.searchDate,
+        }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to update staged batch (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      batch: RecoveryStagingBatch;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async deleteRecoveryStagedBatch(projectId: string, batchId: string) {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/recovery/stage-batch/${encodeURIComponent(batchId)}`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to remove staged batch (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      deletedBatchId: string;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async computeRecoveryPreview(projectId: string, historicalLog?: PrismaHistoricalLog) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ historicalLog }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to compute recovery preview (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      projectId: string;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async saveRecoveryPrismaLog(projectId: string, historicalLog: PrismaHistoricalLog) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/prisma-log`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ historicalLog }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to save PRISMA historical log (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      project: ReviewProject;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
+  },
+
+  async applyRecoveryReconciliation(projectId: string, approval: RecoveryApprovalPayload) {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/recovery/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(approval),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to apply recovery reconciliation (${res.status})`);
+    }
+    return res.json() as Promise<{
+      success: boolean;
+      backupManifest: ProjectBackupManifest;
+      operationRecord: ReconciliationOperationRecord;
+      project: ReviewProject;
+      prismaReport: PrismaReconciliationReport;
+      stagingBatches: RecoveryStagingBatch[];
+      backups: ProjectBackupManifest[];
+      scannedPdfs: ScannedDiskPdf[];
+      historicalLog?: PrismaHistoricalLog;
+      auditLog: ReconciliationOperationRecord[];
+      preview: RecoveryPreviewSummary;
+      deliverables: RecoveryDeliverableBundle;
+    }>;
   },
 };

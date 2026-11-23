@@ -58,6 +58,18 @@ import {
   saveOriginalPdfBuffer,
   verifyAndReadPdfForArticle,
 } from './src/server/pdfVaultService.ts';
+import {
+  applyServerReconciliation,
+  assembleProjectFromFolder,
+  createFullProjectBackup,
+  getFullRecoveryState,
+  readStagingBatches,
+  rollbackProjectFromBackup,
+  stageDatabaseExportOnServer,
+  updateStagedBatchVerification,
+  writePrismaHistoricalLog,
+  writeStagingBatches,
+} from './src/server/recoveryService.ts';
 
 dotenv.config();
 
@@ -1630,6 +1642,290 @@ app.post('/api/projects/:id/pdfs/export-zip', async (req: Request, res: Response
     return res.send(zipBuffer);
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Bulk PDF ZIP export failed' });
+  }
+});
+
+// -------------------------------------------------------------
+// Project Recovery, Multi-Database Provenance Restoration & PRISMA 2020 Reconciliation
+// -------------------------------------------------------------
+app.get('/api/projects/:id/recovery/state', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const project = assembleProjectFromFolder(folderPath);
+    const state = getFullRecoveryState({ folderPath, project });
+    return res.json({
+      success: true,
+      projectId,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to load recovery & PRISMA reconciliation state' });
+  }
+});
+
+app.post('/api/projects/:id/recovery/backup', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const { reason = 'Manual pre-reconciliation project snapshot', createdBy = 'Researcher' } = req.body || {};
+    const manifest = createFullProjectBackup({
+      folderPath,
+      projectId,
+      reason: String(reason),
+      createdBy: String(createdBy),
+    });
+    const project = assembleProjectFromFolder(folderPath);
+    const state = getFullRecoveryState({ folderPath, project });
+    return res.json({
+      success: true,
+      manifest,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to create project backup snapshot' });
+  }
+});
+
+app.post('/api/projects/:id/recovery/rollback', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const { backupId, actor = 'Researcher' } = req.body || {};
+    if (!backupId || typeof backupId !== 'string') {
+      return res.status(400).json({ error: 'backupId is required to roll back' });
+    }
+    const result = rollbackProjectFromBackup({
+      folderPath,
+      projectId,
+      backupId: backupId.trim(),
+      actor: String(actor),
+    });
+    const project = assembleProjectFromFolder(folderPath);
+    updatePartitionMetaFile(folderPath, projectId, project.title, project.articles.length);
+    const state = getFullRecoveryState({ folderPath, project });
+    return res.json({
+      success: true,
+      safetyBackup: result.safetyBackup,
+      restoredManifest: result.restoredManifest,
+      intactPdfFilesCount: result.intactPdfFilesCount,
+      project,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'Failed to roll back project from backup' });
+  }
+});
+
+app.post('/api/projects/:id/recovery/stage-export', async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const { exportFilename, databaseName = '', searchBatchId, searchDate, textContent, binaryBase64 } = req.body || {};
+    if (!exportFilename || typeof exportFilename !== 'string') {
+      return res.status(400).json({ error: 'exportFilename is required to stage a database export.' });
+    }
+    if (!textContent && !binaryBase64) {
+      return res.status(400).json({ error: 'Export file payload (textContent or binaryBase64) is required.' });
+    }
+    const project = assembleProjectFromFolder(folderPath);
+    const { batch, state } = await stageDatabaseExportOnServer({
+      folderPath,
+      project,
+      exportFilename,
+      databaseName: String(databaseName || ''),
+      searchBatchId,
+      searchDate,
+      textContent,
+      binaryBase64,
+    });
+    return res.json({
+      success: true,
+      batch,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'Failed to parse and stage bibliographic database export' });
+  }
+});
+
+app.patch('/api/projects/:id/recovery/stage-batch/:batchId', (req: Request, res: Response) => {
+  try {
+    const { id: projectId, batchId } = req.params;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const { databaseName, searchBatchId, searchDate } = req.body || {};
+    const project = assembleProjectFromFolder(folderPath);
+    const { updatedBatch, state } = updateStagedBatchVerification({
+      folderPath,
+      project,
+      batchId,
+      databaseName,
+      searchBatchId,
+      searchDate,
+    });
+    return res.json({
+      success: true,
+      batch: updatedBatch,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'Failed to update staged batch provenance' });
+  }
+});
+
+app.delete('/api/projects/:id/recovery/stage-batch/:batchId', (req: Request, res: Response) => {
+  try {
+    const { id: projectId, batchId } = req.params;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const existing = readStagingBatches(folderPath);
+    const filtered = existing.filter((b) => b.batchId !== batchId);
+    writeStagingBatches(folderPath, filtered);
+    const project = assembleProjectFromFolder(folderPath);
+    const state = getFullRecoveryState({ folderPath, project });
+    return res.json({
+      success: true,
+      deletedBatchId: batchId,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to delete staged batch' });
+  }
+});
+
+app.post('/api/projects/:id/recovery/preview', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const { historicalLog } = req.body || {};
+    const project = assembleProjectFromFolder(folderPath);
+    const state = getFullRecoveryState({
+      folderPath,
+      project,
+      overrideHistoricalLog: historicalLog,
+    });
+    return res.json({
+      success: true,
+      projectId,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to compute non-destructive recovery preview' });
+  }
+});
+
+app.post('/api/projects/:id/recovery/prisma-log', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const { historicalLog } = req.body || {};
+    if (!historicalLog || typeof historicalLog !== 'object') {
+      return res.status(400).json({ error: 'historicalLog object is required' });
+    }
+    const nextLog = {
+      verifiedByResearcher: true,
+      ...historicalLog,
+      lastVerifiedAt: new Date().toISOString(),
+    };
+    writePrismaHistoricalLog(folderPath, nextLog);
+
+    const wsPath = path.join(folderPath, 'workbench_state.json');
+    const existingWs = safeReadJsonSync<any>(wsPath) || {};
+    const nextWs = {
+      ...existingWs,
+      lastAutoSavedAt: new Date().toISOString(),
+      lastSavedModule: 'recovery',
+      recovery: {
+        ...(existingWs.recovery || {}),
+        prismaHistoricalLog: nextLog,
+      },
+    };
+    writeJsonAtomicSync(wsPath, nextWs);
+
+    const project = assembleProjectFromFolder(folderPath);
+    const state = getFullRecoveryState({ folderPath, project, overrideHistoricalLog: nextLog });
+    return res.json({
+      success: true,
+      project,
+      ...state,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to save confirmed PRISMA historical log' });
+  }
+});
+
+app.post('/api/projects/:id/recovery/apply', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const project = assembleProjectFromFolder(folderPath);
+    const approval = req.body || {};
+    const result = applyServerReconciliation({
+      folderPath,
+      project,
+      approval: {
+        approvedMatchIds: Array.isArray(approval.approvedMatchIds) ? approval.approvedMatchIds : [],
+        rejectedMatchIds: Array.isArray(approval.rejectedMatchIds) ? approval.rejectedMatchIds : [],
+        manualMatchAssignments: approval.manualMatchAssignments || approval.manualTargetArticleByMatchId || {},
+        addUnmatchedDatabaseRecords: Boolean(approval.addUnmatchedDatabaseRecords),
+        approvedPdfMatchIds: Array.isArray(approval.approvedPdfMatchIds)
+          ? approval.approvedPdfMatchIds
+          : Array.isArray(approval.approvedPdfCandidateIds)
+          ? approval.approvedPdfCandidateIds
+          : [],
+        rejectedPdfMatchIds: Array.isArray(approval.rejectedPdfMatchIds)
+          ? approval.rejectedPdfMatchIds
+          : Array.isArray(approval.rejectedPdfCandidateIds)
+          ? approval.rejectedPdfCandidateIds
+          : [],
+        allowReplaceExistingPdfIds: Array.isArray(approval.allowReplaceExistingPdfIds) ? approval.allowReplaceExistingPdfIds : [],
+        recalculateFullTextAvailability: approval.recalculateFullTextAvailability !== false,
+        prismaHistoricalLog: approval.prismaHistoricalLog,
+        appliedBy: String(approval.appliedBy || 'Researcher'),
+      },
+    });
+    updatePartitionMetaFile(
+      folderPath,
+      projectId,
+      result.updatedProject.title,
+      result.updatedProject.articles.length
+    );
+    return res.json({
+      success: true,
+      backupManifest: result.backupManifest,
+      operationRecord: result.operationRecord,
+      project: result.updatedProject,
+      prismaReport: result.prismaReport,
+      ...result.state,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'Failed to apply approved project recovery & reconciliation' });
   }
 });
 

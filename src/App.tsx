@@ -17,6 +17,7 @@ import { ProposalGenerator } from './components/ProposalGenerator';
 import { ExportReportModule } from './components/ExportReportModule';
 import { ProtocolBuilderWorkspace } from './components/ProtocolBuilderWorkspace';
 import { QuantitativeSynthesisWorkspace } from './components/QuantitativeSynthesisWorkspace';
+import { RecoveryReconciliationWorkspace } from './components/RecoveryReconciliationWorkspace';
 import { CrossrefLookupModal } from './components/CrossrefLookupModal';
 import { AddArticleModal } from './components/AddArticleModal';
 import { CreateReviewModal } from './components/CreateReviewModal';
@@ -2152,6 +2153,7 @@ export default function App() {
                       onUpdateArticle={handleUpdateArticle}
                       onUpdateProject={handleUpdateProject}
                       onOpenSynthesis={handleOpenQuantSynthesis}
+                      onOpenRecovery={() => setCurrentTab('recovery')}
                       autoSaveStatus={autoSaveStatus}
                       onResetWorkbenchModule={(params) =>
                         handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -2166,6 +2168,30 @@ export default function App() {
                         handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
                       }
                       onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                    />
+                  )}
+                  {currentTab === 'recovery' && (
+                    <RecoveryReconciliationWorkspace
+                      project={isolatedCurrentProject}
+                      onNavigateTab={setCurrentTab}
+                      autoSaveStatus={autoSaveStatus}
+                      onResetWorkbenchModule={(params) =>
+                        handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                      }
+                      onProjectReplaced={(updatedProj) => {
+                        const isoProj = {
+                          ...updatedProj,
+                          articles: (updatedProj.articles || []).map((a) => ({
+                            ...a,
+                            projectId: updatedProj.id,
+                          })),
+                        };
+                        setProjects((prev) => {
+                          const next = prev.map((p) => (p.id === isoProj.id ? isoProj : p));
+                          cacheProjectsOffline(next);
+                          return next;
+                        });
+                      }}
                     />
                   )}
                   {currentTab === 'results' && (
@@ -2626,6 +2652,7 @@ export default function App() {
                   onUpdateArticle={handleUpdateArticle}
                   onUpdateProject={handleUpdateProject}
                   onOpenSynthesis={handleOpenQuantSynthesis}
+                  onOpenRecovery={() => setCurrentTab('recovery')}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)
@@ -2640,6 +2667,30 @@ export default function App() {
                     handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
                   }
                   onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                />
+              )}
+              {currentTab === 'recovery' && (
+                <RecoveryReconciliationWorkspace
+                  project={isolatedCurrentProject}
+                  onNavigateTab={setCurrentTab}
+                  autoSaveStatus={autoSaveStatus}
+                  onResetWorkbenchModule={(params) =>
+                    handleResetWorkbenchModule(isolatedCurrentProject.id, params)
+                  }
+                  onProjectReplaced={(updatedProj) => {
+                    const isoProj = {
+                      ...updatedProj,
+                      articles: (updatedProj.articles || []).map((a) => ({
+                        ...a,
+                        projectId: updatedProj.id,
+                      })),
+                    };
+                    setProjects((prev) => {
+                      const next = prev.map((p) => (p.id === isoProj.id ? isoProj : p));
+                      cacheProjectsOffline(next);
+                      return next;
+                    });
+                  }}
                 />
               )}
 

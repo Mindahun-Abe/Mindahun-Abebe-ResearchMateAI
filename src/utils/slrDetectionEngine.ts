@@ -1107,14 +1107,27 @@ export function detectPrismaExclusionDiagnostics(
   );
 
   // --- 5. Not accessible papers (PRISMA 2020 Reports Sought vs Not Retrieved / Institution Confirmation) ---
-  const explicitInaccessible = /\b(not\s+accessible|inaccessible|paywall|behind\s+paywall|subscription\s+required|no\s+access|access\s+denied|unable\s+to\s+retrieve|full[- ]text\s+unavailable|cannot\s+retrieve|broken\s+link|not\s+retrievable|404\s+not\s+found)\b/i.test(`${reasonNotesLower} ${abstractLower} ${(article.accessNotes || '').toLowerCase()}`);
-  const statusNotAccessible = article.accessStatus === 'not_accessible';
+  const hasAccessibleDiskPdf = Boolean(
+    article.pdfStorage?.storage_status === 'stored_disk' ||
+      (article.file_path && article.pdfStorage?.storage_status !== 'missing_binary') ||
+      article.fullTextStatusDetails?.pdfAccessible ||
+      article.fullTextStatusDetails?.classification === 'pdf_attached_extraction_failed' ||
+      article.fullTextStatusDetails?.classification === 'full_text_retrieved'
+  );
+  const explicitInaccessible =
+    !hasAccessibleDiskPdf &&
+    /\b(not\s+accessible|inaccessible|paywall|behind\s+paywall|subscription\s+required|no\s+access|access\s+denied|unable\s+to\s+retrieve|full[- ]text\s+unavailable|cannot\s+retrieve|broken\s+link|not\s+retrievable|404\s+not\s+found)\b/i.test(
+      `${reasonNotesLower} ${abstractLower} ${(article.accessNotes || '').toLowerCase()}`
+    );
+  const statusNotAccessible = !hasAccessibleDiskPdf && article.accessStatus === 'not_accessible';
   const statusNeedsInstUnconfirmed =
+    !hasAccessibleDiskPdf &&
     article.accessStatus === 'needs_institution_confirmation' &&
     !article.institutionConfirmed &&
     !article.fullText?.trim() &&
     (!article.pages || article.pages.length === 0);
   const zeroContentAndLinks =
+    !hasAccessibleDiskPdf &&
     !article.fullText?.trim() &&
     (!article.pages || article.pages.length === 0) &&
     !article.abstract?.trim() &&
@@ -1127,7 +1140,11 @@ export function detectPrismaExclusionDiagnostics(
   const notAccRes = applyOverride(
     'not_accessible',
     notAccessibleDetected,
-    statusNotAccessible
+    hasAccessibleDiskPdf
+      ? article.fullTextStatusDetails?.pdfTextExtractionFailed
+        ? 'Accessible (PDF attached on disk; text extraction failed/unavailable)'
+        : 'Accessible (verified PDF binary stored on disk)'
+      : statusNotAccessible
       ? 'Recorded as Not Accessible / Reports Not Retrieved (PRISMA 2020 retrieval failure)'
       : statusNeedsInstUnconfirmed
       ? 'Requires institutional subscription confirmation to download full text (PRISMA 2020)'
@@ -1142,8 +1159,18 @@ export function detectPrismaExclusionDiagnostics(
       : 'Accessible (metadata / DOI / text available)',
     article.accessNotes ||
       (explicitInaccessible ? (article.decisionReason || article.screeningNotes || '') : '') ||
-      (article.pdfUrl || article.openAccessUrl || ''),
-    statusNotAccessible ? 98 : statusNeedsInstUnconfirmed ? 92 : explicitInaccessible ? 95 : zeroContentAndLinks ? 82 : 90
+      (article.pdfUrl || article.openAccessUrl || article.original_filename || ''),
+    hasAccessibleDiskPdf
+      ? 98
+      : statusNotAccessible
+      ? 98
+      : statusNeedsInstUnconfirmed
+      ? 92
+      : explicitInaccessible
+      ? 95
+      : zeroContentAndLinks
+      ? 82
+      : 90
   );
 
   // --- 6. Outside publication year ---
@@ -1182,28 +1209,43 @@ export function detectPrismaExclusionDiagnostics(
     numericOutYear ? 99 : explicitOutYear ? 95 : 98
   );
 
-  // --- 7. Abstract-only paper ---
+  // --- 7. Abstract-only paper (PDF w/ extraction failure MUST stay classified as full-text available) ---
+  const hasAccessibleFullTextPdf = Boolean(
+    hasAccessibleDiskPdf ||
+      article.accessStatus === 'downloadable' ||
+      Boolean(article.pdfUrl || article.openAccessUrl)
+  );
   const explicitAbstractOnly =
-    article.accessStatus === 'abstract_only' ||
-    /\b(abstract[- ]only|only\s+abstract\s+available|no\s+full[- ]?text|conference\s+abstract\s+only|short\s+abstract|meeting\s+abstract)\b/i.test(`${textSample} ${reasonNotesLower}`);
+    !hasAccessibleFullTextPdf &&
+    (article.accessStatus === 'abstract_only' ||
+      /\b(abstract[- ]only|only\s+abstract\s+available|no\s+full[- ]?text|conference\s+abstract\s+only|short\s+abstract|meeting\s+abstract)\b/i.test(
+        `${textSample} ${reasonNotesLower}`
+      ));
   const structuralAbstractOnly =
+    !hasAccessibleFullTextPdf &&
     Boolean(article.abstract && article.abstract.trim().length > 25) &&
     !article.fullText?.trim() &&
     (!article.pages || article.pages.length === 0) &&
-    !article.pdfUrl &&
-    !article.openAccessUrl &&
     article.decision !== 'include';
   const abstractOnlyDetected = explicitAbstractOnly || structuralAbstractOnly;
   const absOnlyRes = applyOverride(
     'abstract_only',
     abstractOnlyDetected,
-    explicitAbstractOnly
+    hasAccessibleDiskPdf && article.fullTextStatusDetails?.pdfTextExtractionFailed
+      ? 'Full-text PDF attached & accessible on disk (text extraction failed; NOT abstract-only)'
+      : explicitAbstractOnly
       ? 'Identified as an abstract-only record (no downloadable full paper)'
       : structuralAbstractOnly
       ? 'Only abstract text present (no full-text body, pages, or downloadable PDF attached)'
       : 'Full-text / downloadable PDF or page evidence present',
-    explicitAbstractOnly ? (article.accessNotes || article.decisionReason || article.journal || '') : structuralAbstractOnly ? 'Abstract present without fullText, pages, or OA PDF' : '',
-    explicitAbstractOnly ? 96 : structuralAbstractOnly ? 78 : 92
+    hasAccessibleDiskPdf
+      ? article.original_filename || article.file_path || ''
+      : explicitAbstractOnly
+      ? article.accessNotes || article.decisionReason || article.journal || ''
+      : structuralAbstractOnly
+      ? 'Abstract present without fullText, pages, or accessible PDF'
+      : '',
+    hasAccessibleDiskPdf ? 98 : explicitAbstractOnly ? 96 : structuralAbstractOnly ? 78 : 92
   );
 
   // --- 8. Lack of clear assessment to review title ---

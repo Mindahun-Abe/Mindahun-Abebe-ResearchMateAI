@@ -65,6 +65,7 @@ interface PrismaDiagramProps {
   ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
   onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
   onOpenBulkImporter?: () => void;
+  onOpenRecovery?: () => void;
 }
 
 export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
@@ -78,6 +79,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
   onRescanWithQueryQA,
   onDeleteQaEntry,
   onOpenBulkImporter,
+  onOpenRecovery,
 }) => {
   const [copiedText, setCopiedText] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -259,8 +261,17 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
 
         const isNotAccFlagged = diag.detectedCodes.includes('not_accessible');
         const isAbsOnlyFlagged = diag.detectedCodes.includes('abstract_only');
+        const hasVerifiedDiskPdf = Boolean(
+          art.pdfStorage?.storage_status === 'stored_disk' ||
+            (art.file_path && art.pdfStorage?.storage_status !== 'missing_binary') ||
+            art.fullTextStatusDetails?.pdfAccessible ||
+            art.fullTextStatusDetails?.classification === 'pdf_attached_extraction_failed' ||
+            art.fullTextStatusDetails?.classification === 'full_text_retrieved'
+        );
         if (art.institutionConfirmed) {
           retrievalInstitutionConfirmed++;
+          retrievalDownloadable++;
+        } else if (hasVerifiedDiskPdf) {
           retrievalDownloadable++;
         } else if (art.accessStatus === 'not_accessible' || isNotAccFlagged) {
           if (art.accessStatus === 'needs_institution_confirmation') {
@@ -633,6 +644,40 @@ Total included studies: n = ${liveCounts.includedCount}
           </div>
         );
       })()}
+      {project.workbenchState?.recovery?.prismaHistoricalLog && (
+        <div className="bg-slate-900 border border-teal-500/30 rounded-xl px-4 py-3 text-xs text-slate-200 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <span className="font-semibold text-teal-300">
+              Verified PRISMA Historical Log Linked
+            </span>
+            <span className="mx-2 text-slate-500">·</span>
+            <span className="font-mono tabular-nums text-slate-300">
+              Last Reconciled: {project.workbenchState.recovery.lastReconciledAt ? new Date(project.workbenchState.recovery.lastReconciledAt).toLocaleString() : 'Active'}
+            </span>
+            {(project.workbenchState.recovery.prismaHistoricalLog.verifiedByResearcher ||
+              project.workbenchState.recovery.prismaHistoricalLog.lastVerifiedAt) && (
+              <>
+                <span className="mx-2 text-slate-500">·</span>
+                <span className="text-emerald-300">
+                  Confirmed by Researcher
+                  {project.workbenchState.recovery.prismaHistoricalLog.lastVerifiedAt
+                    ? ` (${new Date(project.workbenchState.recovery.prismaHistoricalLog.lastVerifiedAt).toLocaleDateString()})`
+                    : ''}
+                </span>
+              </>
+            )}
+          </div>
+          {onOpenRecovery && (
+            <button
+              type="button"
+              onClick={onOpenRecovery}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-teal-300 font-semibold transition cursor-pointer"
+            >
+              Inspect Recovery &amp; PRISMA Reconciliation
+            </button>
+          )}
+        </div>
+      )}
       {/* Top Banner */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
         <div>
@@ -654,6 +699,16 @@ Total included studies: n = ${liveCounts.includedCount}
               <Check className="w-3.5 h-3.5" />
               <span>{statusMessage}</span>
             </span>
+          )}
+          {onOpenRecovery && (
+            <button
+              type="button"
+              onClick={onOpenRecovery}
+              className="px-3.5 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 border border-teal-500/40 text-teal-300 rounded-lg transition inline-flex items-center gap-1.5 shadow-sm cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Recover Provenance &amp; Reconcile PRISMA</span>
+            </button>
           )}
           <button
             onClick={downloadPrismaAuditCsv}

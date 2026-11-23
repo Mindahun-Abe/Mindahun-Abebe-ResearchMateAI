@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { apiService, CrossrefResult } from '../services/apiService';
 import { Search, Hash, CheckCircle2, AlertCircle, Plus, ExternalLink, BookOpen, Layers } from 'lucide-react';
 import { Article } from '../types';
+import { isPlaceholderVenue, sanitizeAuthorsList, validateArticleMetadata } from '../utils/citationFormatter';
 
 interface CrossrefLookupModalProps {
   isOpen: boolean;
@@ -67,13 +68,19 @@ export const CrossrefLookupModal: React.FC<CrossrefLookupModalProps> = ({
   };
 
   const handleAddRecord = (record: CrossrefResult) => {
+    const cleanAuthors = sanitizeAuthorsList(record.authors || []);
+    const cleanJournal = isPlaceholderVenue(record.journal) ? '' : record.journal || '';
     const article: Article = {
       id: 'art-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       doi: record.doi,
       title: record.title,
-      authors: record.authors && record.authors.length > 0 ? record.authors : ['Unknown Author'],
-      year: record.year || new Date().getFullYear(),
-      journal: record.journal || 'Academic Journal',
+      authors: cleanAuthors,
+      year: record.year || undefined,
+      journal: cleanJournal,
+      volume: record.volume || undefined,
+      issue: record.issue || undefined,
+      pagesStr: record.pages || undefined,
+      publisher: record.publisher || undefined,
       abstract: record.abstract || 'Abstract was not provided by Crossref metadata record.',
       sourceDatabase: targetDatabase,
       url: record.url || (record.doi ? `https://doi.org/${record.doi}` : ''),
@@ -84,6 +91,7 @@ export const CrossrefLookupModal: React.FC<CrossrefLookupModalProps> = ({
         { pageNumber: 1, content: `Title: ${record.title}\n\nAbstract:\n${record.abstract || 'No abstract text available.'}` }
       ]
     };
+    article.citationVerificationStatus = validateArticleMetadata(article).verificationStatus;
 
     onAddArticle(article);
     setAddedIds(new Set([...addedIds, record.doi || record.title]));

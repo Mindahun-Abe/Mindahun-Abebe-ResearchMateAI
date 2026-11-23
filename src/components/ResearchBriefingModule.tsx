@@ -40,7 +40,9 @@ import {
   formatBibTexEntries,
   formatInlineCitation,
   formatReferenceString,
+  normalizeValidDoi,
   RECOMMENDED_CITATION_STYLES,
+  validateArticleMetadata,
 } from '../utils/citationFormatter';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 
@@ -1143,8 +1145,12 @@ export const ResearchBriefingModule: React.FC<ResearchBriefingModuleProps> = ({
                 const isChecked = !excludedPaperIds.has(art.id);
                 const activeIdx = activeArticles.findIndex((a) => a.id === art.id);
                 const pdfTarget = art.pdfUrl || art.openAccessUrl;
+                const hasDiskPdf = art.pdfStorage?.storage_status === 'stored_disk' || Boolean(art.file_path);
                 const hasFullText = Boolean(art.fullText?.trim() || (art.pages && art.pages.length > 0));
-                const leadAuthor = art.authors?.[0] || 'Unknown Author';
+                const validation = validateArticleMetadata(art);
+                const cleanDoi = normalizeValidDoi(art.doi);
+                const leadAuthor = validation.sanitized.authors[0] || 'No author listed';
+                const originalName = art.original_filename || art.sourceFileName;
 
                 return (
                   <div
@@ -1176,12 +1182,24 @@ export const ResearchBriefingModule: React.FC<ResearchBriefingModuleProps> = ({
                           {leadAuthor} · {art.year || 'n.d.'} · {art.sourceDatabase || 'Library'}
                         </p>
                         <div className="flex flex-wrap items-center gap-2 pt-0.5 text-[11px]">
-                          <span className={hasFullText ? 'text-emerald-400 font-medium' : pdfTarget ? 'text-teal-400' : 'text-slate-500'}>
-                            {hasFullText ? 'Full Text Ready' : pdfTarget ? 'PDF Link Ready' : 'Abstract/Metadata'}
+                          <span className={hasFullText ? 'text-emerald-400 font-medium' : (hasDiskPdf || pdfTarget) ? 'text-teal-400' : 'text-slate-500'}>
+                            {hasFullText ? 'Full Text Ready' : hasDiskPdf ? 'Original PDF Stored' : pdfTarget ? 'PDF Link Ready' : 'Abstract/Metadata'}
                           </span>
-                          {pdfTarget && (
+                          {hasDiskPdf ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                apiService.downloadArticleOriginalPdf(project.id, art.id, originalName || art.title).catch(() => {});
+                              }}
+                              className="ml-auto text-teal-300 hover:text-teal-200 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                              title={`Download original PDF: ${originalName || art.id}`}
+                            >
+                              <Download className="w-3 h-3" />
+                              <span>Original PDF</span>
+                            </button>
+                          ) : pdfTarget ? (
                             <a
-                              href={apiService.getProxyPdfDownloadUrl(pdfTarget, art.title)}
+                              href={apiService.getProxyPdfDownloadUrl(pdfTarget, originalName || art.title)}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="ml-auto text-indigo-400 hover:text-indigo-300 font-semibold inline-flex items-center gap-1"
@@ -1189,10 +1207,10 @@ export const ResearchBriefingModule: React.FC<ResearchBriefingModuleProps> = ({
                               <Download className="w-3 h-3" />
                               <span>PDF</span>
                             </a>
-                          )}
-                          {!pdfTarget && art.doi && (
+                          ) : null}
+                          {!hasDiskPdf && !pdfTarget && cleanDoi && (
                             <a
-                              href={`https://doi.org/${art.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '')}`}
+                              href={`https://doi.org/${cleanDoi}`}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="ml-auto text-slate-400 hover:text-white inline-flex items-center gap-1"

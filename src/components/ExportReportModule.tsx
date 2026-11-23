@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { jsPDF } from 'jspdf';
 import {
   Article,
   ExportConfigSavedState,
@@ -39,13 +40,20 @@ import {
   Share2,
   AlertTriangle,
   FileSpreadsheet,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   CITATION_STYLE_DEFINITIONS,
   CitationSourceType,
   CitationStyleId,
+  deduplicateArticlesForBibliography,
+  formatBibTexEntries,
   formatReferenceEntry,
+  formatRisEntries,
   getCitationStyleDefinition,
+  normalizeValidDoi,
+  validateArticleMetadata,
 } from '../utils/citationFormatter';
 import { CitationGuidePanel } from './CitationGuidePanel';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
@@ -181,6 +189,21 @@ export const ExportReportModule: React.FC<ExportReportModuleProps> = ({
     () => project.articles.filter((a) => a.decision === 'include'),
     [project.articles]
   );
+
+  // Deduplicated included bibliography entries + metadata verification counts
+  const dedupedIncludedArticles = useMemo(
+    () => deduplicateArticlesForBibliography(includedArticles),
+    [includedArticles]
+  );
+
+  const citationVerificationSummary = useMemo(() => {
+    const counts = { Verified: 0, 'Partially Verified': 0, 'Needs Manual Review': 0, Unresolved: 0 };
+    dedupedIncludedArticles.forEach((art) => {
+      const v = validateArticleMetadata(art);
+      counts[v.verificationStatus]++;
+    });
+    return counts;
+  }, [dedupedIncludedArticles]);
 
   // Included studies with protocol-aware deep detection
   const includedAnalyses = useMemo(() => {
@@ -387,10 +410,12 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
         const pType = analysis?.paperType.category || 'Original Research';
         const dbFound = analysis?.sourceProvenance.database || art.sourceDatabase || 'Other';
 
-        md += `### [${idx + 1}] ${art.title} (${art.year})\n`;
+        const validation = validateArticleMetadata(art);
+        const cleanDoi = normalizeValidDoi(art.doi);
+        md += `### [${idx + 1}] ${art.title} (${art.year || 'n.d.'})\n`;
         md += `- **Paper Type:** ${pType} (${analysis?.paperType.subType || 'Empirical'}) | **Database Found:** ${dbFound}\n`;
-        md += `- **Authors:** ${art.authors.length > 0 ? art.authors.join(', ') : 'Authors not reported in metadata'}\n`;
-        md += `- **Journal:** *${art.journal || 'Publication venue not specified'}* (${art.doi ? `DOI: [${art.doi}](https://doi.org/${art.doi})` : 'Digital Object Identifier (DOI) not provided'})\n`;
+        md += `- **Authors:** ${validation.sanitized.authors.length > 0 ? validation.sanitized.authors.join(', ') : 'No author listed'}\n`;
+        md += `- **Journal / Venue:** *${validation.sanitized.journalOrSource || 'Venue not specified'}*${cleanDoi ? ` (DOI: [${cleanDoi}](https://doi.org/${cleanDoi}))` : ''}\n`;
         md += `- **Extracted Evidence:** ${art.abstract || 'Abstract text not provided in imported record.'}\n`;
         md += `- **Turnaround Latency:** ${ext?.latency || 'Turnaround latency not reported'}\n`;
         md += `- **Resolution & Platform:** ${ext?.gsd || 'Spatial resolution / scale not reported'} | ${ext?.platform || 'Platform not specified in study'}\n`;
@@ -469,7 +494,9 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
         const pType = analysis?.paperType.category || 'Original Research';
         const dbFound = analysis?.sourceProvenance.database || art.sourceDatabase || 'Database source not specified';
         const alignmentScore = analysis?.codeDetailAnalysis.protocolAlignmentScore ?? ext?.protocolAlignmentScore ?? 0;
-        md += `| [${idx + 1}] | ${art.authors[0] || 'Author unknown'} et al. (${art.year || 'Year not specified'}) | ${pType} | ${dbFound} | ${ext?.platform || 'Platform not specified'} / ${ext?.sensor || 'Sensor not specified'} | ${ext?.gsd || 'Resolution not reported'} | ${ext?.algorithm || 'Analytical method not specified'} | ${ext?.latency || 'Turnaround latency not reported'} | ${[ext?.softwareTools, ext?.metrics].filter(Boolean).join('; ') || 'No software tools or quantitative metrics reported'} | ${alignmentScore}% | ${art.appraisalScore ?? '12'}/13 |\n`;
+        const val = validateArticleMetadata(art);
+        const leadAuthorDisplay = val.sanitized.authors[0] ? `${val.sanitized.authors[0]}${val.sanitized.authors.length > 1 ? ' et al.' : ''}` : 'No author listed';
+        md += `| [${idx + 1}] | ${leadAuthorDisplay} (${art.year || 'n.d.'}) | ${pType} | ${dbFound} | ${ext?.platform || 'Platform not specified'} / ${ext?.sensor || 'Sensor not specified'} | ${ext?.gsd || 'Resolution not reported'} | ${ext?.algorithm || 'Analytical method not specified'} | ${ext?.latency || 'Turnaround latency not reported'} | ${[ext?.softwareTools, ext?.metrics].filter(Boolean).join('; ') || 'No software tools or quantitative metrics reported'} | ${alignmentScore}% | ${art.appraisalScore ?? '12'}/13 |\n`;
       });
       md += `\n`;
     }
@@ -490,7 +517,7 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
     if (includeReferences) {
       md += `## References (${activeCitationStyle.name})\n\n`;
       md += `*Citation Style:* ${activeCitationStyle.name} · *In-Text Format:* ${activeCitationStyle.inTextExample}\n\n`;
-      includedArticles.forEach((art, idx) => {
+      dedupedIncludedArticles.forEach((art, idx) => {
         const formatted = formatReferenceEntry(art, idx, citationStyle, citationSourceType);
         md += `${formatted.prefix} ${formatted.citationText}\n\n`;
       });
@@ -692,9 +719,11 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
                const ext = analysis?.extracted || art.extractedData;
                const pType = analysis?.paperType.category || 'Original Research';
                const dbFound = analysis?.sourceProvenance.database || art.sourceDatabase || 'Other';
+               const val = validateArticleMetadata(art);
+               const cleanDoi = normalizeValidDoi(art.doi);
                return `
-             <h3>[${idx + 1}] ${art.title} (${art.year || 'Year not specified'}) <span class="badge">${pType}</span> <span class="badge">Source: ${dbFound}</span></h3>
-             <p><strong>Authors:</strong> ${art.authors.length > 0 ? art.authors.join(', ') : 'Authors not reported'} | <em>${art.journal || 'Publication venue not specified'}</em> (${art.doi ? `DOI: ${art.doi}` : 'Digital Object Identifier (DOI) not provided'})</p>
+             <h3>[${idx + 1}] ${art.title} (${art.year || 'n.d.'}) <span class="badge">${pType}</span> <span class="badge">Source: ${dbFound}</span></h3>
+             <p><strong>Authors:</strong> ${val.sanitized.authors.length > 0 ? val.sanitized.authors.join(', ') : 'No author listed'}${val.sanitized.journalOrSource ? ` | <em>${val.sanitized.journalOrSource}</em>` : ''}${cleanDoi ? ` (DOI: https://doi.org/${cleanDoi})` : ''}</p>
              <p>${art.abstract || 'Abstract text not provided in imported record.'}</p>
              <p><strong>Turnaround Latency:</strong> <span class="badge">${ext?.latency || 'Turnaround latency not reported'}</span> | <strong>Platform / Sensor:</strong> ${ext?.platform || 'Platform not specified'} (${ext?.sensor || 'Sensor not specified'})${ext?.softwareTools ? ` | <strong>Code / Tools:</strong> ${ext.softwareTools}` : ''}${ext?.metrics ? ` | <strong>Metrics:</strong> ${ext.metrics}` : ''}</p>
            `;
@@ -800,10 +829,11 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
                  const pType = analysis?.paperType.category || 'Original Research';
                  const dbFound = analysis?.sourceProvenance.database || art.sourceDatabase || 'Database source not specified';
                  const alignmentScore = analysis?.codeDetailAnalysis.protocolAlignmentScore ?? ext?.protocolAlignmentScore ?? 0;
+                 const rowVal = validateArticleMetadata(art);
                  return `
                <tr>
                  <td><strong>[${idx + 1}]</strong></td>
-                 <td>${art.title}<br/><small>${art.authors.slice(0, 2).join(', ') || 'Author unknown'} (${art.year || 'Year not specified'})</small></td>
+                 <td>${art.title}<br/><small>${rowVal.sanitized.authors.slice(0, 2).join(', ') || 'No author listed'} (${art.year || 'n.d.'})</small></td>
                  <td><strong>${pType}</strong><br/><small>${analysis?.paperType.subType || 'Empirical research'}</small></td>
                  <td>${dbFound}</td>
                  <td>${ext?.platform || 'Platform not specified'}<br/><small>${ext?.sensor || 'Sensor not specified'}</small></td>
@@ -847,7 +877,7 @@ Spatial susceptibility mapping identifies priority conservation zones. Recent ad
       includeReferences
         ? `<h2>References (${activeCitationStyle.name})</h2>
            <p><em>Citation Style:</em> ${activeCitationStyle.name} | <em>In-Text Example:</em> ${activeCitationStyle.inTextExample}</p>
-           ${includedArticles
+           ${dedupedIncludedArticles
              .map((art, idx) => {
                const formatted = formatReferenceEntry(art, idx, citationStyle, citationSourceType);
                return `
@@ -915,19 +945,22 @@ KEY EMPIRICAL TAKEAWAYS
 SOURCE ATTRIBUTION & CITATION INDEX
 ================================================================================
 ${includedArticles
-  .map(
-    (art, idx) => `[Source ${idx + 1}]
+  .map((art, idx) => {
+    const v = validateArticleMetadata(art);
+    const cleanDoi = normalizeValidDoi(art.doi);
+    const authStr = v.sanitized.authors.length > 0 ? v.sanitized.authors.join(', ') : 'No author listed';
+    return `[Source ${idx + 1}]
 Title: ${art.title}
-Authors: ${art.authors.join(', ')} (${art.year})
-Venue: ${art.journal || 'Publication venue not specified'} | DOI: ${art.doi || 'Digital Object Identifier (DOI) not provided'}
+Authors: ${authStr} (${art.year || 'n.d.'})
+Venue: ${v.sanitized.journalOrSource || 'Venue not specified'}${cleanDoi ? ` | DOI: https://doi.org/${cleanDoi}` : ''}
 Platform/Sensor: ${art.extractedData?.platform || 'Platform not specified'} | ${art.extractedData?.sensor || 'Sensor not specified'}
 Turnaround Latency: ${art.extractedData?.latency || 'Turnaround latency not reported'}
 Grounded Quotes:
 ${(art.evidenceCitations || [])
   .map((c) => `  - Page ${c.pageNumber} (${c.section}): "${c.quote}"`)
   .join('\n') || '  - Direct empirical evidence from published text.'}
-`
-  )
+`;
+  })
   .join('\n--------------------------------------------------------------------------------\n')}
 
 ================================================================================
@@ -1001,56 +1034,78 @@ ${markdownContent}
     reader.readAsText(file);
   };
 
-  // Bulk RIS (.ris) Export for EndNote, Zotero, Mendeley
+  // Bulk RIS (.ris) Export via shared citation engine
   const downloadRisFile = () => {
-    const risEntries = includedArticles.map((art) => {
-      const lines = [
-        'TY  - JOUR',
-        `TI  - ${art.title}`,
-        ...art.authors.map((a) => `AU  - ${a}`),
-        `PY  - ${art.year}`,
-        `JO  - ${art.journal}`,
-        art.doi ? `DO  - ${art.doi}` : '',
-        art.url ? `UR  - ${art.url}` : '',
-        `AB  - ${art.abstract}`,
-        'ER  - ',
-      ].filter(Boolean);
-      return lines.join('\n');
-    }).join('\n\n');
-
+    const risEntries = formatRisEntries(dedupedIncludedArticles);
     const blob = new Blob([risEntries], { type: 'application/x-research-info-systems;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = `${project.id}-included-studies.ris`;
     link.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  // Bulk BibTeX (.bib) Export
+  // Bulk BibTeX (.bib) Export via shared citation engine
   const downloadBibTexFile = () => {
-    const bib = includedArticles
-      .map((a, idx) => {
-        const key = `${(a.authors[0] || 'Unknown').split(',')[0].replace(/\s+/g, '')}_${a.year || '2024'}_${idx + 1}`;
-        return `@article{${key},
-  title = {${a.title}},
-  author = {${a.authors.join(' and ')}},
-  journal = {${a.journal}},
-  year = {${a.year}},
-  doi = {${a.doi || ''}},
-  url = {${a.url || ''}},
-  abstract = {${a.abstract.replace(/[\n\r]+/g, ' ')}}
-}`;
-      })
-      .join('\n\n');
-
-    const blob = new Blob([bib], { type: 'text/plain;charset=utf-8' });
+    const bib = formatBibTexEntries(dedupedIncludedArticles);
+    const blob = new Blob([bib], { type: 'application/x-bibtex;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = `${project.id}-included-studies.bib`;
     link.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const copyReferencesList = () => {
+    const text = dedupedIncludedArticles
+      .map((art, idx) => {
+        const f = formatReferenceEntry(art, idx, citationStyle, citationSourceType);
+        return `${f.prefix ? `${f.prefix} ` : ''}${f.citationText}`.trim();
+      })
+      .join('\n\n');
+    navigator.clipboard.writeText(text);
+    setCopiedCitationKey('all-refs');
+    setTimeout(() => setCopiedCitationKey(null), 2000);
+  };
+
+  const downloadReferencesPdf = () => {
+    if (dedupedIncludedArticles.length === 0) return;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' });
+    const margin = 48;
+    const maxWidth = doc.internal.pageSize.getWidth() - margin * 2;
+    const pageHeight = doc.internal.pageSize.getHeight();
+    let y = margin;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.text(`References (${activeCitationStyle.name})`, margin, y);
+    y += 18;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.text(`${project.title || 'Systematic Review'} · ${dedupedIncludedArticles.length} Included Citations`, margin, y);
+    y += 20;
+
+    dedupedIncludedArticles.forEach((art, idx) => {
+      const f = formatReferenceEntry(art, idx, citationStyle, citationSourceType);
+      const safeLine = `${f.prefix ? `${f.prefix} ` : ''}${f.citationText}`
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/[\u2013\u2014]/g, '-');
+      const lines = doc.splitTextToSize(safeLine, maxWidth) as string[];
+      if (y + lines.length * 13 > pageHeight - margin) {
+        doc.addPage();
+        y = margin;
+      }
+      lines.forEach((line) => {
+        doc.text(line, margin, y);
+        y += 13;
+      });
+      y += 6;
+    });
+
+    doc.save(`${project.id}-references-${citationStyle}.pdf`);
   };
 
   const copyToClipboard = () => {
@@ -1817,13 +1872,14 @@ ${markdownContent}
                       const pType = analysis?.paperType.category || 'Original Research';
                       const dbFound = analysis?.sourceProvenance.database || art.sourceDatabase || 'Database source not specified';
                       const alignmentScore = analysis?.codeDetailAnalysis.protocolAlignmentScore ?? ext?.protocolAlignmentScore ?? 0;
+                      const rowVal = validateArticleMetadata(art);
                       return (
                         <tr key={art.id} className="align-top hover:bg-slate-900/40">
                           <td className="py-2.5 px-2.5 font-mono font-bold text-indigo-400">[{idx + 1}]</td>
                           <td className="py-2.5 px-2.5 min-w-[170px]">
                             <span className="font-bold text-white block line-clamp-2">{art.title}</span>
                             <span className="text-[10px] text-slate-400 block mt-0.5">
-                              {art.authors[0] || 'Author unknown'} ({art.year || 'Year not specified'}) ·{' '}
+                              {rowVal.sanitized.authors[0] || 'No author listed'} ({art.year || 'n.d.'}) ·{' '}
                               <span className={pType === 'Review' ? 'text-amber-300 font-semibold' : 'text-cyan-300 font-semibold'}>
                                 {pType}
                               </span>{' '}
@@ -1907,6 +1963,47 @@ ${markdownContent}
                   </select>
                   <button
                     type="button"
+                    onClick={copyReferencesList}
+                    disabled={dedupedIncludedArticles.length === 0}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-200 border border-slate-700 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    {copiedCitationKey === 'all-refs' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedCitationKey === 'all-refs' ? 'Copied' : 'Copy All'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadWordDoc}
+                    disabled={dedupedIncludedArticles.length === 0}
+                    className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600/35 text-[11px] text-blue-200 border border-blue-500/30 cursor-pointer"
+                  >
+                    Word
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadReferencesPdf}
+                    disabled={dedupedIncludedArticles.length === 0}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-600/20 hover:bg-rose-600/35 text-[11px] text-rose-200 border border-rose-500/30 cursor-pointer"
+                  >
+                    PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadRisFile}
+                    disabled={dedupedIncludedArticles.length === 0}
+                    className="px-2.5 py-1.5 rounded-lg bg-teal-600/20 hover:bg-teal-600/35 text-[11px] text-teal-200 border border-teal-500/30 cursor-pointer"
+                  >
+                    RIS
+                  </button>
+                  <button
+                    type="button"
+                    onClick={downloadBibTexFile}
+                    disabled={dedupedIncludedArticles.length === 0}
+                    className="px-2.5 py-1.5 rounded-lg bg-purple-600/20 hover:bg-purple-600/35 text-[11px] text-purple-200 border border-purple-500/30 cursor-pointer"
+                  >
+                    BibTeX
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setIncludeReferences(false)}
                     className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 border border-slate-700 cursor-pointer"
                     title="Hide optional References section from report"
@@ -1916,14 +2013,32 @@ ${markdownContent}
                 </div>
               </div>
 
+              {dedupedIncludedArticles.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 text-[10px]">
+                  <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                    Verified: {citationVerificationSummary.Verified}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold">
+                    Partially Verified: {citationVerificationSummary['Partially Verified']}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold">
+                    Needs Review: {citationVerificationSummary['Needs Manual Review']}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 font-semibold">
+                    Unresolved: {citationVerificationSummary.Unresolved}
+                  </span>
+                </div>
+              )}
+
               <div className="space-y-2.5 text-xs text-slate-300">
-                {includedArticles.length === 0 ? (
+                {dedupedIncludedArticles.length === 0 ? (
                   <p className="text-xs text-slate-400 italic">
                     No included studies yet. References will appear here once studies are marked as Included.
                   </p>
                 ) : (
-                  includedArticles.map((art, idx) => {
+                  dedupedIncludedArticles.map((art, idx) => {
                     const formatted = formatReferenceEntry(art, idx, citationStyle, citationSourceType);
+                    const validation = validateArticleMetadata(art);
                     const parenKey = `paren-${art.id}`;
                     const narrKey = `narr-${art.id}`;
                     return (
@@ -1946,6 +2061,22 @@ ${markdownContent}
                         <div className="flex flex-wrap items-center gap-2 pl-6 text-[10px] text-slate-400">
                           <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-300">
                             {formatted.sourceTypeLabel}
+                          </span>
+                          <span
+                            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border font-semibold ${
+                              validation.verificationStatus === 'Verified'
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                : validation.verificationStatus === 'Partially Verified'
+                                ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                                : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                            }`}
+                          >
+                            {validation.verificationStatus === 'Verified' ? (
+                              <ShieldCheck className="w-3 h-3" />
+                            ) : (
+                              <ShieldAlert className="w-3 h-3" />
+                            )}
+                            <span>{validation.verificationStatus}</span>
                           </span>
                           <button
                             type="button"

@@ -25,6 +25,11 @@ import {
 } from 'lucide-react';
 import { apiService } from '../services/apiService';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import {
+  deduplicateArticlesForBibliography,
+  formatReferenceEntry,
+  normalizeValidDoi,
+} from '../utils/citationFormatter';
 
 interface ProposalGeneratorProps {
   project: ReviewProject;
@@ -701,11 +706,10 @@ All included studies were evaluated using a 13-point critical appraisal workshee
 | **Phase 5** | Evidence synthesis, meta-analysis & comparative latency benchmarking | Month 5 | Synthesis manuscript draft |
 | **Phase 6** | Peer-review submission & open-source dataset release | Month 6 | Published systematic review article |`;
 
-  const section9 = includedArticles
-    .map(
-      (a, idx) =>
-        `[${idx + 1}] ${a.authors.join(', ')} (${a.year}). "${a.title}". *${a.journal}*. DOI: [${a.doi || 'N/A'}](https://doi.org/${a.doi || ''})`
-    )
+  const dedupedRefs = deduplicateArticlesForBibliography(includedArticles);
+
+  const section9 = dedupedRefs
+    .map((a, idx) => formatReferenceEntry(a, idx, 'apa7').citationText)
     .join('\n\n');
 
   return {
@@ -727,11 +731,11 @@ All included studies were evaluated using a 13-point critical appraisal workshee
       { number: 8, title: 'Work plan', markdownContent: section8 },
       { number: 9, title: 'References', markdownContent: section9 },
     ],
-    citationIndex: includedArticles.map((a, idx) => ({
+    citationIndex: dedupedRefs.map((a, idx) => ({
       number: idx + 1,
-      doi: a.doi || '',
-      citation: `${a.authors.join(', ')} (${a.year}). ${a.title}. ${a.journal}`,
-      keyFindings: a.abstract.slice(0, 200) + '...',
+      doi: normalizeValidDoi(a.doi) || '',
+      citation: formatReferenceEntry(a, idx, 'apa7').citationText,
+      keyFindings: (a.abstract || '').slice(0, 200) + ((a.abstract || '').length > 200 ? '...' : ''),
     })),
   };
 }

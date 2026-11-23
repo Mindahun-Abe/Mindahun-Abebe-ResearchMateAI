@@ -31,6 +31,11 @@ import {
 import { extractReadablePdfHints } from '../utils/abstractDisplay';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
+import {
+  isPlaceholderVenue,
+  sanitizeAuthorsList,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
 
 interface UploadedFileRecord {
   id: string;
@@ -42,8 +47,11 @@ interface UploadedFileRecord {
 interface AddArticleModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onAddArticle: (article: Article, targetProjectId?: string) => void;
-  onAddMultipleArticles?: (articles: Article[], options?: { keepOpen?: boolean; targetProjectId?: string }) => void;
+  onAddArticle: (article: Article, targetProjectId?: string, pdfFile?: File) => void;
+  onAddMultipleArticles?: (
+    articles: Article[],
+    options?: { keepOpen?: boolean; targetProjectId?: string; pdfFilesByArticleId?: Map<string, File> }
+  ) => void;
   onDeleteArticlesByIds?: (articleIds: string[], targetProjectId?: string) => Promise<void> | void;
   onClearFolderArticles?: (targetProjectId?: string) => Promise<void> | void;
   onRestoredDeletedArticles?: (
@@ -207,10 +215,12 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
   const [manualGsd, setManualGsd] = useState('');
   const [manualLatency, setManualLatency] = useState('');
   const [manualMetrics, setManualMetrics] = useState('');
+  const [manualPdfFile, setManualPdfFile] = useState<File | null>(null);
   const [pureManualMode, setPureManualMode] = useState(true); // Keep unscreened, do not auto-fill or auto-screen
   const [keepOpenAfterAdd, setKeepOpenAfterAdd] = useState(false);
   const [manualSuccessMsg, setManualSuccessMsg] = useState('');
   const [manualError, setManualError] = useState('');
+  const pendingPdfFilesRef = React.useRef<Map<string, File>>(new Map());
 
   if (!isOpen) return null;
 
@@ -316,15 +326,29 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         const chunkToCommit = [...pendingStreamChunk];
         pendingStreamChunk = [];
         streamedTotal += chunkToCommit.length;
-        onAddMultipleArticles(chunkToCommit, { keepOpen: true, targetProjectId: lockedProjectId });
+        const chunkPdfMap = new Map<string, File>();
+        for (const a of chunkToCommit) {
+          const f = pendingPdfFilesRef.current.get(a.id);
+          if (f) {
+            chunkPdfMap.set(a.id, f);
+            pendingPdfFilesRef.current.delete(a.id);
+          }
+        }
+        onAddMultipleArticles(chunkToCommit, {
+          keepOpen: true,
+          targetProjectId: lockedProjectId,
+          ...(chunkPdfMap.size > 0 ? { pdfFilesByArticleId: chunkPdfMap } : {}),
+        });
         setBulkProgress((prev) => ({ ...prev, streamedCount: streamedTotal }));
       }
     };
 
     const processSingleFile = async (file: File): Promise<Article[]> => {
+      const isPdfFile = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
       const baseMeta = {
         projectId: lockedProjectId,
         sourceFileName: file.name,
+        original_filename: file.name,
       };
 
       // 1. Direct bibliography / structured text files (.bib, .ris, .csv, .tsv, .txt, .json, .enw, .nbib, .ciw)
@@ -357,6 +381,16 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         snippetHint = hints.snippet;
       }
 
+      const buildPdfStorageStub = (): Article['pdfStorage'] | undefined =>
+        isPdfFile
+          ? {
+              original_filename: file.name,
+              file_size: file.size,
+              mime_type: file.type || 'application/pdf',
+              storage_status: 'missing_binary',
+            }
+          : undefined;
+
       // 3. Optional bounded web metadata enrichment (strict 3.5s timeout so queue NEVER hangs)
       if (enrichFromWeb) {
         try {
@@ -369,24 +403,35 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
             3500
           );
           if (enriched && enriched.title) {
-            return [
-              {
-                ...baseMeta,
-                id: makeUniqueId('art-file'),
-                title: enriched.title,
-                authors: enriched.authors || ['Author Unknown'],
-                year: enriched.year || new Date().getFullYear(),
-                journal: enriched.journal || 'Academic Publication',
-                doi: enriched.doi || doiHint || undefined,
-                abstract: enriched.abstract || snippetHint || `Extracted from local file: ${file.name}.`,
-                sourceDatabase: enriched.sourceDatabase || 'Manual',
-                url: enriched.url,
-                citationsCount: enriched.citationsCount,
-                screeningStage: 'title_abstract',
-                decision: 'unscreened',
-                evidenceCitations: [],
-              },
-            ];
+            const artId = makeUniqueId('art-file');
+            if (isPdfFile) {
+              pendingPdfFilesRef.current.set(artId, file);
+            }
+            const cleanAuthors = sanitizeAuthorsList(enriched.authors || []);
+            const cleanJournal = isPlaceholderVenue(enriched.journal) ? '' : enriched.journal || '';
+            const rec: Article = {
+              ...baseMeta,
+              id: artId,
+              title: enriched.title,
+              authors: cleanAuthors,
+              year: enriched.year || undefined,
+              journal: cleanJournal,
+              volume: enriched.volume || undefined,
+              issue: enriched.issue || undefined,
+              pagesStr: enriched.pagesStr || undefined,
+              publisher: enriched.publisher || undefined,
+              doi: enriched.doi || doiHint || undefined,
+              abstract: enriched.abstract || snippetHint || `Extracted from local file: ${file.name}.`,
+              sourceDatabase: enriched.sourceDatabase || 'Manual',
+              url: enriched.url,
+              citationsCount: enriched.citationsCount,
+              screeningStage: 'title_abstract',
+              decision: 'unscreened',
+              evidenceCitations: [],
+              ...(isPdfFile ? { pdfStorage: buildPdfStorageStub() } : {}),
+            };
+            rec.citationVerificationStatus = validateArticleMetadata(rec).verificationStatus;
+            return [rec];
           }
         } catch {
           // Proceed cleanly with local filename/content entry so NO file is ever dropped
@@ -403,25 +448,30 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
           .trim();
 
       const yearMatch = file.name.match(/\b(19\d{2}|20\d{2})\b/);
+      const localId = makeUniqueId('art-local');
+      if (isPdfFile) {
+        pendingPdfFilesRef.current.set(localId, file);
+      }
 
-      return [
-        {
-          ...baseMeta,
-          id: makeUniqueId('art-local'),
-          title: cleanTitle || file.name,
-          authors: ['Author pending sync'],
-          year: yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear(),
-          journal: 'Local Source File',
-          doi: doiHint || undefined,
-          abstract: snippetHint
-            ? `Imported local file (${file.name}). Content excerpt: ${snippetHint}`
-            : `Imported from local drive file: ${file.name}. Ready for eligibility screening.`,
-          sourceDatabase: 'Manual',
-          screeningStage: 'title_abstract',
-          decision: 'unscreened',
-          evidenceCitations: [],
-        },
-      ];
+      const localRec: Article = {
+        ...baseMeta,
+        id: localId,
+        title: cleanTitle || file.name,
+        authors: [],
+        year: yearMatch ? parseInt(yearMatch[1], 10) : undefined,
+        journal: '',
+        doi: doiHint || undefined,
+        abstract: snippetHint
+          ? `Imported local file (${file.name}). Content excerpt: ${snippetHint}`
+          : `Imported from local drive file: ${file.name}. Ready for eligibility screening.`,
+        sourceDatabase: 'Manual',
+        screeningStage: 'title_abstract',
+        decision: 'unscreened',
+        evidenceCitations: [],
+        ...(isPdfFile ? { pdfStorage: buildPdfStorageStub() } : {}),
+      };
+      localRec.citationVerificationStatus = validateArticleMetadata(localRec).verificationStatus;
+      return [localRec];
     };
 
     // Process in concurrent worker batches (concurrency 4) — runs as long as needed until 100% finished
@@ -616,14 +666,19 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
           );
 
           if (enriched && enriched.title) {
-            autoSynced.push({
+            const pastedRec: Article = {
               id: makeUniqueId('art-sync'),
               projectId: lockedProjectId,
               sourceFileName: line,
+              original_filename: line.toLowerCase().endsWith('.pdf') ? line : undefined,
               title: enriched.title,
-              authors: enriched.authors || ['Author Unknown'],
-              year: enriched.year || 2024,
-              journal: enriched.journal || 'Academic Publication',
+              authors: sanitizeAuthorsList(enriched.authors || []),
+              year: enriched.year || undefined,
+              journal: isPlaceholderVenue(enriched.journal) ? '' : enriched.journal || '',
+              volume: enriched.volume || undefined,
+              issue: enriched.issue || undefined,
+              pagesStr: enriched.pagesStr || undefined,
+              publisher: enriched.publisher || undefined,
               doi: enriched.doi || undefined,
               abstract: enriched.abstract || 'Synchronized from online repository.',
               sourceDatabase: enriched.sourceDatabase || 'Crossref',
@@ -632,7 +687,9 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
               screeningStage: 'title_abstract',
               decision: 'unscreened',
               evidenceCitations: [],
-            });
+            };
+            pastedRec.citationVerificationStatus = validateArticleMetadata(pastedRec).verificationStatus;
+            autoSynced.push(pastedRec);
             continue;
           }
         } catch {
@@ -645,20 +702,23 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         .replace(/[_-]+/g, ' ')
         .trim();
 
-      autoSynced.push({
+      const rawRec: Article = {
         id: makeUniqueId('art-raw'),
         projectId: lockedProjectId,
         sourceFileName: line,
+        original_filename: line.toLowerCase().endsWith('.pdf') ? line : undefined,
         title: clean || line,
-        authors: ['Author pending sync'],
-        year: 2024,
-        journal: 'Scientific Paper',
+        authors: [],
+        year: undefined,
+        journal: '',
         abstract: `Extracted from title/file name query: "${line}".`,
         sourceDatabase: 'Manual',
         screeningStage: 'title_abstract',
         decision: 'unscreened',
         evidenceCitations: [],
-      });
+      };
+      rawRec.citationVerificationStatus = validateArticleMetadata(rawRec).verificationStatus;
+      autoSynced.push(rawRec);
     }
 
     const screened = autoSynced.map((art) => applyAutoScreening(art, lockedProject));
@@ -710,14 +770,16 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         if (Array.isArray(parsed)) {
           for (const item of parsed) {
             if (item && item.title) {
+              const rawJ = item.journal || '';
               results.push({
                 id: item.id || makeUniqueId('art-json'),
                 projectId: project?.id,
                 sourceFileName,
+                original_filename: item.original_filename || sourceFileName,
                 title: item.title,
-                authors: Array.isArray(item.authors) ? item.authors : [item.authors || 'Unknown'],
-                year: Number(item.year) || new Date().getFullYear(),
-                journal: item.journal || 'Academic Publication',
+                authors: sanitizeAuthorsList(Array.isArray(item.authors) ? item.authors : item.authors ? [item.authors] : []),
+                year: item.year ? Number(item.year) : undefined,
+                journal: isPlaceholderVenue(rawJ) ? '' : rawJ,
                 doi: item.doi || undefined,
                 abstract: item.abstract || 'Imported via JSON dataset.',
                 sourceDatabase: item.sourceDatabase || 'Manual',
@@ -744,16 +806,17 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         const abstractMatch = entry.match(/abstract\s*=\s*[{"]([^}"]+)[}"]/i);
 
         if (titleMatch) {
-          const authorStr = authorMatch ? authorMatch[1] : 'Unknown Author';
-          const auths = authorStr.split(/\s+and\s+/i).map((a) => a.trim());
+          const auths = authorMatch ? sanitizeAuthorsList(authorMatch[1].split(/\s+and\s+/i).map((a) => a.trim())) : [];
+          const rawJ = journalMatch ? journalMatch[2].trim() : '';
           results.push({
             id: makeUniqueId('art-bib'),
             projectId: project?.id,
             sourceFileName,
+            original_filename: sourceFileName,
             title: titleMatch[1].replace(/[\n\r]+/g, ' ').trim(),
-            authors: auths.length > 0 ? auths : [authorStr],
-            year: yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear(),
-            journal: journalMatch ? journalMatch[2].trim() : 'Scientific Journal',
+            authors: auths,
+            year: yearMatch ? parseInt(yearMatch[1], 10) : undefined,
+            journal: isPlaceholderVenue(rawJ) ? '' : rawJ,
             doi: doiMatch ? doiMatch[1].trim() : undefined,
             abstract: abstractMatch ? abstractMatch[1].replace(/[\n\r]+/g, ' ').trim() : 'Abstract imported via BibTeX bibliography.',
             sourceDatabase: 'Manual',
@@ -773,7 +836,7 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         const lines = rec.split('\n');
         let t = '';
         const a: string[] = [];
-        let y = new Date().getFullYear();
+        let y: number | undefined;
         let j = '';
         let d = '';
         let ab = '';
@@ -796,10 +859,11 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
             id: makeUniqueId('art-ris'),
             projectId: project?.id,
             sourceFileName,
+            original_filename: sourceFileName,
             title: t,
-            authors: a.length > 0 ? a : ['Unknown Author'],
+            authors: sanitizeAuthorsList(a),
             year: y,
-            journal: j || 'Academic Publication',
+            journal: isPlaceholderVenue(j) ? '' : j,
             doi: d || undefined,
             abstract: ab || 'Abstract imported via RIS reference format.',
             sourceDatabase: 'Manual',
@@ -861,14 +925,16 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         const authorsRaw = authorIdx >= 0 ? parts[authorIdx] : '';
         const yearRaw = yearIdx >= 0 ? parts[yearIdx] : '';
         const parsedYear = parseInt((yearRaw || '').match(/\d{4}/)?.[0] || '', 10);
+        const rawCsvJournal = (journalIdx >= 0 && parts[journalIdx]) || '';
         results.push({
           id: makeUniqueId('art-csv'),
           projectId: project?.id,
           sourceFileName,
+          original_filename: sourceFileName,
           title: rawTitle,
-          authors: authorsRaw ? authorsRaw.split(/[;|]/).map((s) => s.trim()).filter(Boolean) : ['Author Unknown'],
-          year: !isNaN(parsedYear) ? parsedYear : new Date().getFullYear(),
-          journal: (journalIdx >= 0 && parts[journalIdx]) || 'Journal Article',
+          authors: authorsRaw ? sanitizeAuthorsList(authorsRaw.split(/[;|]/).map((s) => s.trim())) : [],
+          year: !isNaN(parsedYear) ? parsedYear : undefined,
+          journal: isPlaceholderVenue(rawCsvJournal) ? '' : rawCsvJournal,
           doi: (doiIdx >= 0 && parts[doiIdx]) || undefined,
           abstract: (abstractIdx >= 0 && parts[abstractIdx]) || 'Imported bibliographic record.',
           sourceDatabase: (dbIdx >= 0 && parts[dbIdx]) || 'Manual',
@@ -886,11 +952,22 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
   const handleImportResolvedBulk = () => {
     if (resolvedArticles.length === 0) return;
     const lockedProjectId = targetProject?.id;
+    const bulkPdfMap = new Map<string, File>();
+    for (const a of resolvedArticles) {
+      const f = pendingPdfFilesRef.current.get(a.id);
+      if (f) {
+        bulkPdfMap.set(a.id, f);
+        pendingPdfFilesRef.current.delete(a.id);
+      }
+    }
 
     if (onAddMultipleArticles) {
-      onAddMultipleArticles(resolvedArticles, { targetProjectId: lockedProjectId });
+      onAddMultipleArticles(resolvedArticles, {
+        targetProjectId: lockedProjectId,
+        ...(bulkPdfMap.size > 0 ? { pdfFilesByArticleId: bulkPdfMap } : {}),
+      });
     } else {
-      resolvedArticles.forEach((a) => onAddArticle(a, lockedProjectId));
+      resolvedArticles.forEach((a) => onAddArticle(a, lockedProjectId, bulkPdfMap.get(a.id)));
     }
     setResolvedArticles([]);
     onClose();
@@ -911,6 +988,7 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
     setManualGsd('');
     setManualLatency('');
     setManualMetrics('');
+    setManualPdfFile(null);
     setManualError('');
   };
 
@@ -928,15 +1006,31 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
       manualDatabase === 'Other' && manualCustomDatabase.trim()
         ? manualCustomDatabase.trim()
         : manualDatabase;
+    const cleanAuthors = manualAuthors.trim()
+      ? sanitizeAuthorsList(manualAuthors.split(/;|,/).map((s) => s.trim()))
+      : [];
+    const parsedYear = parseInt(manualYear.trim(), 10);
+    const cleanJournal = isPlaceholderVenue(manualJournal.trim()) ? '' : manualJournal.trim();
+
     const baseArt: Article = {
       id: makeUniqueId('art-manual'),
       projectId: lockedProjectId,
+      ...(manualPdfFile
+        ? {
+            sourceFileName: manualPdfFile.name,
+            original_filename: manualPdfFile.name,
+            pdfStorage: {
+              original_filename: manualPdfFile.name,
+              file_size: manualPdfFile.size,
+              mime_type: manualPdfFile.type || 'application/pdf',
+              storage_status: 'missing_binary',
+            },
+          }
+        : {}),
       title: manualTitle.trim(),
-      authors: manualAuthors.trim()
-        ? manualAuthors.split(/;|,/).map((s) => s.trim()).filter(Boolean)
-        : ['Author Unknown'],
-      year: parseInt(manualYear.trim()) || new Date().getFullYear(),
-      journal: manualJournal.trim() || 'Academic Publication',
+      authors: cleanAuthors,
+      year: !isNaN(parsedYear) ? parsedYear : undefined,
+      journal: cleanJournal,
       doi: manualDoi.trim() || undefined,
       abstract: manualAbstract.trim() || 'Manual research paper entry.',
       fullText: manualFullText.trim() || undefined,
@@ -958,10 +1052,11 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
       ...baseArt,
       paperCategory: pType.category,
       paperSubType: pType.subType,
+      citationVerificationStatus: validateArticleMetadata(baseArt).verificationStatus,
     };
 
     const finalArt = pureManualMode ? newArt : applyAutoScreening(newArt, lockedProject);
-    onAddArticle(finalArt, lockedProjectId);
+    onAddArticle(finalArt, lockedProjectId, manualPdfFile || undefined);
 
     if (keepOpenAfterAdd) {
       handleClearManual();
@@ -1752,6 +1847,37 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
                   className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-white placeholder:text-slate-500 focus:outline-none focus:border-indigo-500"
                 />
               )}
+            </div>
+
+            {/* Abstract & Optional Original PDF Attachment */}
+            <div className="p-3 bg-slate-950/70 rounded-2xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div>
+                <span className="text-slate-200 font-semibold block">Attach Original PDF File (Optional)</span>
+                <span className="text-[11px] text-slate-400">
+                  Preserves exact original filename and stores full PDF bytes for individual/ZIP export.
+                </span>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <label className="px-3 py-1.5 bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-700/60 text-indigo-300 rounded-xl text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5">
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>{manualPdfFile ? 'Change PDF' : 'Choose PDF'}</span>
+                  <input
+                    type="file"
+                    accept=".pdf,application/pdf"
+                    className="hidden"
+                    onChange={(e) => setManualPdfFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                {manualPdfFile && (
+                  <button
+                    type="button"
+                    onClick={() => setManualPdfFile(null)}
+                    className="text-rose-400 hover:text-rose-300 text-[11px] underline cursor-pointer"
+                  >
+                    Remove ({manualPdfFile.name})
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Abstract */}

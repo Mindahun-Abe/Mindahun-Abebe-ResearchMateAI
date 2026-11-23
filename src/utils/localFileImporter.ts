@@ -2,6 +2,11 @@ import { Article } from '../types';
 import { apiService } from '../services/apiService';
 import { classifyPaperType, detectArticleSourceDatabase } from './slrDetectionEngine';
 import { extractReadablePdfHints } from './abstractDisplay';
+import {
+  isPlaceholderVenue,
+  sanitizeAuthorsList,
+  validateArticleMetadata,
+} from './citationFormatter';
 
 const makeUniqueId = (prefix: string) => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -49,14 +54,23 @@ export function parseLocalBibliographyText(
       if (Array.isArray(parsed)) {
         for (const item of parsed) {
           if (item && item.title) {
+            const cleanedAuthors = sanitizeAuthorsList(
+              Array.isArray(item.authors) ? item.authors : item.authors ? [item.authors] : []
+            );
+            const cleanedJournal = isPlaceholderVenue(item.journal) ? '' : item.journal || '';
             results.push({
               id: item.id || makeUniqueId('art-json'),
               projectId,
               sourceFileName,
+              original_filename: item.original_filename || sourceFileName,
               title: item.title,
-              authors: Array.isArray(item.authors) ? item.authors : [item.authors || 'Unknown'],
-              year: Number(item.year) || new Date().getFullYear(),
-              journal: item.journal || 'Academic Publication',
+              authors: cleanedAuthors,
+              year: item.year ? Number(item.year) : undefined,
+              journal: cleanedJournal,
+              volume: item.volume || undefined,
+              issue: item.issue || undefined,
+              pagesStr: item.pagesStr || item.pages || undefined,
+              publisher: item.publisher || undefined,
               doi: item.doi || undefined,
               abstract: item.abstract || 'Imported via JSON dataset.',
               fullText: item.fullText,
@@ -92,16 +106,19 @@ export function parseLocalBibliographyText(
       const abstractMatch = entry.match(/abstract\s*=\s*[{"]([^}"]+)[}"]/i);
 
       if (titleMatch) {
-        const authorStr = authorMatch ? authorMatch[1] : 'Unknown Author';
-        const auths = authorStr.split(/\s+and\s+/i).map((a) => a.trim());
+        const auths = authorMatch
+          ? sanitizeAuthorsList(authorMatch[1].split(/\s+and\s+/i).map((a) => a.trim()))
+          : [];
+        const rawJ = journalMatch ? journalMatch[2].trim() : '';
         results.push({
           id: makeUniqueId('art-bib'),
           projectId,
           sourceFileName,
+          original_filename: sourceFileName,
           title: titleMatch[1].replace(/[\n\r]+/g, ' ').trim(),
-          authors: auths.length > 0 ? auths : [authorStr],
-          year: yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear(),
-          journal: journalMatch ? journalMatch[2].trim() : 'Scientific Journal',
+          authors: auths,
+          year: yearMatch ? parseInt(yearMatch[1], 10) : undefined,
+          journal: isPlaceholderVenue(rawJ) ? '' : rawJ,
           doi: doiMatch ? doiMatch[1].trim() : undefined,
           abstract: abstractMatch
             ? abstractMatch[1].replace(/[\n\r]+/g, ' ').trim()
@@ -143,14 +160,16 @@ export function parseLocalBibliographyText(
       }
 
       if (t) {
+        const cleanedAuthors = sanitizeAuthorsList(a);
         results.push({
           id: makeUniqueId('art-ris'),
           projectId,
           sourceFileName,
+          original_filename: sourceFileName,
           title: t,
-          authors: a.length > 0 ? a : ['Unknown Author'],
+          authors: cleanedAuthors,
           year: y,
-          journal: j || 'Academic Publication',
+          journal: isPlaceholderVenue(j) ? '' : j,
           doi: d || undefined,
           abstract: ab || 'Abstract imported via RIS reference format.',
           sourceDatabase: 'Manual',
@@ -207,14 +226,16 @@ export function parseLocalBibliographyText(
       const authorsRaw = authorIdx >= 0 ? parts[authorIdx] : '';
       const yearRaw = yearIdx >= 0 ? parts[yearIdx] : '';
       const parsedYear = parseInt((yearRaw || '').match(/\d{4}/)?.[0] || '', 10);
+      const rawJ = (journalIdx >= 0 && parts[journalIdx]) || '';
       results.push({
         id: makeUniqueId('art-csv'),
         projectId,
         sourceFileName,
+        original_filename: sourceFileName,
         title: rawTitle,
-        authors: authorsRaw ? authorsRaw.split(/[;|]/).map((s) => s.trim()).filter(Boolean) : ['Author Unknown'],
-        year: !isNaN(parsedYear) ? parsedYear : new Date().getFullYear(),
-        journal: (journalIdx >= 0 && parts[journalIdx]) || 'Journal Article',
+        authors: authorsRaw ? sanitizeAuthorsList(authorsRaw.split(/[;|]/).map((s) => s.trim())) : [],
+        year: !isNaN(parsedYear) ? parsedYear : undefined,
+        journal: isPlaceholderVenue(rawJ) ? '' : rawJ,
         doi: (doiIdx >= 0 && parts[doiIdx]) || undefined,
         abstract: (abstractIdx >= 0 && parts[abstractIdx]) || 'Imported bibliographic record.',
         sourceDatabase: (dbIdx >= 0 && parts[dbIdx]) || 'Manual',
@@ -258,19 +279,26 @@ async function extractTextHints(file: File): Promise<{ titleHint?: string; doiHi
   }
 }
 
-export async function parseLocalDataFilesToArticles(
+export interface LocalImportResult {
+  articles: Article[];
+  pdfFilesByArticleId: Map<string, File>;
+}
+
+export async function parseLocalDataFilesWithOriginals(
   files: FileList | File[],
   projectId: string,
   options?: { enrichFromWeb?: boolean }
-): Promise<Article[]> {
+): Promise<LocalImportResult> {
   const fileArr = Array.from(files || []);
   const enrichFromWeb = options?.enrichFromWeb ?? true;
   const collected: Article[] = [];
+  const pdfFilesByArticleId = new Map<string, File>();
 
   for (const file of fileArr) {
     const baseMeta = {
       projectId,
       sourceFileName: file.name,
+      original_filename: file.name,
     };
 
     if (file.name.match(/\.(bib|ris|csv|tsv|txt|json|enw|nbib|ciw|xml)$/i)) {
@@ -281,7 +309,7 @@ export async function parseLocalDataFilesToArticles(
           for (const item of parsed) {
             const pType = classifyPaperType(item);
             const resolvedDb = item.sourceDatabase || detectArticleSourceDatabase(item).database;
-            collected.push({
+            const stamped: Article = {
               ...item,
               ...baseMeta,
               sourceDatabase: resolvedDb || 'Manual',
@@ -289,7 +317,9 @@ export async function parseLocalDataFilesToArticles(
               paperSubType: item.paperSubType || pType.subType,
               decision: item.decision || 'unscreened',
               screeningStage: item.screeningStage || 'title_abstract',
-            });
+            };
+            stamped.citationVerificationStatus = validateArticleMetadata(stamped).verificationStatus;
+            collected.push(stamped);
           }
           continue;
         }
@@ -323,13 +353,19 @@ export async function parseLocalDataFilesToArticles(
           3500
         );
         if (enriched && enriched.title) {
+          const cleanAuth = sanitizeAuthorsList(enriched.authors || []);
+          const cleanJ = isPlaceholderVenue(enriched.journal) ? '' : enriched.journal || '';
           enrichedArticle = {
             ...baseMeta,
             id: makeUniqueId('art-file'),
             title: enriched.title,
-            authors: enriched.authors || ['Author Unknown'],
-            year: enriched.year || new Date().getFullYear(),
-            journal: enriched.journal || 'Academic Publication',
+            authors: cleanAuth,
+            year: enriched.year || undefined,
+            journal: cleanJ,
+            volume: enriched.volume || undefined,
+            issue: enriched.issue || undefined,
+            pagesStr: enriched.pagesStr || undefined,
+            publisher: enriched.publisher || undefined,
             doi: enriched.doi || doiHint || undefined,
             abstract: enriched.abstract || snippetHint || `Extracted from local file: ${file.name}.`,
             fullText: fullTextHint,
@@ -357,13 +393,13 @@ export async function parseLocalDataFilesToArticles(
         ...baseMeta,
         id: makeUniqueId('art-local'),
         title: cleanTitle || file.name,
-        authors: ['Author pending sync'],
-        year: yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear(),
-        journal: 'Local Source File',
+        authors: [],
+        year: yearMatch ? parseInt(yearMatch[1], 10) : undefined,
+        journal: '',
         doi: doiHint || undefined,
         abstract: snippetHint
           ? `Imported local file (${file.name}). Content excerpt: ${snippetHint}`
-          : `Imported from local drive file: ${file.name}. Ready for eligibility screening.`,
+          : `Imported from local drive file: ${file.name}. Metadata verification pending.`,
         fullText: fullTextHint,
         sourceDatabase: 'Manual',
         screeningStage: 'title_abstract',
@@ -373,12 +409,32 @@ export async function parseLocalDataFilesToArticles(
     }
 
     const pType = classifyPaperType(enrichedArticle);
-    collected.push({
+    const finalArt: Article = {
       ...enrichedArticle,
       paperCategory: pType.category,
       paperSubType: pType.subType,
-    });
+      citationVerificationStatus: validateArticleMetadata(enrichedArticle).verificationStatus,
+    };
+    if (lowerName.endsWith('.pdf')) {
+      pdfFilesByArticleId.set(finalArt.id, file);
+      finalArt.pdfStorage = {
+        original_filename: file.name,
+        mime_type: file.type || 'application/pdf',
+        file_size: file.size,
+        storage_status: 'missing_binary',
+      };
+    }
+    collected.push(finalArt);
   }
 
-  return collected;
+  return { articles: collected, pdfFilesByArticleId };
+}
+
+export async function parseLocalDataFilesToArticles(
+  files: FileList | File[],
+  projectId: string,
+  options?: { enrichFromWeb?: boolean }
+): Promise<Article[]> {
+  const { articles } = await parseLocalDataFilesWithOriginals(files, projectId, options);
+  return articles;
 }

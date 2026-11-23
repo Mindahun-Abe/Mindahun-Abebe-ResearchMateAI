@@ -48,7 +48,7 @@ import {
   evaluateArticleClient,
   mergeScreeningInsightsIntoExtractedData,
 } from './services/apiService';
-import { parseLocalDataFilesToArticles } from './utils/localFileImporter';
+import { parseLocalDataFilesWithOriginals } from './utils/localFileImporter';
 import {
   appendLocalProtocolRevision,
   computeProtocolFingerprint,
@@ -1137,7 +1137,78 @@ export default function App() {
     }
   };
 
-  const handleAddArticle = (newArt: Article, targetProjectId?: string) => {
+  const persistOriginalPdfFiles = async (
+    targetId: string,
+    pdfFilesByArticleId?: Map<string, File>
+  ) => {
+    if (!pdfFilesByArticleId || pdfFilesByArticleId.size === 0) return;
+    const entries = Array.from(pdfFilesByArticleId.entries());
+    const updatedMap = new Map<string, Article>();
+    const batchSize = 3;
+    for (let i = 0; i < entries.length; i += batchSize) {
+      const slice = entries.slice(i, i + batchSize);
+      await Promise.all(
+        slice.map(async ([artId, file]) => {
+          try {
+            const resp = await apiService.uploadArticleOriginalPdf(targetId, artId, file);
+            if (resp?.article) {
+              updatedMap.set(artId, resp.article);
+            }
+          } catch (err: any) {
+            console.warn(`Original PDF upload warning (${file.name}):`, err?.message || err);
+          }
+        })
+      );
+    }
+    if (updatedMap.size > 0) {
+      setProjects((prev) => {
+        const next = prev.map((p) =>
+          p.id !== targetId
+            ? p
+            : {
+                ...p,
+                articles: p.articles.map((a) => updatedMap.get(a.id) || a),
+              }
+        );
+        cacheProjectsOffline(next);
+        return next;
+      });
+    }
+  };
+
+  const handleAttachOriginalPdfToArticle = async (
+    articleId: string,
+    file: File,
+    targetProjectId?: string
+  ): Promise<Article | null> => {
+    const targetId = targetProjectId || isolatedCurrentProject?.id;
+    if (!targetId) return null;
+    const resp = await apiService.uploadArticleOriginalPdf(targetId, articleId, file);
+    if (resp?.article) {
+      const updated = resp.article;
+      setProjects((prev) => {
+        const next = prev.map((p) =>
+          p.id !== targetId
+            ? p
+            : {
+                ...p,
+                articles: p.articles.map((a) => (a.id === articleId ? { ...a, ...updated } : a)),
+              }
+        );
+        cacheProjectsOffline(next);
+        return next;
+      });
+      setAutoSaveStatus({
+        state: 'saved',
+        lastSavedAt: new Date().toISOString(),
+        label: `PDF Saved: ${file.name}`,
+      });
+      return updated;
+    }
+    return null;
+  };
+
+  const handleAddArticle = (newArt: Article, targetProjectId?: string, pdfFile?: File) => {
     const targetId = targetProjectId || newArt.projectId || isolatedCurrentProject?.id;
     if (!targetId) return;
     const isolatedArt: Article = { ...newArt, projectId: targetId };
@@ -1154,13 +1225,18 @@ export default function App() {
     }
     apiService
       .uploadArticlesChunk(targetId, [isolatedArt])
-      .then(() =>
+      .then(async () => {
+        if (pdfFile) {
+          const map = new Map<string, File>();
+          map.set(isolatedArt.id, pdfFile);
+          await persistOriginalPdfFiles(targetId, map);
+        }
         setAutoSaveStatus({
           state: 'saved',
           lastSavedAt: new Date().toISOString(),
           label: 'Paper Added',
-        })
-      )
+        });
+      })
       .catch((err) => console.warn('Article save warning:', err?.message));
   };
 
@@ -1168,7 +1244,7 @@ export default function App() {
   // Automatically detects & records cross-database duplicates for PRISMA 2020 reporting
   const handleAddMultipleArticles = (
     newArts: Article[],
-    options?: { keepOpen?: boolean; targetProjectId?: string }
+    options?: { keepOpen?: boolean; targetProjectId?: string; pdfFilesByArticleId?: Map<string, File> }
   ) => {
     if (!newArts || newArts.length === 0) return;
     const targetId =
@@ -1290,7 +1366,10 @@ export default function App() {
           newRecordsToInsert,
           newRecordsToInsert.map((a) => a.sourceFileName).filter(Boolean) as string[]
         )
-        .then((res) => {
+        .then(async (res) => {
+          if (options?.pdfFilesByArticleId && options.pdfFilesByArticleId.size > 0) {
+            await persistOriginalPdfFiles(targetId, options.pdfFilesByArticleId);
+          }
           setAutoSaveStatus({
             state: 'saved',
             lastSavedAt: new Date().toISOString(),
@@ -1318,7 +1397,7 @@ export default function App() {
     if (!targetProj) throw new Error('Target review folder not found');
 
     setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Importing Data Files' }));
-    const parsed = await parseLocalDataFilesToArticles(files, targetProjectId);
+    const { articles: parsed, pdfFilesByArticleId } = await parseLocalDataFilesWithOriginals(files, targetProjectId);
     if (parsed.length === 0) {
       setAutoSaveStatus((prev) => ({ ...prev, state: 'idle' }));
       return { addedCount: 0 };
@@ -1379,7 +1458,11 @@ export default function App() {
       );
     }
 
-    handleAddMultipleArticles(finalArticles, { targetProjectId, keepOpen: true });
+    handleAddMultipleArticles(finalArticles, {
+      targetProjectId,
+      keepOpen: true,
+      pdfFilesByArticleId,
+    });
 
     if (options?.rescanQuery?.trim()) {
       await new Promise((resolve) => setTimeout(resolve, 60));
@@ -1882,6 +1965,7 @@ export default function App() {
                       onDeleteQaEntry={(modId, recId) =>
                         handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
                       }
+                      onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                     />
                   )}
                   {currentTab === 'picoc' && (
@@ -1941,6 +2025,7 @@ export default function App() {
                       onDeleteQaEntry={(modId, recId) =>
                         handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
                       }
+                      onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                     />
                   )}
                   {currentTab === 'duplicates' && (
@@ -2011,6 +2096,7 @@ export default function App() {
                         handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
                       }
                       onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                      onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                     />
                   )}
                   {currentTab === 'extraction' && (
@@ -2104,6 +2190,7 @@ export default function App() {
                         handleDeleteQaRescanEntry(isolatedCurrentProject.id, modId, recId)
                       }
                       onOpenBulkImporter={() => handleOpenAddModal('bulk_local')}
+                      onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                     />
                   )}
                   {currentTab === 'briefing' && (
@@ -2328,6 +2415,7 @@ export default function App() {
                   onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                   onAddMultipleArticles={handleAddMultipleArticles}
+                  onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                   autoSaveStatus={autoSaveStatus}
                   onUpdateWorkbenchState={(updater, opts) =>
                     handleUpdateWorkbenchState(isolatedCurrentProject.id, updater, opts)
@@ -2387,6 +2475,7 @@ export default function App() {
                   onOpenAddModal={() => handleOpenAddModal('bulk_local')}
                   onOpenManualPaperModal={() => handleOpenAddModal('manual')}
                   onAddMultipleArticles={handleAddMultipleArticles}
+                  onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                   autoOpenBatchScreener={openBatchScreenerOnLibrary}
                   onBatchScreenerOpened={() => setOpenBatchScreenerOnLibrary(false)}
                   autoSaveStatus={autoSaveStatus}
@@ -2459,6 +2548,7 @@ export default function App() {
                   project={isolatedCurrentProject}
                   article={selectedArticle}
                   onUpdateArticle={handleUpdateArticle}
+                  onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                   onSelectNext={handleSelectNext}
                   onSelectPrev={handleSelectPrev}
                   hasPrev={hasPrev}
@@ -2561,6 +2651,7 @@ export default function App() {
                   onNavigateToProposal={() => setCurrentTab('proposal')}
                   onNavigateToSynthesis={handleOpenQuantSynthesis}
                   onSelectArticle={handleSelectArticleForScreening}
+                  onAttachOriginalPdf={handleAttachOriginalPdfToArticle}
                   autoSaveStatus={autoSaveStatus}
                   onResetWorkbenchModule={(params) =>
                     handleResetWorkbenchModule(isolatedCurrentProject.id, params)

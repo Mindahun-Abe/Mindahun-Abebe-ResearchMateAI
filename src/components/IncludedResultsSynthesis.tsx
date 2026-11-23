@@ -19,8 +19,19 @@ import {
   FileSpreadsheet,
   FileCode,
   FileDown,
+  Upload,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import { apiService } from '../services/apiService';
+import {
+  formatBibTexEntries,
+  formatReferenceEntry,
+  formatRisEntries,
+  normalizeValidDoi,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
 
 interface IncludedResultsSynthesisProps {
   project: ReviewProject;
@@ -29,6 +40,7 @@ interface IncludedResultsSynthesisProps {
   onNavigateToProposal?: () => void;
   onNavigateToSynthesis?: (mode: 'qualitative' | 'quantitative') => void;
   onSelectArticle?: (articleId: string) => void;
+  onAttachOriginalPdf?: (articleId: string, file: File, targetProjectId?: string) => Promise<Article | null>;
   autoSaveStatus?: AutoSaveStatusInfo;
   onResetWorkbenchModule?: (params: {
     target: WorkbenchModuleId;
@@ -96,6 +108,7 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
   onNavigateToProposal,
   onNavigateToSynthesis,
   onSelectArticle,
+  onAttachOriginalPdf,
   autoSaveStatus,
   onResetWorkbenchModule,
   onDirectAddDataFiles,
@@ -105,6 +118,7 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [downloadStatus, setDownloadStatus] = useState<string | null>(null);
+  const [busyPdfArticleId, setBusyPdfArticleId] = useState<string | null>(null);
 
   // All screened included studies
   const includedArticles = articles.filter((a) => a.decision === 'include');
@@ -122,7 +136,7 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
     const p = art.extractedData?.platform || 'UAV / Drone';
     platformsCount[p] = (platformsCount[p] || 0) + 1;
 
-    const y = art.year?.toString() || 'N/A';
+    const y = art.year?.toString() || 'n.d.';
     yearsCount[y] = (yearsCount[y] || 0) + 1;
 
     if (art.extractedData?.latencyReported || art.extractedData?.latency) {
@@ -145,7 +159,7 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
   };
 
   const handleCopyCitation = (art: Article) => {
-    const citation = `${art.authors?.join(', ')} (${art.year}). "${art.title}". ${art.journal}. ${art.doi ? `DOI: https://doi.org/${art.doi}` : ''}`;
+    const citation = formatReferenceEntry(art, 0, 'apa7').citationText;
     navigator.clipboard.writeText(citation);
     setCopiedId(art.id);
     setTimeout(() => setCopiedId(null), 2000);
@@ -260,9 +274,12 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
       const sourceDb = detectArticleSourceDatabase(art).database;
       ensureSpace(90);
 
+      const validation = validateArticleMetadata(art);
+      const cleanDoi = normalizeValidDoi(art.doi);
+      const authorsDisplay = validation.sanitized.authors.length > 0 ? validation.sanitized.authors.join(', ') : 'No author listed';
       writeWrapped(`[${idx + 1}] ${art.title}`, 10.5, 'bold', [15, 23, 42], 2);
       writeWrapped(
-        `${(art.authors || []).join(', ') || 'Unknown Authors'} (${art.year || 'N/A'}) — ${art.journal || 'N/A'} | Type: ${pType.category} (${pType.subType}) | Database: ${sourceDb}${art.doi ? ` | DOI: ${art.doi}` : ''}`,
+        `${authorsDisplay} (${art.year || 'n.d.'})${validation.sanitized.journalOrSource ? ` — ${validation.sanitized.journalOrSource}` : ''} | Type: ${pType.category} (${pType.subType}) | Database: ${sourceDb}${cleanDoi ? ` | DOI: https://doi.org/${cleanDoi}` : ''}`,
         8.5,
         'italic',
         [71, 85, 105],
@@ -528,10 +545,10 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
       .join('');
 
     const referencesHtml = includedArticles
-      .map(
-        (art, idx) =>
-          `<p style="margin:3pt 0;font-size:9.5pt;">[${idx + 1}] ${escapeHtml((art.authors || []).join(', '))} (${escapeHtml(art.year)}). ${escapeHtml(art.title)}. <em>${escapeHtml(art.journal)}</em>.${art.doi ? ` https://doi.org/${escapeHtml(art.doi)}` : ''}</p>`
-      )
+      .map((art, idx) => {
+        const formatted = formatReferenceEntry(art, idx, 'apa7');
+        return `<p style="margin:3pt 0;font-size:9.5pt;">[${idx + 1}] ${formatted.htmlText}</p>`;
+      })
       .join('');
 
     const docHtml = `<!DOCTYPE html>
@@ -605,34 +622,10 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
     );
   };
 
-  // 3. RIS Format (.ris) for Zotero / Mendeley / EndNote / Covidence
-  const buildRisEntry = (art: Article) => {
-    const lines: string[] = ['TY  - JOUR'];
-    lines.push(`TI  - ${art.title}`);
-    (art.authors || []).forEach((author) => {
-      if (author.trim()) lines.push(`AU  - ${author.trim()}`);
-    });
-    if (art.year) lines.push(`PY  - ${art.year}`);
-    if (art.journal) lines.push(`JO  - ${art.journal}`);
-    if (art.volume) lines.push(`VL  - ${art.volume}`);
-    if (art.issue) lines.push(`IS  - ${art.issue}`);
-    if (art.pagesStr) lines.push(`SP  - ${art.pagesStr}`);
-    if (art.doi) lines.push(`DO  - ${art.doi}`);
-    if (art.url || art.doi) lines.push(`UR  - ${art.url || `https://doi.org/${art.doi}`}`);
-    if (art.abstract) lines.push(`AB  - ${art.abstract.replace(/\r?\n/g, ' ')}`);
-    if (art.sourceDatabase) lines.push(`DB  - ${art.sourceDatabase}`);
-    if (art.extractedData?.sensor) lines.push(`KW  - ${art.extractedData.sensor}`);
-    if (art.extractedData?.platform) lines.push(`KW  - ${art.extractedData.platform}`);
-    if (art.reviewerNotes || art.decisionReason) {
-      lines.push(`N1  - Screening included note: ${(art.reviewerNotes || art.decisionReason || '').replace(/\r?\n/g, ' ')}`);
-    }
-    lines.push('ER  - ');
-    return lines.join('\r\n');
-  };
-
+  // 3. RIS Format (.ris) for Zotero / Mendeley / EndNote / Covidence via shared citation engine
   const handleExportRis = () => {
     if (includedArticles.length === 0) return;
-    const risContent = includedArticles.map(buildRisEntry).join('\r\n\r\n');
+    const risContent = formatRisEntries(includedArticles);
     const slug = getFileSlug(project);
     triggerDownload(
       risContent,
@@ -643,7 +636,7 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
   };
 
   const handleExportSingleRis = (art: Article, idx: number) => {
-    const risContent = buildRisEntry(art);
+    const risContent = formatRisEntries([art]);
     triggerDownload(
       risContent,
       `study-${idx + 1}-${art.id}.ris`,
@@ -652,36 +645,13 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
     );
   };
 
-  // 4. BibTeX Format (.bib)
+  // 4. BibTeX Format (.bib) via shared citation engine
   const handleExportBibTeX = () => {
     if (includedArticles.length === 0) return;
-    const entries = includedArticles.map((art, idx) => {
-      const firstAuthor = (art.authors?.[0] || 'study')
-        .split(/[\s,]+/)[0]
-        .toLowerCase()
-        .replace(/[^a-z0-9]/g, '') || 'study';
-      const citeKey = `${firstAuthor}${art.year || 'nd'}_${idx + 1}`;
-      const authorsStr = (art.authors || []).map(sanitizeBibValue).join(' and ');
-      const fields = [
-        `  title = {${sanitizeBibValue(art.title)}}`,
-        authorsStr ? `  author = {${authorsStr}}` : '',
-        art.year ? `  year = {${art.year}}` : '',
-        art.journal ? `  journal = {${sanitizeBibValue(art.journal)}}` : '',
-        art.volume ? `  volume = {${sanitizeBibValue(art.volume)}}` : '',
-        art.issue ? `  number = {${sanitizeBibValue(art.issue)}}` : '',
-        art.pagesStr ? `  pages = {${sanitizeBibValue(art.pagesStr)}}` : '',
-        art.doi ? `  doi = {${sanitizeBibValue(art.doi)}}` : '',
-        (art.url || art.doi) ? `  url = {${sanitizeBibValue(art.url || `https://doi.org/${art.doi}`)}}` : '',
-        art.abstract ? `  abstract = {${sanitizeBibValue(art.abstract)}}` : '',
-        art.sourceDatabase ? `  note = {Included in SLR; Source: ${sanitizeBibValue(art.sourceDatabase)}}` : '',
-      ].filter(Boolean);
-
-      return `@article{${citeKey},\n${fields.join(',\n')}\n}`;
-    });
-
+    const bibContent = formatBibTexEntries(includedArticles);
     const slug = getFileSlug(project);
     triggerDownload(
-      entries.join('\n\n'),
+      bibContent,
       `${slug}-screened-included-studies.bib`,
       'application/x-bibtex;charset=utf-8',
       `${includedArticles.length} screened included studies BibTeX`
@@ -1031,6 +1001,11 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
             const ext = art.extractedData || {};
             const pType = classifyPaperType(art);
             const sourceDb = detectArticleSourceDatabase(art).database;
+            const validation = validateArticleMetadata(art);
+            const cleanDoi = normalizeValidDoi(art.doi);
+            const originalFilename = art.original_filename || art.sourceFileName || '';
+            const hasDiskPdf = art.pdfStorage?.storage_status === 'stored_disk' || Boolean(art.file_path);
+            const hasRemotePdf = Boolean(art.pdfUrl || art.openAccessUrl);
             return (
               <div
                 key={art.id}
@@ -1052,41 +1027,145 @@ export const IncludedResultsSynthesis: React.FC<IncludedResultsSynthesisProps> =
                         {pType.category}
                       </span>
                       <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-950 text-slate-400 border border-slate-800">
-                        {sourceDb} · {art.year}
+                        {sourceDb} · {art.year || 'n.d.'}
                       </span>
-                      {art.doi && (
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border ${
+                          validation.verificationStatus === 'Verified'
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                            : validation.verificationStatus === 'Partially Verified'
+                            ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                            : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        }`}
+                      >
+                        {validation.verificationStatus === 'Verified' ? (
+                          <ShieldCheck className="w-3 h-3" />
+                        ) : (
+                          <ShieldAlert className="w-3 h-3" />
+                        )}
+                        <span>{validation.verificationStatus}</span>
+                      </span>
+                      {originalFilename && (
+                        <span
+                          className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-950 text-teal-300 border border-slate-700 max-w-[220px] truncate"
+                          title={`Original PDF Filename: ${originalFilename}`}
+                        >
+                          {originalFilename}
+                        </span>
+                      )}
+                      {cleanDoi && (
                         <a
-                          href={art.url || `https://doi.org/${art.doi}`}
+                          href={`https://doi.org/${cleanDoi}`}
                           target="_blank"
                           rel="noreferrer"
                           className="text-[10px] text-slate-500 hover:text-indigo-400 font-mono inline-flex items-center gap-1"
                         >
-                          <span>DOI: {art.doi}</span>
+                          <span>DOI: {cleanDoi}</span>
                           <ExternalLink className="w-2.5 h-2.5" />
                         </a>
                       )}
                     </div>
                     <h3 className="font-bold text-white text-sm leading-snug">{art.title}</h3>
                     <p className="text-xs text-slate-400">
-                      {art.authors?.join(', ')} — <span className="italic text-indigo-300">{art.journal}</span>
+                      {validation.sanitized.authors.length > 0
+                        ? validation.sanitized.authors.join(', ')
+                        : 'No author listed'}
+                      {validation.sanitized.journalOrSource ? (
+                        <>
+                          {' '}
+                          — <span className="italic text-indigo-300">{validation.sanitized.journalOrSource}</span>
+                        </>
+                      ) : null}
                     </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto shrink-0">
+                    {(hasDiskPdf || hasRemotePdf) && (
+                      <button
+                        type="button"
+                        disabled={busyPdfArticleId === art.id}
+                        onClick={async () => {
+                          setBusyPdfArticleId(art.id);
+                          try {
+                            if (hasDiskPdf) {
+                              const res = await apiService.downloadArticleOriginalPdf(
+                                project.id,
+                                art.id,
+                                originalFilename || art.title
+                              );
+                              setDownloadStatus(`Exported original PDF (${res.filename})`);
+                            } else {
+                              const target = art.pdfUrl || art.openAccessUrl || '';
+                              const url = apiService.getProxyPdfDownloadUrl(
+                                target,
+                                originalFilename || art.title
+                              );
+                              const link = document.createElement('a');
+                              link.href = url;
+                              link.download = originalFilename || `${art.id}.pdf`;
+                              document.body.appendChild(link);
+                              link.click();
+                              document.body.removeChild(link);
+                              setDownloadStatus(`Downloaded PDF (${originalFilename || art.title})`);
+                            }
+                            setTimeout(() => setDownloadStatus(null), 5000);
+                          } catch (err: any) {
+                            setDownloadStatus(err?.message || 'Original PDF download failed');
+                            setTimeout(() => setDownloadStatus(null), 5000);
+                          } finally {
+                            setBusyPdfArticleId(null);
+                          }
+                        }}
+                        title="Export original uploaded PDF bytes preserving exact original filename"
+                        className="px-2.5 py-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1 transition cursor-pointer whitespace-nowrap shrink-0"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>{hasDiskPdf ? 'Original PDF' : 'Get PDF'}</span>
+                      </button>
+                    )}
+                    {onAttachOriginalPdf && (
+                      <label className="px-2.5 py-1.5 bg-slate-800/90 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-medium inline-flex items-center gap-1 transition cursor-pointer border border-slate-700/80 whitespace-nowrap shrink-0">
+                        <Upload className="w-3.5 h-3.5 text-indigo-400" />
+                        <span>{hasDiskPdf ? 'Replace PDF' : 'Attach PDF'}</span>
+                        <input
+                          type="file"
+                          accept=".pdf,application/pdf"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            setBusyPdfArticleId(art.id);
+                            try {
+                              const updated = await onAttachOriginalPdf(art.id, file, project.id);
+                              if (updated) {
+                                setDownloadStatus(`Attached original PDF "${updated.original_filename || file.name}"`);
+                                setTimeout(() => setDownloadStatus(null), 5000);
+                              }
+                            } catch (err: any) {
+                              setDownloadStatus(err?.message || 'PDF upload failed');
+                              setTimeout(() => setDownloadStatus(null), 5000);
+                            } finally {
+                              setBusyPdfArticleId(null);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
                     <button
                       onClick={() => handleCopyCitation(art)}
                       className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium inline-flex items-center gap-1.5 transition cursor-pointer"
                     >
                       {copiedId === art.id ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                      <span>{copiedId === art.id ? 'Copied Citation' : 'Copy Citation'}</span>
+                      <span>{copiedId === art.id ? 'Copied APA 7' : 'Copy APA 7'}</span>
                     </button>
                     <button
                       onClick={() => handleExportSinglePdf(art, idx)}
-                      title="Download this screened study as a PDF summary"
+                      title="Download this screened study as a PDF evidence summary"
                       className="px-2.5 py-1.5 bg-slate-800/80 hover:bg-slate-700 text-rose-300 rounded-xl text-xs font-medium inline-flex items-center gap-1 transition cursor-pointer border border-slate-700/80"
                     >
                       <FileText className="w-3.5 h-3.5" />
-                      <span>.pdf</span>
+                      <span>Summary .pdf</span>
                     </button>
                     <button
                       onClick={() => handleExportSingleRis(art, idx)}

@@ -27,6 +27,11 @@ import {
   X,
   Globe,
   MapPin,
+  Download,
+  Upload,
+  Quote,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   apiService,
@@ -36,6 +41,11 @@ import {
 import { assessGeographicEligibility } from '../utils/geographicSensing';
 import { evaluateIntegratedConceptAlignment } from '../utils/conceptScreeningEngine';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
+import {
+  formatReferenceEntry,
+  normalizeValidDoi,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
 
 interface ScreeningWorkbenchProps {
   project: ReviewProject;
@@ -63,6 +73,7 @@ interface ScreeningWorkbenchProps {
   ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
   onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
   onOpenBulkImporter?: () => void;
+  onAttachOriginalPdf?: (articleId: string, file: File, targetProjectId?: string) => Promise<Article | null>;
 }
 
 export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
@@ -80,11 +91,14 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
   onRescanWithQueryQA,
   onDeleteQaEntry,
   onOpenBulkImporter,
+  onAttachOriginalPdf,
 }) => {
   const [activeView, setActiveView] = useState<'text' | 'pages' | 'appraisal'>('text');
   const [selectedPageNum, setSelectedPageNum] = useState<number>(1);
   const [isAiScreening, setIsAiScreening] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string>('');
+  const [isPdfBusy, setIsPdfBusy] = useState<boolean>(false);
+  const [pdfFeedback, setPdfFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Pinning evidence citation state
   const [pinQuote, setPinQuote] = useState<string>('');
@@ -109,6 +123,7 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
     }
     setSelectedReason(article.decisionReason || project.standardExclusionReasons[0] || '');
     setReviewerNotes(article.reviewerNotes || '');
+    setPdfFeedback(null);
   }, [article.id]);
 
   const handleNotesChangeAutoSave = (nextNotes: string) => {
@@ -242,6 +257,12 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
       ];
 
   const currentPage = pages.find((p) => p.pageNumber === selectedPageNum) || pages[0];
+  const cleanDoi = normalizeValidDoi(article.doi);
+  const validation = validateArticleMetadata(article);
+  const apaEntry = formatReferenceEntry(article, 0, 'apa7');
+  const originalFilename = article.original_filename || article.sourceFileName || '';
+  const hasDiskPdf = article.pdfStorage?.storage_status === 'stored_disk' || Boolean(article.file_path);
+  const hasRemotePdf = Boolean(article.pdfUrl || article.openAccessUrl);
 
   return (
     <div className="space-y-4">
@@ -301,71 +322,215 @@ export const ScreeningWorkbench: React.FC<ScreeningWorkbenchProps> = ({
       })()}
       {/* Top Navigation & Status Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onBackToLibrary}
-            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold inline-flex items-center gap-1.5 transition"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-            <span>Library</span>
-          </button>
-          <span className="text-slate-600">|</span>
-          <span className="text-slate-400 font-mono text-[11px] truncate max-w-[200px] sm:max-w-md">
-            DOI: {article.doi || 'No DOI assigned'}
-          </span>
-          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] font-mono">
-            {article.sourceDatabase}
-          </span>
-        </div>
-
-        {/* Prev / Next Article Buttons */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={onSelectPrev}
-            disabled={!hasPrev}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 transition"
-            title="Previous article"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <span className="text-slate-400 text-xs">Next / Prev</span>
-          <button
-            onClick={onSelectNext}
-            disabled={!hasNext}
-            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 transition"
-            title="Next article"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-
-      {/* Main Dual-Pane Review Interface */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Left Pane (7 Cols): Article Reader & PDF Page Evidence */}
-        <div className="lg:col-span-7 space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-3">
-            {/* Header */}
-            <div>
-              <h2 className="text-base sm:text-lg font-bold text-white leading-snug">
-                {article.title}
-              </h2>
-              <p className="text-xs text-slate-400 mt-1">
-                {article.authors.join(', ')} ({article.year}) ·{' '}
-                <span className="italic text-slate-300">{article.journal}</span>
-              </p>
-              {article.doi && (
-                <a
-                  href={`https://doi.org/${article.doi}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-1 text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1"
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={onBackToLibrary}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold inline-flex items-center gap-1.5 transition cursor-pointer"
                 >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>https://doi.org/{article.doi}</span>
-                </a>
-              )}
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Library</span>
+                </button>
+                <span className="text-slate-600">|</span>
+                <span className="text-slate-400 font-mono text-[11px] truncate max-w-[200px] sm:max-w-md">
+                  {cleanDoi ? `DOI: ${cleanDoi}` : 'No valid DOI'}
+                </span>
+                <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-400 text-[10px] font-mono">
+                  {article.sourceDatabase}
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border ${
+                    validation.verificationStatus === 'Verified'
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : validation.verificationStatus === 'Partially Verified'
+                      ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                      : validation.verificationStatus === 'Needs Manual Review'
+                      ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                      : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                  }`}
+                >
+                  {validation.verificationStatus === 'Verified' ? (
+                    <ShieldCheck className="w-3 h-3" />
+                  ) : (
+                    <ShieldAlert className="w-3 h-3" />
+                  )}
+                  <span>APA: {validation.verificationStatus}</span>
+                </span>
+                {originalFilename && (
+                  <span
+                    className="px-2 py-0.5 rounded bg-slate-950 border border-slate-700 text-teal-300 font-mono text-[10px] max-w-[240px] truncate"
+                    title={`Original PDF Filename: ${originalFilename}`}
+                  >
+                    PDF: {originalFilename}
+                  </span>
+                )}
+              </div>
+
+              {/* Original PDF Export / Attach + Prev / Next Article Buttons */}
+              <div className="flex flex-wrap items-center gap-2">
+                {(hasDiskPdf || hasRemotePdf) && (
+                  <button
+                    type="button"
+                    disabled={isPdfBusy}
+                    onClick={async () => {
+                      setIsPdfBusy(true);
+                      setPdfFeedback(null);
+                      try {
+                        if (hasDiskPdf) {
+                          const res = await apiService.downloadArticleOriginalPdf(
+                            project.id,
+                            article.id,
+                            originalFilename || article.title
+                          );
+                          setPdfFeedback({
+                            type: 'success',
+                            text: `Exported exact original PDF "${res.filename}"`,
+                          });
+                        } else {
+                          const target = article.pdfUrl || article.openAccessUrl || '';
+                          const url = apiService.getProxyPdfDownloadUrl(
+                            target,
+                            originalFilename || article.title
+                          );
+                          const link = document.createElement('a');
+                          link.href = url;
+                          link.download = originalFilename || `${article.id}.pdf`;
+                          document.body.appendChild(link);
+                          link.click();
+                          document.body.removeChild(link);
+                          setPdfFeedback({
+                            type: 'success',
+                            text: `Triggered PDF download (${originalFilename || article.title})`,
+                          });
+                        }
+                      } catch (err: any) {
+                        setPdfFeedback({
+                          type: 'error',
+                          text: err?.message || 'Original PDF download failed.',
+                        });
+                      } finally {
+                        setIsPdfBusy(false);
+                      }
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 disabled:opacity-40 text-white font-bold inline-flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0"
+                    title="Download exact original PDF bytes with preserved original filename"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{hasDiskPdf ? 'Export Original PDF' : 'Download PDF'}</span>
+                  </button>
+                )}
+
+                {onAttachOriginalPdf && (
+                  <label className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold inline-flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap shrink-0">
+                    <Upload className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>{hasDiskPdf ? 'Replace PDF' : 'Attach Original PDF'}</span>
+                    <input
+                      type="file"
+                      accept=".pdf,application/pdf"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        setIsPdfBusy(true);
+                        setPdfFeedback(null);
+                        try {
+                          const updated = await onAttachOriginalPdf(article.id, file, project.id);
+                          if (updated) {
+                            setPdfFeedback({
+                              type: 'success',
+                              text: `Stored exact PDF "${updated.original_filename || file.name}"`,
+                            });
+                          }
+                        } catch (err: any) {
+                          setPdfFeedback({
+                            type: 'error',
+                            text: err?.message || 'Could not upload PDF file.',
+                          });
+                        } finally {
+                          setIsPdfBusy(false);
+                        }
+                      }}
+                    />
+                  </label>
+                )}
+
+                <span className="text-slate-600 hidden sm:inline">|</span>
+
+                <button
+                  onClick={onSelectPrev}
+                  disabled={!hasPrev}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 transition"
+                  title="Previous article"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <span className="text-slate-400 text-xs">Next / Prev</span>
+                <button
+                  onClick={onSelectNext}
+                  disabled={!hasNext}
+                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 transition"
+                  title="Next article"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
+
+            {pdfFeedback && (
+              <div
+                className={`px-4 py-2 rounded-xl border text-xs font-medium ${
+                  pdfFeedback.type === 'success'
+                    ? 'bg-emerald-950/40 border-emerald-500/40 text-emerald-200'
+                    : 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                }`}
+              >
+                {pdfFeedback.text}
+              </div>
+            )}
+
+            {/* Main Dual-Pane Review Interface */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+              {/* Left Pane (7 Cols): Article Reader & PDF Page Evidence */}
+              <div className="lg:col-span-7 space-y-4">
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-3">
+                  {/* Header */}
+                  <div>
+                    <h2 className="text-base sm:text-lg font-bold text-white leading-snug">
+                      {article.title}
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {validation.sanitized.authors.length > 0
+                        ? validation.sanitized.authors.join(', ')
+                        : 'No author listed'}{' '}
+                      ({article.year || 'n.d.'})
+                      {validation.sanitized.journalOrSource ? (
+                        <>
+                          {' '}
+                          · <span className="italic text-slate-300">{validation.sanitized.journalOrSource}</span>
+                        </>
+                      ) : null}
+                    </p>
+                    <div className="mt-2 p-2.5 rounded-xl bg-slate-950/80 border border-slate-800/80 text-[11px] text-slate-300 flex items-start gap-2">
+                      <Quote className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" />
+                      <div className="min-w-0 flex-1 space-y-0.5">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-300 block">
+                          APA 7th Verified Reference
+                        </span>
+                        <p className="leading-relaxed text-slate-200 break-words">{apaEntry.citationText}</p>
+                      </div>
+                    </div>
+                    {cleanDoi && (
+                      <a
+                        href={`https://doi.org/${cleanDoi}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-1.5 text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>https://doi.org/{cleanDoi}</span>
+                      </a>
+                    )}
+                  </div>
 
             {/* View Mode Switcher */}
             <div className="flex items-center justify-between border-b border-slate-800 pb-2 pt-2 text-xs">

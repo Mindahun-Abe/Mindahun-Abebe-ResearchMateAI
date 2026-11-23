@@ -30,6 +30,13 @@ import {
   evaluateRuleWithPhraseInterconnection,
   IntegratedConceptAlignment,
 } from '../utils/conceptScreeningEngine';
+import {
+  deduplicateArticlesForBibliography,
+  formatReferenceString,
+  normalizeValidDoi,
+  sanitizeAuthorsList,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
 
 export interface CrossrefResult {
   doi: string;
@@ -1036,15 +1043,191 @@ export const apiService = {
     return res.json();
   },
 
-  getProxyPdfDownloadUrl(pdfUrl: string, title?: string): string {
-    const safeName = (title || 'research-paper')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_|_$/g, '')
-      .slice(0, 60);
-    return `/api/online/proxy-pdf?url=${encodeURIComponent(pdfUrl)}&filename=${encodeURIComponent(
-      safeName || 'research_paper'
-    )}.pdf`;
+  getProxyPdfDownloadUrl(pdfUrl: string, titleOrOriginalName?: string): string {
+    const clean = (titleOrOriginalName || 'research-paper.pdf').replace(/[\x00-\x1F\x7F/\\]/g, '').trim();
+    const finalName = clean.toLowerCase().endsWith('.pdf') ? clean : `${clean || 'research-paper'}.pdf`;
+    return `/api/online/proxy-pdf?url=${encodeURIComponent(pdfUrl)}&filename=${encodeURIComponent(finalName)}`;
+  },
+
+  async uploadArticleOriginalPdf(
+    projectId: string,
+    articleId: string,
+    file: File
+  ): Promise<{ success: boolean; article?: Article; pdfStorage?: Article['pdfStorage'] }> {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/articles/${encodeURIComponent(articleId)}/pdf-upload`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/pdf',
+          'X-Original-Filename': encodeURIComponent(file.name),
+        },
+        body: file,
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to store original PDF "${file.name}" (${res.status})`);
+    }
+    return res.json();
+  },
+
+  getArticleOriginalPdfUrl(
+    projectId: string,
+    articleId: string,
+    options?: { inline?: boolean; fetchRemote?: boolean }
+  ): string {
+    const params = new URLSearchParams();
+    if (options?.inline) params.set('inline', '1');
+    if (options?.fetchRemote) params.set('fetchRemote', '1');
+    const qs = params.toString();
+    return `/api/projects/${encodeURIComponent(projectId)}/articles/${encodeURIComponent(articleId)}/pdf${qs ? `?${qs}` : ''}`;
+  },
+
+  async downloadArticleOriginalPdf(
+    projectId: string,
+    articleId: string,
+    fallbackOriginalFilename?: string,
+    fetchRemoteIfMissing = true
+  ): Promise<{ ok: boolean; filename: string; fileSize: number; error?: string; status?: string }> {
+    const url = this.getArticleOriginalPdfUrl(projectId, articleId, { fetchRemote: fetchRemoteIfMissing });
+    const res = await fetch(url);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return {
+        ok: false,
+        filename: err?.originalFilename || fallbackOriginalFilename || 'document.pdf',
+        fileSize: 0,
+        status: err?.status || 'missing_binary',
+        error: err?.error || `Unable to export original PDF (HTTP ${res.status})`,
+      };
+    }
+
+    const encodedHdrName = res.headers.get('X-Original-Filename');
+    let exactFilename = fallbackOriginalFilename || 'document.pdf';
+    if (encodedHdrName) {
+      try {
+        exactFilename = decodeURIComponent(encodedHdrName);
+      } catch {}
+    }
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = exactFilename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 2500);
+    return {
+      ok: true,
+      filename: exactFilename,
+      fileSize: blob.size,
+    };
+  },
+
+  async checkBulkPdfExportSummary(
+    projectId: string,
+    articleIds: string[],
+    fetchRemoteIfMissing = false
+  ): Promise<{
+    requestedCount: number;
+    readyCount: number;
+    failedCount: number;
+    readyFiles: Array<{ articleId: string; title: string; originalFilename: string; fileSize: number; fileHash: string }>;
+    failedFiles: Array<{ articleId: string; title: string; originalFilename: string; status: string; reason: string }>;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/pdfs/export-summary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ articleIds, fetchRemoteIfMissing }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to verify PDF readiness (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async exportSelectedPdfsZip(
+    projectId: string,
+    articleIds: string[],
+    options?: { archiveName?: string; fetchRemoteIfMissing?: boolean }
+  ): Promise<{
+    ok: boolean;
+    requestedCount: number;
+    exportedCount: number;
+    failedCount: number;
+    exportedFiles: Array<{
+      articleId: string;
+      title: string;
+      originalFilename: string;
+      zipFilename: string;
+      fileSize: number;
+      fileHash: string;
+    }>;
+    failedFiles: Array<{
+      articleId: string;
+      title: string;
+      originalFilename: string;
+      status: string;
+      reason: string;
+    }>;
+    error?: string;
+  }> {
+    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/pdfs/export-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        articleIds,
+        archiveName: options?.archiveName,
+        fetchRemoteIfMissing: Boolean(options?.fetchRemoteIfMissing),
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (err?.summary) {
+        return {
+          ok: false,
+          ...err.summary,
+          error: err.error || 'No PDFs were available to package into ZIP.',
+        };
+      }
+      throw new Error(err?.error || `Bulk PDF export failed (${res.status})`);
+    }
+
+    let summary: any = {
+      requestedCount: articleIds.length,
+      exportedCount: articleIds.length,
+      failedCount: 0,
+      exportedFiles: [],
+      failedFiles: [],
+    };
+    const encodedSummary = res.headers.get('X-PDF-Export-Summary');
+    if (encodedSummary) {
+      try {
+        const binaryStr = atob(encodedSummary);
+        const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+        summary = JSON.parse(new TextDecoder('utf-8').decode(bytes));
+      } catch {}
+    }
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    const rawZipName = options?.archiveName || `${projectId}-selected-pdfs.zip`;
+    a.download = rawZipName.toLowerCase().endsWith('.zip') ? rawZipName : `${rawZipName}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
+
+    return {
+      ok: true,
+      ...summary,
+    };
   },
 
   // Auto-sync & enrich article metadata from DOI, Title, or File Name (with bounded timeout so bulk imports never stall)
@@ -1331,16 +1514,14 @@ export const apiService = {
       console.warn('AI cloud synthesis timed out or failed, using structured synthesis builder:', err);
     }
 
-    // High-fidelity fallback synthesis
+    // High-fidelity fallback synthesis using core verified citation engine
     const rawArts = includedArticles || [];
-    const arts = rawArts.length > 0 ? rawArts : (project.articles || []);
+    const arts = deduplicateArticlesForBibliography(rawArts.length > 0 ? rawArts : (project.articles || []));
     const isBaselinePreview = rawArts.length === 0;
-    const referencesSection = arts
-      .map(
-        (a, idx) =>
-          `[${idx + 1}] ${a.authors?.join(', ') || 'Unknown'} (${a.year || '2024'}). "${a.title}". *${a.journal || 'Academic Publication'}*. DOI: [${a.doi || 'N/A'}](https://doi.org/${a.doi || ''})`
-      )
-      .join('\n\n') || '[1] Empirical literature base defined in systematic review protocol.';
+    const referencesSection =
+      arts
+        .map((a, idx) => `${idx + 1}. ${formatReferenceString(a, 'apa7', idx + 1)}`)
+        .join('\n\n') || '[1] Empirical literature base defined in systematic review protocol.';
 
     return {
       title: project.title,
@@ -1377,10 +1558,14 @@ export const apiService = {
           number: 5,
           title: 'Literature review and research gap',
           markdownContent: arts
-            .map(
-              (a, idx) =>
-                `### [${idx + 1}] ${a.title} (${a.year})\n- **Authors:** ${a.authors.join(', ')}\n- **Journal:** *${a.journal}* (DOI: [${a.doi || 'N/A'}](https://doi.org/${a.doi || ''}))\n- **Extracted Evidence:** ${a.abstract}\n\n`
-            )
+            .map((a, idx) => {
+              const v = validateArticleMetadata(a);
+              const s = v.sanitized;
+              const authorsLine = sanitizeAuthorsList(s.authors).join(', ') || 'Not listed in metadata';
+              const sourceLine = s.journalOrSource || s.publisher || 'Source metadata pending verification';
+              const doiFragment = s.doi ? ` · DOI: [https://doi.org/${s.doi}](https://doi.org/${s.doi})` : '';
+              return `### [${idx + 1}] ${s.title} (${s.year || 'n.d.'})\n- **Authors:** ${authorsLine}\n- **Source:** *${sourceLine}*${doiFragment} · *Citation Status: ${v.verificationStatus}*\n- **Extracted Evidence:** ${a.abstract}\n\n`;
+            })
             .join(''),
         },
         {
@@ -1406,8 +1591,8 @@ export const apiService = {
       ],
       citationIndex: arts.map((a, idx) => ({
         number: idx + 1,
-        doi: a.doi || '',
-        citation: `${a.authors.join(', ')} (${a.year}). ${a.title}. ${a.journal}`,
+        doi: normalizeValidDoi(a.doi) || '',
+        citation: formatReferenceString(a, 'apa7', idx + 1),
         keyFindings: a.abstract.slice(0, 200) + '...',
       })),
     };

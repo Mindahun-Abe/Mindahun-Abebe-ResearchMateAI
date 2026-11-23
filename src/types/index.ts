@@ -144,14 +144,90 @@ export type PaperAccessStatus =
   | 'not_accessible'
   | 'abstract_only';
 
+export type PublicationType =
+  | 'auto'
+  | 'journal_article'
+  | 'book'
+  | 'book_chapter'
+  | 'conference_paper'
+  | 'thesis_dissertation'
+  | 'report'
+  | 'government_publication'
+  | 'preprint'
+  | 'unpublished_manuscript'
+  | 'web_publication';
+
+export type PublicationStatus =
+  | 'published'
+  | 'in_press'
+  | 'preprint'
+  | 'unpublished'
+  | 'submitted';
+
+export type CitationVerificationStatus =
+  | 'Verified'
+  | 'Partially Verified'
+  | 'Needs Manual Review'
+  | 'Unresolved';
+
+export type MetadataFieldSource =
+  | 'pdf_metadata'
+  | 'pdf_content'
+  | 'crossref'
+  | 'doi_registration'
+  | 'publisher_api'
+  | 'manual_edit'
+  | 'bibliography_import'
+  | 'system_inferred'
+  | 'missing';
+
+export interface MetadataFieldProvenance {
+  value: string;
+  source: MetadataFieldSource;
+  status: 'verified' | 'unverified' | 'conflict' | 'missing';
+  updatedAt: string;
+  conflictDetails?: string;
+}
+
+export interface CitationAuditEntry {
+  id: string;
+  timestamp: string;
+  reason: string;
+  source: string;
+  changedFields: string[];
+  previousCitation?: string;
+  newCitation: string;
+  previousStatus?: CitationVerificationStatus;
+  newStatus: CitationVerificationStatus;
+}
+
+export interface ArticlePdfStorage {
+  original_filename: string;
+  stored_filename?: string;
+  file_path?: string;
+  file_hash?: string;
+  file_size?: number;
+  mime_type?: string;
+  uploaded_at?: string;
+  storage_status: 'stored_disk' | 'missing_binary' | 'remote_only' | 'filename_unrecoverable';
+  integrity_verified_at?: string;
+}
+
 export interface Article {
   id: string;
   projectId?: string;
   sourceFileName?: string;
+  original_filename?: string;
+  stored_filename?: string;
+  file_path?: string;
+  file_hash?: string;
+  file_size?: number;
+  mime_type?: string;
+  pdfStorage?: ArticlePdfStorage;
   doi?: string;
   title: string;
   authors: string[];
-  year: number;
+  year?: number;
   journal: string;
   abstract: string;
   fullText?: string;
@@ -161,7 +237,26 @@ export interface Article {
   volume?: string;
   issue?: string;
   pagesStr?: string;
+  articleNumber?: string;
   publisher?: string;
+  publicationType?: PublicationType;
+  publicationStatus?: PublicationStatus;
+  editors?: string[];
+  bookTitle?: string;
+  edition?: string;
+  reportNumber?: string;
+  institution?: string;
+  publishedMonthDay?: string;
+  citationVerificationStatus?: CitationVerificationStatus;
+  fieldProvenance?: Record<string, MetadataFieldProvenance>;
+  citationCache?: {
+    style?: string;
+    inTextParenthetical?: string;
+    inTextNarrative?: string;
+    referenceText?: string;
+    generatedAt?: string;
+  };
+  citationAuditHistory?: CitationAuditEntry[];
   citationsCount?: number;
   openAccessUrl?: string;
   pdfUrl?: string;

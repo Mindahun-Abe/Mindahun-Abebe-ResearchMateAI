@@ -1,5 +1,13 @@
-import React, { useEffect, useState } from 'react';
-import { Article, PaperAccessStatus, ReviewIterationEntry, ReviewProject } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Article,
+  CitationVerificationStatus,
+  PaperAccessStatus,
+  PublicationStatus,
+  PublicationType,
+  ReviewIterationEntry,
+  ReviewProject,
+} from '../types';
 import {
   ArticleMatrixAnalysis,
   DATABASE_PROVENANCE_OPTIONS,
@@ -10,6 +18,12 @@ import {
   getProtocolStandardDefinition,
   getReviewTypeDefinition,
 } from '../utils/protocolFrameworks';
+import {
+  applyMetadataCorrectionWithCitationSync,
+  formatReferenceEntry,
+  normalizeValidDoi,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
 import {
   AlertTriangle,
   BookOpen,
@@ -22,14 +36,17 @@ import {
   Edit3,
   ExternalLink,
   FileCheck2,
+  FileText,
   Globe,
   History,
   Layers,
   MapPin,
+  Quote,
   RotateCcw,
   Save,
   ShieldAlert,
   ShieldCheck,
+  Upload,
   X,
   XCircle,
 } from 'lucide-react';
@@ -41,6 +58,7 @@ interface ArticleCodeDetailModalProps {
   analysis: ArticleMatrixAnalysis | null;
   onClose: () => void;
   onUpdateArticle: (updated: Article) => void;
+  onAttachOriginalPdf?: (articleId: string, file: File, targetProjectId?: string) => Promise<Article | null>;
   onSavedToast?: (msg: string) => void;
   onNavigateToScreening?: (articleId: string) => void;
 }
@@ -51,6 +69,7 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
   analysis,
   onClose,
   onUpdateArticle,
+  onAttachOriginalPdf,
   onSavedToast,
   onNavigateToScreening,
 }) => {
@@ -62,11 +81,20 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
   const [editAuthors, setEditAuthors] = useState('');
   const [editYear, setEditYear] = useState('');
   const [editJournal, setEditJournal] = useState('');
+  const [editVolume, setEditVolume] = useState('');
+  const [editIssue, setEditIssue] = useState('');
+  const [editPagesStr, setEditPagesStr] = useState('');
   const [editDoi, setEditDoi] = useState('');
   const [editUrl, setEditUrl] = useState('');
   const [editPdfUrl, setEditPdfUrl] = useState('');
   const [editPublisher, setEditPublisher] = useState('');
+  const [editPublicationType, setEditPublicationType] = useState<PublicationType>('auto');
+  const [editPublicationStatus, setEditPublicationStatus] = useState<PublicationStatus>('published');
   const [editAbstract, setEditAbstract] = useState('');
+  const [isUploadingPdf, setIsUploadingPdf] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [pdfActionMessage, setPdfActionMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [showAuditHistory, setShowAuditHistory] = useState(false);
 
   useEffect(() => {
     if (!article || !analysis) return;
@@ -75,15 +103,30 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
     setCustomDb(DATABASE_PROVENANCE_OPTIONS.includes(db as any) ? '' : db);
     setEditTitle(article.title || '');
     setEditAuthors((article.authors || []).join(', '));
-    setEditYear(String(article.year || ''));
+    setEditYear(article.year ? String(article.year) : '');
     setEditJournal(article.journal || '');
+    setEditVolume(article.volume || '');
+    setEditIssue(article.issue || '');
+    setEditPagesStr(article.pagesStr || '');
     setEditDoi(article.doi || '');
     setEditUrl(article.url || '');
     setEditPdfUrl(article.pdfUrl || article.openAccessUrl || '');
     setEditPublisher(article.publisher || '');
+    setEditPublicationType(article.publicationType || 'auto');
+    setEditPublicationStatus(article.publicationStatus || 'published');
     setEditAbstract(article.abstract || '');
+    setPdfActionMessage(null);
     setIsEditingRecord(false);
   }, [article?.id, analysis?.sourceProvenance.database]);
+
+  const citationValidation = useMemo(
+    () => (article ? validateArticleMetadata(article) : null),
+    [article]
+  );
+  const apaEntry = useMemo(
+    () => (article ? formatReferenceEntry(article, 0, 'apa7') : null),
+    [article]
+  );
 
   if (!article || !analysis) return null;
 
@@ -239,34 +282,291 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-6 space-y-5 text-xs">
+          {/* Row -1: Original PDF Vault & APA 7th Reference Validation */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Original PDF Preservation & Direct Export */}
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold text-slate-200 flex items-center gap-1.5">
+                  <FileText className="w-4 h-4 text-teal-400" />
+                  Original Uploaded PDF File
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[10px] font-mono border ${
+                    article.pdfStorage?.storage_status === 'stored_disk' || article.file_path
+                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                      : 'bg-slate-900 text-slate-400 border-slate-700'
+                  }`}
+                >
+                  {article.pdfStorage?.storage_status === 'stored_disk' || article.file_path
+                    ? 'Stored Disk Vault'
+                    : article.pdfUrl || article.openAccessUrl
+                    ? 'Remote PDF Link'
+                    : 'No PDF Binary'}
+                </span>
+              </div>
+
+              <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-2.5 text-[11px] space-y-1">
+                <div className="text-slate-400">Preserved Original Filename:</div>
+                <div className="font-mono text-white break-all select-all">
+                  {article.original_filename ||
+                    article.pdfStorage?.original_filename ||
+                    article.sourceFileName ||
+                    'No local PDF filename recorded'}
+                </div>
+                {(article.pdfStorage?.file_size || article.file_size || article.file_hash) && (
+                  <div className="text-[10px] font-mono text-slate-500 flex flex-wrap gap-3 pt-0.5">
+                    {(article.pdfStorage?.file_size || article.file_size) ? (
+                      <span>
+                        Size:{' '}
+                        {Math.max(
+                          1,
+                          Math.round((article.pdfStorage?.file_size || article.file_size || 0) / 1024)
+                        )}{' '}
+                        KB
+                      </span>
+                    ) : null}
+                    {(article.pdfStorage?.file_hash || article.file_hash) && (
+                      <span>
+                        SHA-256:{' '}
+                        {(article.pdfStorage?.file_hash || article.file_hash || '').slice(0, 14)}…
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {(article.pdfStorage?.storage_status === 'stored_disk' ||
+                  article.file_path ||
+                  article.pdfUrl ||
+                  article.openAccessUrl) && (
+                  <button
+                    type="button"
+                    disabled={isExportingPdf}
+                    onClick={async () => {
+                      setIsExportingPdf(true);
+                      setPdfActionMessage(null);
+                      try {
+                        const res = await apiService.downloadArticleOriginalPdf(
+                          project.id,
+                          article.id,
+                          article.original_filename || article.sourceFileName,
+                          true
+                        );
+                        if (res.ok) {
+                          setPdfActionMessage({
+                            type: 'success',
+                            text: `Exported exact file "${res.filename}" (${Math.max(1, Math.round(res.fileSize / 1024))} KB)`,
+                          });
+                        } else {
+                          setPdfActionMessage({
+                            type: 'error',
+                            text: res.error || 'Original PDF bytes could not be exported.',
+                          });
+                        }
+                      } catch (err: any) {
+                        setPdfActionMessage({
+                          type: 'error',
+                          text: err?.message || 'PDF export failed.',
+                        });
+                      } finally {
+                        setIsExportingPdf(false);
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600/90 hover:bg-emerald-500 disabled:opacity-50 text-white text-[11px] font-bold inline-flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{isExportingPdf ? 'Exporting PDF...' : 'Export Original PDF'}</span>
+                  </button>
+                )}
+
+                <label className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 cursor-pointer transition">
+                  <Upload className="w-3.5 h-3.5 text-teal-400" />
+                  <span>
+                    {isUploadingPdf
+                      ? 'Saving PDF...'
+                      : article.pdfStorage?.storage_status === 'stored_disk' || article.file_path
+                      ? 'Replace Original PDF'
+                      : 'Attach Original PDF'}
+                  </span>
+                  <input
+                    type="file"
+                    accept=".pdf,application/pdf"
+                    disabled={isUploadingPdf}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      setIsUploadingPdf(true);
+                      setPdfActionMessage(null);
+                      try {
+                        let updated: Article | null = null;
+                        if (onAttachOriginalPdf) {
+                          updated = await onAttachOriginalPdf(article.id, file, project.id);
+                        } else {
+                          const resp = await apiService.uploadArticleOriginalPdf(project.id, article.id, file);
+                          if (resp?.article) {
+                            updated = resp.article;
+                            onUpdateArticle(resp.article);
+                          }
+                        }
+                        if (updated) {
+                          setPdfActionMessage({
+                            type: 'success',
+                            text: `Stored exact filename "${updated.original_filename || file.name}" in disk vault.`,
+                          });
+                          onSavedToast?.(`Stored original PDF "${updated.original_filename || file.name}"`);
+                        }
+                      } catch (err: any) {
+                        setPdfActionMessage({
+                          type: 'error',
+                          text: err?.message || 'Failed to upload original PDF.',
+                        });
+                      } finally {
+                        setIsUploadingPdf(false);
+                      }
+                    }}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+
+              {pdfActionMessage && (
+                <p
+                  className={`text-[11px] px-2.5 py-1.5 rounded-lg border ${
+                    pdfActionMessage.type === 'success'
+                      ? 'bg-emerald-950/50 border-emerald-700/60 text-emerald-300'
+                      : 'bg-rose-950/50 border-rose-700/60 text-rose-300'
+                  }`}
+                >
+                  {pdfActionMessage.text}
+                </p>
+              )}
+            </div>
+
+            {/* APA 7th Edition Citation Verification & Provenance */}
+            <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-slate-200 flex items-center gap-1.5">
+                  <Quote className="w-4 h-4 text-indigo-400" />
+                  APA 7th Citation &amp; Verification
+                </span>
+                {citationValidation && (
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      citationValidation.verificationStatus === 'Verified'
+                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        : citationValidation.verificationStatus === 'Partially Verified'
+                        ? 'bg-teal-500/15 text-teal-300 border-teal-500/30'
+                        : citationValidation.verificationStatus === 'Needs Manual Review'
+                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                    }`}
+                  >
+                    {citationValidation.verificationStatus} ({citationValidation.completenessScore}%)
+                  </span>
+                )}
+              </div>
+
+              {apaEntry && (
+                <div className="bg-slate-900/90 border border-slate-800 rounded-xl p-2.5 space-y-1.5">
+                  <p className="text-[11px] text-slate-200 leading-relaxed">{apaEntry.citationText}</p>
+                  <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-slate-400">
+                    <span className="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 text-indigo-300">
+                      {apaEntry.sourceTypeLabel}
+                    </span>
+                    <span>In-text: {apaEntry.inTextParenthetical}</span>
+                    <span>Narrative: {apaEntry.inTextNarrative}</span>
+                  </div>
+                </div>
+              )}
+
+              {citationValidation &&
+                (citationValidation.missingFields.length > 0 || citationValidation.conflicts.length > 0) && (
+                  <div className="text-[10px] space-y-1 text-amber-300 bg-amber-950/25 border border-amber-800/40 rounded-lg p-2">
+                    {citationValidation.missingFields.length > 0 && (
+                      <div>Missing fields: {citationValidation.missingFields.join(', ')}</div>
+                    )}
+                    {citationValidation.conflicts.map((conf, idx) => (
+                      <div key={idx} className="text-rose-300">
+                        Conflict: {conf}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+              <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5">
+                <span>
+                  Audit History: {(article.citationAuditHistory || []).length} update(s)
+                </span>
+                {(article.citationAuditHistory || []).length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAuditHistory((v) => !v)}
+                    className="text-indigo-400 hover:underline cursor-pointer"
+                  >
+                    {showAuditHistory ? 'Hide Citation Audit' : 'Inspect Citation Audit'}
+                  </button>
+                )}
+              </div>
+
+              {showAuditHistory && article.citationAuditHistory && (
+                <div className="max-h-28 overflow-y-auto space-y-1.5 pt-1 border-t border-slate-800">
+                  {article.citationAuditHistory.slice().reverse().map((aud) => (
+                    <div key={aud.id} className="bg-slate-900 border border-slate-800 rounded-lg p-2 text-[10px] space-y-0.5">
+                      <div className="flex items-center justify-between text-slate-400">
+                        <span className="font-semibold text-indigo-300">{aud.reason}</span>
+                        <span className="font-mono">{new Date(aud.timestamp).toLocaleString()}</span>
+                      </div>
+                      <div className="text-slate-300">
+                        Fields: {aud.changedFields.join(', ') || 'Synchronized'} · {aud.previousStatus} → {aud.newStatus}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
           {isEditingRecord && (
             <div className="bg-slate-950 border border-indigo-700/70 rounded-2xl p-4 space-y-3">
               <div className="flex items-center justify-between border-b border-slate-800 pb-2">
                 <span className="font-bold text-indigo-300 text-xs uppercase tracking-wider">
-                  Update Stored Article Database Record
+                  Update Stored Article Database Record (Auto-Regenerates APA 7 Citation)
                 </span>
                 <button
                   type="button"
                   onClick={() => {
                     const parsedYear = Number.parseInt(editYear, 10);
-                    onUpdateArticle({
-                      ...article,
-                      title: editTitle.trim() || article.title,
-                      authors: editAuthors
-                        .split(',')
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                      year: Number.isFinite(parsedYear) ? parsedYear : article.year,
-                      journal: editJournal.trim(),
-                      doi: editDoi.trim(),
-                      url: editUrl.trim(),
-                      pdfUrl: editPdfUrl.trim() || undefined,
-                      openAccessUrl: editPdfUrl.trim() || article.openAccessUrl,
-                      publisher: editPublisher.trim() || undefined,
-                      abstract: editAbstract.trim(),
-                    });
+                    const synced = applyMetadataCorrectionWithCitationSync(
+                      article,
+                      {
+                        title: editTitle.trim() || article.title,
+                        authors: editAuthors
+                          .split(',')
+                          .map((s) => s.trim())
+                          .filter(Boolean),
+                        year: Number.isFinite(parsedYear) && parsedYear > 0 ? parsedYear : 0,
+                        journal: editJournal.trim(),
+                        volume: editVolume.trim() || undefined,
+                        issue: editIssue.trim() || undefined,
+                        pagesStr: editPagesStr.trim() || undefined,
+                        doi: normalizeValidDoi(editDoi) || '',
+                        url: editUrl.trim(),
+                        pdfUrl: editPdfUrl.trim() || undefined,
+                        openAccessUrl: editPdfUrl.trim() || article.openAccessUrl,
+                        publisher: editPublisher.trim() || undefined,
+                        publicationType: editPublicationType,
+                        publicationStatus: editPublicationStatus,
+                        abstract: editAbstract.trim(),
+                      },
+                      'manual_edit',
+                      'Manual bibliographic correction in Article Detail Modal'
+                    );
+                    onUpdateArticle(synced);
                     setIsEditingRecord(false);
-                    onSavedToast?.('Updated article record in partitioned database.');
+                    onSavedToast?.('Updated article record & regenerated APA 7th citation (original filename preserved).');
                   }}
                   className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
                 >
@@ -285,7 +585,7 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Authors (comma-separated)</label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Authors (comma-separated, or leave blank if unattributed)</label>
                   <input
                     type="text"
                     value={editAuthors}
@@ -295,7 +595,7 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">Year</label>
+                    <label className="block text-[11px] text-slate-400 mb-1">Year (blank = n.d.)</label>
                     <input
                       type="number"
                       value={editYear}
@@ -314,7 +614,7 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                   </div>
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Journal / Venue</label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Journal / Publication Source</label>
                   <input
                     type="text"
                     value={editJournal}
@@ -323,13 +623,78 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] text-slate-400 mb-1">Publisher</label>
+                  <label className="block text-[11px] text-slate-400 mb-1">Publisher / Institution</label>
                   <input
                     type="text"
                     value={editPublisher}
                     onChange={(e) => setEditPublisher(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:border-indigo-500"
                   />
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Volume</label>
+                    <input
+                      type="text"
+                      value={editVolume}
+                      onChange={(e) => setEditVolume(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Issue</label>
+                    <input
+                      type="text"
+                      value={editIssue}
+                      onChange={(e) => setEditIssue(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Pages / Art. No.</label>
+                    <input
+                      type="text"
+                      value={editPagesStr}
+                      onChange={(e) => setEditPagesStr(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Publication Type (APA 7)</label>
+                    <select
+                      value={editPublicationType}
+                      onChange={(e) => setEditPublicationType(e.target.value as PublicationType)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="auto">Auto-detect</option>
+                      <option value="journal_article">Journal article</option>
+                      <option value="book">Book</option>
+                      <option value="book_chapter">Book chapter</option>
+                      <option value="conference_paper">Conference paper</option>
+                      <option value="thesis_dissertation">Thesis / dissertation</option>
+                      <option value="report">Technical report</option>
+                      <option value="government_publication">Government publication</option>
+                      <option value="preprint">Preprint</option>
+                      <option value="unpublished_manuscript">Unpublished manuscript</option>
+                      <option value="web_publication">Web publication</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Publication Status</label>
+                    <select
+                      value={editPublicationStatus}
+                      onChange={(e) => setEditPublicationStatus(e.target.value as PublicationStatus)}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-white focus:outline-none focus:border-indigo-500"
+                    >
+                      <option value="published">Published</option>
+                      <option value="in_press">In press</option>
+                      <option value="advance_online">Advance online</option>
+                      <option value="preprint">Preprint</option>
+                      <option value="unpublished">Unpublished</option>
+                    </select>
+                  </div>
                 </div>
                 <div>
                   <label className="block text-[11px] text-slate-400 mb-1">Article Landing URL</label>
@@ -678,7 +1043,10 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                   <div className="flex items-center gap-2">
                     {(article.pdfUrl || article.openAccessUrl) && (
                       <a
-                        href={apiService.getProxyPdfDownloadUrl(article.pdfUrl || article.openAccessUrl || '', article.title)}
+                        href={apiService.getProxyPdfDownloadUrl(
+                          article.pdfUrl || article.openAccessUrl || '',
+                          article.original_filename || article.sourceFileName || article.title
+                        )}
                         target="_blank"
                         rel="noreferrer"
                         className="text-[11px] px-2 py-0.5 rounded bg-emerald-600/90 hover:bg-emerald-500 text-white inline-flex items-center gap-1 font-semibold"
@@ -687,14 +1055,14 @@ export const ArticleCodeDetailModal: React.FC<ArticleCodeDetailModalProps> = ({
                         <span>Download PDF</span>
                       </a>
                     )}
-                    {article.doi && (
+                    {normalizeValidDoi(article.doi) && (
                       <a
-                        href={article.url || `https://doi.org/${article.doi}`}
+                        href={article.url || `https://doi.org/${normalizeValidDoi(article.doi)}`}
                         target="_blank"
                         rel="noreferrer"
                         className="text-[11px] text-indigo-400 hover:underline inline-flex items-center gap-1 font-mono"
                       >
-                        <span>DOI: {article.doi}</span>
+                        <span>DOI: {normalizeValidDoi(article.doi)}</span>
                         <ExternalLink className="w-3 h-3" />
                       </a>
                     )}

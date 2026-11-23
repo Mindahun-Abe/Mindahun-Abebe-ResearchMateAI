@@ -49,6 +49,9 @@ import {
   BookOpenText,
   Maximize2,
   ArchiveRestore,
+  FileArchive,
+  ShieldCheck,
+  ShieldAlert,
 } from 'lucide-react';
 import { apiService, mergeScreeningInsightsIntoExtractedData } from '../services/apiService';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
@@ -59,6 +62,12 @@ import {
   isRawPdfOrPlaceholderAbstract,
   resolveFullArticleAbstract,
 } from '../utils/abstractDisplay';
+import {
+  applyMetadataCorrectionWithCitationSync,
+  formatBibTexEntries,
+  normalizeValidDoi,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
 
 type BulkRemoveMode = 'ids' | 'all' | 'excluded' | 'duplicates' | 'uncertain' | 'unscreened' | 'delete_folder';
 
@@ -128,6 +137,7 @@ interface ArticleLibraryProps {
     applyScreeningUpdates: boolean
   ) => Promise<{ record: ModuleQaRescanRecord; updatedCount?: number }>;
   onDeleteQaEntry?: (moduleId: WorkbenchModuleId, recordId: string) => void;
+  onAttachOriginalPdf?: (articleId: string, file: File, targetProjectId?: string) => Promise<Article | null>;
 }
 
 export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
@@ -154,6 +164,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   onDirectAddDataFiles,
   onRescanWithQueryQA,
   onDeleteQaEntry,
+  onAttachOriginalPdf,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [stageFilter, setStageFilter] = useState<string>(initialStageFilter || 'all');
@@ -180,6 +191,29 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   const [bulkRemoveTargetProjectId, setBulkRemoveTargetProjectId] = useState<string>(project.id);
   const [bulkRemoveMode, setBulkRemoveMode] = useState<BulkRemoveMode>('ids');
   const [isProcessingFolderAction, setIsProcessingFolderAction] = useState(false);
+  const [isExportingZip, setIsExportingZip] = useState(false);
+  const [pdfActionArticleId, setPdfActionArticleId] = useState<string | null>(null);
+  const [zipExportReport, setZipExportReport] = useState<{
+    zipArchiveFilename: string;
+    requestedCount: number;
+    exportedCount: number;
+    failedCount: number;
+    exportedFiles: Array<{
+      articleId: string;
+      title: string;
+      originalFilename: string;
+      zipFilename: string;
+      fileSize?: number;
+    }>;
+    failedFiles: Array<{
+      articleId: string;
+      title: string;
+      originalFilename?: string;
+      status?: string;
+      reason: string;
+    }>;
+    errorMessage?: string;
+  } | null>(null);
   const [folderActionStatus, setFolderActionStatus] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -846,18 +880,26 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         const hasCleanSyncedAbs = Boolean(data.abstract && !isRawPdfOrPlaceholderAbstract(data.abstract));
         const updated = subLibraryArticles.map((a) => {
           if (a.id === art.id) {
-            return {
-              ...a,
-              title: data.title || a.title,
-              authors: data.authors || a.authors,
-              year: data.year || a.year,
-              journal: data.journal || a.journal,
-              doi: data.doi || a.doi,
-              abstract: hasCleanSyncedAbs ? data.abstract : a.abstract,
-              sourceDatabase: data.sourceDatabase || a.sourceDatabase,
-              url: data.url || a.url,
-              openAccessUrl: data.openAccessUrl || a.openAccessUrl,
-            };
+            return applyMetadataCorrectionWithCitationSync(
+              a,
+              {
+                title: data.title || a.title,
+                authors: data.authors?.length ? data.authors : a.authors,
+                year: data.year || a.year,
+                journal: data.journal || a.journal,
+                volume: data.volume || a.volume,
+                issue: data.issue || a.issue,
+                pagesStr: data.pagesStr || a.pagesStr,
+                publisher: data.publisher || a.publisher,
+                doi: data.doi || a.doi,
+                abstract: hasCleanSyncedAbs ? data.abstract : a.abstract,
+                sourceDatabase: data.sourceDatabase || a.sourceDatabase,
+                url: data.url || a.url,
+                openAccessUrl: data.openAccessUrl || a.openAccessUrl,
+              },
+              'crossref',
+              'Metadata synchronized from external registry'
+            );
           }
           return a;
         });
@@ -931,18 +973,26 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
       const updated = subLibraryArticles.map((art) => {
         const data = enrichedById.get(art.id);
         if (!data) return art;
-        return {
-          ...art,
-          title: data.title || art.title,
-          authors: data.authors?.length ? data.authors : art.authors,
-          year: data.year || art.year,
-          journal: data.journal || art.journal,
-          doi: data.doi || art.doi,
-          abstract: data.abstract,
-          sourceDatabase: data.sourceDatabase || art.sourceDatabase,
-          url: data.url || art.url,
-          openAccessUrl: data.openAccessUrl || art.openAccessUrl,
-        };
+        return applyMetadataCorrectionWithCitationSync(
+          art,
+          {
+            title: data.title || art.title,
+            authors: data.authors?.length ? data.authors : art.authors,
+            year: data.year || art.year,
+            journal: data.journal || art.journal,
+            volume: data.volume || art.volume,
+            issue: data.issue || art.issue,
+            pagesStr: data.pagesStr || art.pagesStr,
+            publisher: data.publisher || art.publisher,
+            doi: data.doi || art.doi,
+            abstract: data.abstract,
+            sourceDatabase: data.sourceDatabase || art.sourceDatabase,
+            url: data.url || art.url,
+            openAccessUrl: data.openAccessUrl || art.openAccessUrl,
+          },
+          'crossref',
+          'Batch abstract and metadata enrichment'
+        );
       });
       onUpdateArticles(updated);
     }
@@ -1009,8 +1059,77 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     setSelectedIds(new Set(filteredArticles.map((a) => a.id)));
   };
 
+  const includedSubLibraryCount = useMemo(
+    () => subLibraryArticles.filter((a) => a.decision === 'include').length,
+    [subLibraryArticles]
+  );
+
+  const excludedSubLibraryCount = useMemo(
+    () => subLibraryArticles.filter((a) => a.decision === 'exclude').length,
+    [subLibraryArticles]
+  );
+
+  const handleSelectAllIncluded = () => {
+    setSelectedIds(new Set(subLibraryArticles.filter((a) => a.decision === 'include').map((a) => a.id)));
+  };
+
+  const handleSelectAllExcluded = () => {
+    setSelectedIds(new Set(subLibraryArticles.filter((a) => a.decision === 'exclude').map((a) => a.id)));
+  };
+
   const handleClearSelection = () => {
     setSelectedIds(new Set());
+  };
+
+  const handleExportSelectedPdfsZip = async () => {
+    if (selectedIds.size === 0 || isExportingZip) return;
+    setIsExportingZip(true);
+    setZipExportReport(null);
+    const ids = Array.from(selectedIds);
+    const archiveBase = `${project.databaseFolderName || project.id}-selected-pdfs.zip`;
+    try {
+      const res = await apiService.exportSelectedPdfsZip(project.id, ids, {
+        archiveName: archiveBase,
+        fetchRemoteIfMissing: false,
+      });
+      setZipExportReport({
+        zipArchiveFilename: archiveBase,
+        requestedCount: res.requestedCount,
+        exportedCount: res.exportedCount,
+        failedCount: res.failedCount,
+        exportedFiles: res.exportedFiles || [],
+        failedFiles: res.failedFiles || [],
+        errorMessage: res.error,
+      });
+      setFolderActionStatus({
+        type: res.failedCount > 0 && res.exportedCount === 0 ? 'error' : 'success',
+        message:
+          res.failedCount > 0
+            ? `ZIP downloaded with ${res.exportedCount}/${res.requestedCount} original PDF(s). ${res.failedCount} could not be exported — inspect report below.`
+            : `Packaged ${res.exportedCount} original PDF(s) into "${archiveBase}" preserving exact filenames.`,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } catch (err: any) {
+      const summary = err?.summary;
+      if (summary) {
+        setZipExportReport({
+          zipArchiveFilename: archiveBase,
+          requestedCount: summary.requestedCount || ids.length,
+          exportedCount: summary.readyCount || 0,
+          failedCount: (summary.failedFiles || []).length || ids.length,
+          exportedFiles: summary.readyFiles || [],
+          failedFiles: summary.failedFiles || [],
+          errorMessage: err?.message,
+        });
+      }
+      setFolderActionStatus({
+        type: 'error',
+        message: err?.message || 'Bulk PDF ZIP export failed.',
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    } finally {
+      setIsExportingZip(false);
+    }
   };
 
   const handleOpenFolderBulkRemover = (targetProjId: string, preferredMode?: BulkRemoveMode) => {
@@ -1190,26 +1309,14 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   };
 
   const exportBibTex = () => {
-    const bib = filteredArticles
-      .map((a, idx) => {
-        const key = `${(a.authors[0] || 'Unknown').split(',')[0].replace(/\s+/g, '')}${a.year || '2024'}`;
-        return `@article{${key}_${idx + 1},
-  title = {${a.title}},
-  author = {${a.authors.join(' and ')}},
-  journal = {${a.journal}},
-  year = {${a.year}},
-  doi = {${a.doi || ''}},
-  url = {${a.url || ''}}
-}`;
-      })
-      .join('\n\n');
-
-    const blob = new Blob([bib], { type: 'text/plain' });
+    const bib = formatBibTexEntries(filteredArticles);
+    const blob = new Blob([bib], { type: 'application/x-bibtex;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = `${project.id}-articles.bib`;
     link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const exportCsv = () => {
@@ -1917,16 +2024,16 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         </div>
       </div>
 
-      {/* Checkbox File Manager Bar for Active Library Folder (Add New File, Delete, Clear) */}
+      {/* Checkbox File Manager Bar for Active Library Folder (Bulk ZIP PDF Export, Selection, Delete) */}
       <div
         className={`rounded-2xl border p-3 flex flex-wrap items-center justify-between gap-2 text-xs transition ${
           selectedIds.size > 0
-            ? 'bg-rose-950/30 border-rose-700/70 shadow-lg'
+            ? 'bg-teal-950/25 border-teal-600/60 shadow-lg'
             : 'bg-slate-900/90 border-slate-800'
         }`}
       >
         <div className="flex flex-wrap items-center gap-2">
-          {filteredArticles.length > 0 && (
+          {subLibraryArticles.length > 0 && (
             <>
               <label className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold inline-flex items-center gap-2 cursor-pointer transition select-none">
                 <input
@@ -1936,9 +2043,9 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                     if (selectedIds.size === filteredArticles.length) handleClearSelection();
                     else handleSelectAllFiltered();
                   }}
-                  className="rounded accent-rose-500 cursor-pointer"
+                  className="rounded accent-teal-500 cursor-pointer"
                 />
-                <span>Select All ({filteredArticles.length})</span>
+                <span>Select Filtered ({filteredArticles.length})</span>
               </label>
 
               <button
@@ -1950,13 +2057,45 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                 <span>Select Visible ({Math.min(visibleLimit, filteredArticles.length)})</span>
               </button>
 
+              {includedSubLibraryCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleSelectAllIncluded}
+                  className="px-2.5 py-1.5 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-700/50 font-medium inline-flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Select Included ({includedSubLibraryCount})</span>
+                </button>
+              )}
+
+              {excludedSubLibraryCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleSelectAllExcluded}
+                  className="px-2.5 py-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900/50 text-rose-300 border border-rose-700/50 font-medium inline-flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap"
+                >
+                  <XCircle className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Select Excluded ({excludedSubLibraryCount})</span>
+                </button>
+              )}
+
+              <span
+                className={`px-2.5 py-1.5 rounded-lg font-mono font-bold tabular-nums border ${
+                  selectedIds.size > 0
+                    ? 'bg-teal-500/20 text-teal-200 border-teal-500/40'
+                    : 'bg-slate-950 text-slate-400 border-slate-800'
+                }`}
+              >
+                {selectedIds.size} Selected
+              </span>
+
               {selectedIds.size > 0 && (
                 <button
                   type="button"
                   onClick={handleClearSelection}
                   className="px-2.5 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-white border border-slate-800 font-medium cursor-pointer transition"
                 >
-                  Uncheck ({selectedIds.size})
+                  Clear Selection
                 </button>
               )}
             </>
@@ -1966,8 +2105,23 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            disabled={selectedIds.size === 0 || isExportingZip}
+            onClick={handleExportSelectedPdfsZip}
+            className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-500 hover:to-emerald-500 disabled:opacity-40 text-white font-bold shadow-sm inline-flex items-center gap-1.5 cursor-pointer transition whitespace-nowrap shrink-0"
+            title="Package selected articles' exact original PDF bytes into a ZIP preserving every original filename"
+          >
+            <FileArchive className="w-3.5 h-3.5" />
+            <span>
+              {isExportingZip
+                ? 'Packaging ZIP...'
+                : `Export Selected PDFs (${selectedIds.size})`}
+            </span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setShowOnlineSearchPanel((v) => !v)}
-            className="px-3 py-1.5 rounded-xl bg-teal-600 hover:bg-teal-500 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
+            className="px-3 py-1.5 rounded-xl bg-teal-700 hover:bg-teal-600 text-white font-semibold inline-flex items-center gap-1.5 cursor-pointer transition"
             title="Search all online databases by Keywords, Title, DOI, Abstract, Authors, or Related Articles"
           >
             <Globe className="w-3.5 h-3.5" />
@@ -2015,6 +2169,126 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Explicit Bulk PDF ZIP Export Report (Collisions + Missing/Failed Recovery) */}
+      {zipExportReport && (
+        <div className="bg-slate-900 border border-slate-700 rounded-2xl p-4 text-xs space-y-3 shadow-lg">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+            <div className="flex items-center gap-2">
+              <FileArchive className="w-4 h-4 text-teal-400 shrink-0" />
+              <span className="font-bold text-white">
+                Bulk PDF ZIP Export Report — {zipExportReport.zipArchiveFilename}
+              </span>
+              <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono font-bold tabular-nums">
+                Exported: {zipExportReport.exportedCount}/{zipExportReport.requestedCount}
+              </span>
+              {zipExportReport.failedCount > 0 && (
+                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono font-bold tabular-nums">
+                  Skipped/Failed: {zipExportReport.failedCount}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setZipExportReport(null)}
+              className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white cursor-pointer"
+              title="Close export report"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {zipExportReport.errorMessage && (
+            <p className="text-rose-300 bg-rose-950/40 border border-rose-500/30 rounded-xl px-3 py-2">
+              {zipExportReport.errorMessage}
+            </p>
+          )}
+
+          {zipExportReport.exportedFiles.length > 0 && (
+            <div className="space-y-1">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-300 block">
+                Included Original PDFs ({zipExportReport.exportedFiles.length})
+              </span>
+              <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                {zipExportReport.exportedFiles.map((ef) => (
+                  <div
+                    key={ef.articleId}
+                    className="flex flex-wrap items-center justify-between gap-2 bg-slate-950/80 border border-slate-800 rounded-lg px-2.5 py-1.5"
+                  >
+                    <span className="font-mono text-teal-200 truncate max-w-[360px]">
+                      {ef.zipFilename}
+                      {ef.zipFilename !== ef.originalFilename ? (
+                        <span className="text-slate-400 ml-1">
+                          (collision suffix from &quot;{ef.originalFilename}&quot;)
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="text-[10px] text-slate-400 truncate max-w-[260px]">
+                      {ef.title}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {zipExportReport.failedFiles.length > 0 && (
+            <div className="space-y-1.5">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-amber-300 block">
+                Files Without Stored Original PDF Binary ({zipExportReport.failedFiles.length})
+              </span>
+              <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                {zipExportReport.failedFiles.map((ff) => (
+                  <div
+                    key={ff.articleId}
+                    className="flex flex-wrap items-center justify-between gap-2 bg-amber-950/20 border border-amber-500/30 rounded-lg px-3 py-2"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold text-white truncate">{ff.title}</p>
+                      <p className="text-[11px] text-amber-300/90">
+                        {ff.status ? `${ff.status}: ` : ''}{ff.reason}
+                      </p>
+                    </div>
+                    {onAttachOriginalPdf && (
+                      <label className="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-semibold inline-flex items-center gap-1 cursor-pointer shrink-0">
+                        <Upload className="w-3 h-3" />
+                        <span>Attach PDF</span>
+                        <input
+                          type="file"
+                          accept=".pdf,application/pdf"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            const updated = await onAttachOriginalPdf(ff.articleId, file, project.id);
+                            if (updated) {
+                              setZipExportReport((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      failedFiles: prev.failedFiles.filter((x) => x.articleId !== ff.articleId),
+                                      failedCount: Math.max(0, prev.failedCount - 1),
+                                    }
+                                  : null
+                              );
+                              setFolderActionStatus({
+                                type: 'success',
+                                message: `Attached "${updated.original_filename || file.name}" to vault. Ready for ZIP export.`,
+                                timestamp: new Date().toLocaleTimeString(),
+                              });
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Collapsible Fast Online Database Search, PDF Downloader & PRISMA Retrieval Panel */}
       {showOnlineSearchPanel && (
@@ -2145,16 +2419,62 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                         <FileText className="w-3 h-3" /> Abstract Only
                       </span>
                     )}
+
+                    {/* APA Citation Verification Badge */}
+                    {(() => {
+                      const v = validateArticleMetadata(art);
+                      return (
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                            v.verificationStatus === 'Verified'
+                              ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                              : v.verificationStatus === 'Partially Verified'
+                              ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                              : v.verificationStatus === 'Needs Manual Review'
+                              ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                          }`}
+                          title={v.missingFields.length > 0 ? `Missing: ${v.missingFields.join(', ')}` : 'Bibliographic metadata verified for APA 7th'}
+                        >
+                          {v.verificationStatus === 'Verified' ? <ShieldCheck className="w-3 h-3" /> : <ShieldAlert className="w-3 h-3" />}
+                          <span>{v.verificationStatus}</span>
+                        </span>
+                      );
+                    })()}
+
+                    {/* Exact Preserved Original Filename Pill */}
+                    {(art.original_filename || art.sourceFileName) && (
+                      <span
+                        className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-slate-950 text-teal-300 border border-slate-700 max-w-[230px] truncate"
+                        title={`Original Filename: ${art.original_filename || art.sourceFileName}${art.pdfStorage?.storage_status === 'stored_disk' ? ' (Original PDF Vault Verified)' : ''}`}
+                      >
+                        {art.original_filename || art.sourceFileName}
+                      </span>
+                    )}
                   </div>
 
                   <h3 className="text-sm font-bold text-white group-hover:text-indigo-400 transition leading-snug pt-1">
                     {art.title}
                   </h3>
 
-                  <p className="text-xs text-slate-400">
-                    {art.authors.slice(0, 4).join(', ')}{art.authors.length > 4 ? ' et al.' : ''} ({art.year}) ·{' '}
-                    <span className="italic text-slate-300">{art.journal}</span>
-                  </p>
+                  {(() => {
+                    const v = validateArticleMetadata(art);
+                    const authorsDisplay =
+                      v.sanitized.authors.length > 0
+                        ? `${v.sanitized.authors.slice(0, 4).join(', ')}${v.sanitized.authors.length > 4 ? ' et al.' : ''}`
+                        : 'No author listed';
+                    return (
+                      <p className="text-xs text-slate-400">
+                        {authorsDisplay} ({art.year || 'n.d.'})
+                        {v.sanitized.journalOrSource ? (
+                          <>
+                            {' '}
+                            · <span className="italic text-slate-300">{v.sanitized.journalOrSource}</span>
+                          </>
+                        ) : null}
+                      </p>
+                    );
+                  })()}
 
                   {/* Full Abstract of Original Document for every listed Status category */}
                   {(() => {
@@ -2317,19 +2637,98 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${syncingArticleId === art.id ? 'animate-spin text-indigo-400' : ''}`} />
                     </button>
-                    {(art.pdfUrl || art.openAccessUrl) && (
-                      <a
-                        href={apiService.getProxyPdfDownloadUrl(art.pdfUrl || art.openAccessUrl || '', art.title)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="p-1.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/50 transition"
-                        title="Download PDF paper for PRISMA full-text review"
+                    {(art.pdfStorage?.storage_status === 'stored_disk' || art.file_path || art.pdfUrl || art.openAccessUrl) && (
+                      <button
+                        type="button"
+                        disabled={pdfActionArticleId === art.id}
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          setPdfActionArticleId(art.id);
+                          const hasDiskPdf = art.pdfStorage?.storage_status === 'stored_disk' || Boolean(art.file_path);
+                          const origName = art.original_filename || art.sourceFileName || '';
+                          try {
+                            if (hasDiskPdf) {
+                              const res = await apiService.downloadArticleOriginalPdf(project.id, art.id, origName || art.title);
+                              setFolderActionStatus({
+                                type: 'success',
+                                message: `Exported exact original PDF "${res.filename}"`,
+                                timestamp: new Date().toLocaleTimeString(),
+                              });
+                            } else {
+                              const target = art.pdfUrl || art.openAccessUrl || '';
+                              const url = apiService.getProxyPdfDownloadUrl(target, origName || art.title);
+                              const link = document.createElement('a');
+                              link.href = url;
+                              link.download = origName || `${art.id}.pdf`;
+                              document.body.appendChild(link);
+                              link.click();
+                              document.body.removeChild(link);
+                            }
+                          } catch (err: any) {
+                            setFolderActionStatus({
+                              type: 'error',
+                              message: err?.message || 'Could not export original PDF.',
+                              timestamp: new Date().toLocaleTimeString(),
+                            });
+                          } finally {
+                            setPdfActionArticleId(null);
+                          }
+                        }}
+                        className="p-1.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 disabled:opacity-40 text-emerald-300 border border-emerald-700/50 transition cursor-pointer"
+                        title={
+                          art.pdfStorage?.storage_status === 'stored_disk' || art.file_path
+                            ? `Export exact original PDF (${art.original_filename || art.sourceFileName || 'original'})`
+                            : 'Download PDF paper for PRISMA full-text review'
+                        }
                       >
                         <Download className="w-3.5 h-3.5" />
-                      </a>
+                      </button>
                     )}
-                    {art.doi && (
+                    {onAttachOriginalPdf && (
+                      <label
+                        onClick={(e) => e.stopPropagation()}
+                        className="p-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 text-slate-400 hover:text-teal-300 border border-slate-800 transition cursor-pointer"
+                        title={
+                          art.pdfStorage?.storage_status === 'stored_disk'
+                            ? `Replace original PDF (${art.original_filename || art.sourceFileName})`
+                            : 'Attach original PDF file'
+                        }
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <input
+                          type="file"
+                          accept=".pdf,application/pdf"
+                          className="hidden"
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            setPdfActionArticleId(art.id);
+                            try {
+                              const updated = await onAttachOriginalPdf(art.id, file, project.id);
+                              if (updated) {
+                                setFolderActionStatus({
+                                  type: 'success',
+                                  message: `Stored original PDF "${updated.original_filename || file.name}"`,
+                                  timestamp: new Date().toLocaleTimeString(),
+                                });
+                              }
+                            } catch (err: any) {
+                              setFolderActionStatus({
+                                type: 'error',
+                                message: err?.message || 'Failed to upload PDF file.',
+                                timestamp: new Date().toLocaleTimeString(),
+                              });
+                            } finally {
+                              setPdfActionArticleId(null);
+                            }
+                          }}
+                        />
+                      </label>
+                    )}
+                    {normalizeValidDoi(art.doi) && (
                       <a
-                        href={`https://doi.org/${art.doi}`}
+                        href={`https://doi.org/${normalizeValidDoi(art.doi)}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         onClick={(e) => e.stopPropagation()}

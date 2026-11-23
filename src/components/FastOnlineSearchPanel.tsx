@@ -3,6 +3,11 @@ import { Article, DeletedOnlineArticleRecord, PaperAccessStatus, ReviewProject }
 import { apiService } from '../services/apiService';
 import { classifyPaperType, detectArticleSourceDatabase } from '../utils/slrDetectionEngine';
 import {
+  isPlaceholderVenue,
+  sanitizeAuthorsList,
+  validateArticleMetadata,
+} from '../utils/citationFormatter';
+import {
   AlertCircle,
   ArchiveRestore,
   BookOpen,
@@ -653,13 +658,19 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
 
     const isBatchCrossDup = Boolean(item.isCrossDbDuplicate);
 
+    const cleanAuthors = sanitizeAuthorsList(item.authors || []);
+    const cleanJournal = isPlaceholderVenue(item.journal) ? '' : item.journal || '';
+
     const base: Article = {
       id: makeUniqueId('art-online'),
       projectId: targetProjectId || project?.id,
       title: item.title,
-      authors: item.authors && item.authors.length > 0 ? item.authors : ['Author Unknown'],
-      year: item.year || new Date().getFullYear(),
-      journal: item.journal || 'Academic Publication',
+      authors: cleanAuthors,
+      year: item.year || undefined,
+      journal: cleanJournal,
+      volume: (item as any).volume || undefined,
+      issue: (item as any).issue || undefined,
+      pagesStr: (item as any).pagesStr || undefined,
       publisher: item.publisher,
       doi: item.doi || undefined,
       abstract: item.abstract || 'Abstract retrieved from online bibliographic database.',
@@ -705,6 +716,7 @@ export const FastOnlineSearchPanel: React.FC<FastOnlineSearchPanelProps> = ({
       ...base,
       paperCategory: pType.category,
       paperSubType: pType.subType,
+      citationVerificationStatus: validateArticleMetadata(base).verificationStatus,
     };
   };
 

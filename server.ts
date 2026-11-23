@@ -36,6 +36,28 @@ import {
   mergeProtocolSnapshotsPreservingData,
   PROTOCOL_SCHEMA_VERSION,
 } from './src/utils/protocolVault.ts';
+import {
+  buildGroundedArticleTextSource,
+  CitationStyleId,
+  deduplicateArticlesForBibliography,
+  formatBibTexEntries,
+  formatInlineCitation,
+  formatReferenceString,
+  isPlaceholderAuthor,
+  isPlaceholderVenue,
+  normalizeValidDoi,
+  sanitizeAuthorsList,
+  validateArticleMetadata,
+} from './src/utils/citationFormatter.ts';
+import {
+  backfillArticleLegacyFields,
+  buildBulkPdfZipExport,
+  buildContentDispositionHeader,
+  resolveZipCollisionName,
+  sanitizeOriginalBasename,
+  saveOriginalPdfBuffer,
+  verifyAndReadPdfForArticle,
+} from './src/server/pdfVaultService.ts';
 
 dotenv.config();
 
@@ -600,13 +622,18 @@ function seedAndLoadAllReviewFolders(): any[] {
       const rawArticles = fs.existsSync(articlesPath)
         ? JSON.parse(fs.readFileSync(articlesPath, 'utf-8'))
         : [];
-      // Strict sub-library isolation: never load articles belonging to another review
+      // Strict sub-library isolation + lazy non-destructive legacy backfill
       const articles = (Array.isArray(rawArticles) ? rawArticles : [])
         .filter((a: any) => !a?.projectId || a.projectId === meta.id)
-        .map((a: any) => ({
-          ...a,
-          projectId: meta.id,
-        }));
+        .map((a: any) =>
+          backfillArticleLegacyFields(
+            {
+              ...a,
+              projectId: meta.id,
+            },
+            folderPath
+          )
+        );
 
       // Keep sources_manifest.json strictly synchronized with actual active articles (purge deleted backup/removal counts)
       const manifestPath = path.join(folderPath, 'sources_manifest.json');
@@ -733,32 +760,49 @@ app.get('/api/crossref/lookup', async (req: Request, res: Response) => {
     const data = await response.json();
     const item = data.message;
 
-    const authors = (item.author || []).map((a: any) => {
-      if (a.given && a.family) return `${a.family}, ${a.given}`;
-      if (a.family) return a.family;
-      if (a.name) return a.name;
-      return 'Unknown Author';
-    });
+    const rawAuthors = (item.author || [])
+      .map((a: any) => {
+        if (a.given && a.family) return `${a.family}, ${a.given}`;
+        if (a.family) return a.family;
+        if (a.name) return a.name;
+        return '';
+      })
+      .filter(Boolean);
+    const authors = sanitizeAuthorsList(rawAuthors);
 
     const publishedDate =
       item['published-print']?.['date-parts']?.[0] ||
       item['published-online']?.['date-parts']?.[0] ||
       item['created']?.['date-parts']?.[0] ||
       [];
-    const year = publishedDate[0] || item.issued?.['date-parts']?.[0]?.[0] || new Date().getFullYear();
+    const yearRaw = publishedDate[0] || item.issued?.['date-parts']?.[0]?.[0];
 
     const cleanAbstract = item.abstract
       ? item.abstract.replace(/<[^>]+>/g, '').trim()
       : '';
 
+    const containerTitle = Array.isArray(item['container-title'])
+      ? item['container-title'][0] || ''
+      : item['container-title'] || '';
+
+    const crTypeMap: Record<string, string> = {
+      'journal-article': 'journal_article',
+      'proceedings-article': 'conference_paper',
+      'book-chapter': 'book_chapter',
+      book: 'book',
+      monograph: 'book',
+      'edited-book': 'book',
+      dissertation: 'thesis_dissertation',
+      report: 'report',
+      'posted-content': 'preprint',
+    };
+
     const record = {
       doi: cleanDoi,
       title: Array.isArray(item.title) ? item.title[0] : item.title || 'Untitled',
-      authors: authors.length > 0 ? authors : ['Unknown Author'],
-      year: Number(year),
-      journal: Array.isArray(item['container-title'])
-        ? item['container-title'][0]
-        : item['container-title'] || item.publisher || 'Unknown Venue',
+      authors,
+      year: yearRaw ? Number(yearRaw) : undefined,
+      journal: containerTitle || '',
       abstract: cleanAbstract || 'No abstract available from Crossref record.',
       volume: item.volume || '',
       issue: item.issue || '',
@@ -767,6 +811,7 @@ app.get('/api/crossref/lookup', async (req: Request, res: Response) => {
       url: item.URL || `https://doi.org/${cleanDoi}`,
       isPreprint: item.type === 'posted-content',
       documentType: item.type || 'journal-article',
+      publicationType: crTypeMap[String(item.type || '').toLowerCase()] || 'journal_article',
     };
 
     return res.json(record);
@@ -856,7 +901,7 @@ app.get('/api/projects/:id/articles', (req: Request, res: Response) => {
       : [];
     const articles = (Array.isArray(raw) ? raw : [])
       .filter((a: any) => !a?.projectId || a.projectId === projectId)
-      .map((a: any) => ({ ...a, projectId }));
+      .map((a: any) => backfillArticleLegacyFields({ ...a, projectId }, folderPath));
     const relFolder = path.relative(__dirname, folderPath).replace(/\\/g, '/');
     return res.json({
       projectId,
@@ -1120,7 +1165,31 @@ app.post('/api/projects/:id/articles/bulk', (req: Request, res: Response) => {
 
     const newlyAdded: any[] = [];
     for (const rawArt of articles) {
-      const isolatedArt = { ...rawArt, projectId };
+      const prev = rawArt?.id && existingById.has(rawArt.id) ? existing[existingById.get(rawArt.id)!] : null;
+      const preservedOrigName =
+        rawArt?.original_filename ||
+        prev?.original_filename ||
+        prev?.pdfStorage?.original_filename ||
+        rawArt?.sourceFileName ||
+        prev?.sourceFileName;
+      const isolatedArt = backfillArticleLegacyFields(
+        {
+          ...rawArt,
+          projectId,
+          ...(preservedOrigName ? { original_filename: preservedOrigName } : {}),
+          ...(prev?.stored_filename && !rawArt?.stored_filename
+            ? {
+                stored_filename: prev.stored_filename,
+                file_path: prev.file_path,
+                file_hash: prev.file_hash,
+                file_size: prev.file_size,
+                mime_type: prev.mime_type,
+                pdfStorage: prev.pdfStorage,
+              }
+            : {}),
+        },
+        folderPath
+      );
       if (isolatedArt.id && existingById.has(isolatedArt.id)) {
         existing[existingById.get(isolatedArt.id)!] = isolatedArt;
       } else {
@@ -1129,7 +1198,7 @@ app.post('/api/projects/:id/articles/bulk', (req: Request, res: Response) => {
     }
 
     const merged = [...newlyAdded, ...existing];
-    fs.writeFileSync(articlesFile, JSON.stringify(merged, null, 2), 'utf-8');
+    writeJsonAtomicSync(articlesFile, merged);
 
     let reviewTitle = projectId;
     const metaPathForUpload = path.join(folderPath, 'project.json');
@@ -1187,8 +1256,36 @@ app.put('/api/projects/:id/articles', (req: Request, res: Response) => {
     }
 
     const articlesFile = path.join(folderPath, 'articles.json');
-    const isolated = articles.map((a: any) => ({ ...a, projectId }));
-    fs.writeFileSync(articlesFile, JSON.stringify(isolated, null, 2), 'utf-8');
+    const prevList: any[] = safeReadJsonSync<any[]>(articlesFile) || [];
+    const prevById = new Map<string, any>(prevList.filter((p) => p?.id).map((p) => [p.id, p]));
+    const isolated = articles.map((a: any) => {
+      const prev = a?.id ? prevById.get(a.id) : undefined;
+      const preservedOrigName =
+        a?.original_filename ||
+        prev?.original_filename ||
+        prev?.pdfStorage?.original_filename ||
+        a?.sourceFileName ||
+        prev?.sourceFileName;
+      return backfillArticleLegacyFields(
+        {
+          ...a,
+          projectId,
+          ...(preservedOrigName ? { original_filename: preservedOrigName } : {}),
+          ...(prev?.stored_filename && !a?.stored_filename
+            ? {
+                stored_filename: prev.stored_filename,
+                file_path: prev.file_path,
+                file_hash: prev.file_hash,
+                file_size: prev.file_size,
+                mime_type: prev.mime_type,
+                pdfStorage: prev.pdfStorage,
+              }
+            : {}),
+        },
+        folderPath
+      );
+    });
+    writeJsonAtomicSync(articlesFile, isolated);
 
     const savedAt = new Date().toISOString();
     let reviewTitle = projectId;
@@ -1326,6 +1423,213 @@ app.post('/api/projects/:id/articles/bulk-remove', (req: Request, res: Response)
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to bulk remove articles from folder' });
+  }
+});
+
+// -------------------------------------------------------------
+// Original PDF Vault: Binary Storage, Individual Download & Bulk ZIP Export
+// -------------------------------------------------------------
+app.post(
+  '/api/projects/:id/articles/:articleId/pdf-upload',
+  express.raw({ type: ['application/pdf', 'application/octet-stream'], limit: '50mb' }),
+  (req: Request, res: Response) => {
+    try {
+      const { id: projectId, articleId } = req.params;
+      const folderPath = findFolderForProjectId(projectId);
+      if (!folderPath || !fs.existsSync(folderPath)) {
+        return res.status(404).json({ error: 'Partitioned review database folder not found' });
+      }
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        return res.status(400).json({ error: 'Empty PDF binary payload.' });
+      }
+
+      const rawHeaderName = String(req.headers['x-original-filename'] || req.query.filename || '');
+      let decodedName = rawHeaderName;
+      try {
+        if (rawHeaderName) decodedName = decodeURIComponent(rawHeaderName);
+      } catch {
+        decodedName = rawHeaderName;
+      }
+
+      const articlesFile = path.join(folderPath, 'articles.json');
+      const existing: any[] = safeReadJsonSync<any[]>(articlesFile) || [];
+      const idx = existing.findIndex((a) => a?.id === articleId);
+      if (idx < 0) {
+        return res.status(404).json({ error: 'Target article record not found in review library.' });
+      }
+
+      const updatedArticle = saveOriginalPdfBuffer(
+        folderPath,
+        existing[idx],
+        req.body,
+        decodedName || existing[idx].original_filename || existing[idx].sourceFileName || 'document.pdf'
+      );
+      existing[idx] = backfillArticleLegacyFields(updatedArticle, folderPath);
+      writeJsonAtomicSync(articlesFile, existing);
+
+      return res.json({
+        success: true,
+        projectId,
+        articleId,
+        article: existing[idx],
+        pdfStorage: existing[idx].pdfStorage,
+      });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Failed to store original PDF binary.' });
+    }
+  }
+);
+
+app.get('/api/projects/:id/articles/:articleId/pdf', async (req: Request, res: Response) => {
+  try {
+    const { id: projectId, articleId } = req.params;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+
+    const articlesFile = path.join(folderPath, 'articles.json');
+    const existing: any[] = safeReadJsonSync<any[]>(articlesFile) || [];
+    const idx = existing.findIndex((a) => a?.id === articleId);
+    if (idx < 0) {
+      return res.status(404).json({ error: 'Article record not found' });
+    }
+
+    const fetchRemoteIfMissing = req.query.fetchRemote === '1' || req.query.fetchRemote === 'true';
+    const check = await verifyAndReadPdfForArticle(folderPath, existing[idx], { fetchRemoteIfMissing });
+
+    if (check.updatedArticle) {
+      existing[idx] = backfillArticleLegacyFields(check.updatedArticle, folderPath);
+      writeJsonAtomicSync(articlesFile, existing);
+    }
+
+    if (!check.ok || !check.buffer) {
+      const httpCode = check.status === 'hash_mismatch' ? 422 : 404;
+      return res.status(httpCode).json({
+        error: check.error || 'Original PDF binary is not available for this record.',
+        status: check.status,
+        originalFilename: check.originalFilename,
+        articleId,
+      });
+    }
+
+    const inlineMode = req.query.inline === '1' || req.query.inline === 'true';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', buildContentDispositionHeader(check.originalFilename, inlineMode));
+    res.setHeader('Content-Length', String(check.buffer.length));
+    res.setHeader('X-Original-Filename', encodeURIComponent(check.originalFilename));
+    if (check.fileHash) res.setHeader('X-File-Hash', check.fileHash);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Original-Filename, X-File-Hash');
+    return res.send(check.buffer);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to read original PDF' });
+  }
+});
+
+app.post('/api/projects/:id/pdfs/export-summary', async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const { articleIds = [], fetchRemoteIfMissing = false } = req.body || {};
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const articlesFile = path.join(folderPath, 'articles.json');
+    const articles: any[] = safeReadJsonSync<any[]>(articlesFile) || [];
+    const targetIds = Array.isArray(articleIds) && articleIds.length > 0 ? articleIds : articles.map((a) => a.id);
+    const targetSet = new Set(targetIds);
+    const selected = articles.filter((a) => targetSet.has(a?.id));
+
+    const readyFiles: any[] = [];
+    const failedFiles: any[] = [];
+    for (const art of selected) {
+      const check = await verifyAndReadPdfForArticle(folderPath, art, {
+        fetchRemoteIfMissing: Boolean(fetchRemoteIfMissing),
+      });
+      if (check.ok && check.buffer) {
+        readyFiles.push({
+          articleId: art.id,
+          title: art.title,
+          originalFilename: check.originalFilename,
+          fileSize: check.fileSize || check.buffer.length,
+          fileHash: check.fileHash || '',
+        });
+      } else {
+        failedFiles.push({
+          articleId: art.id,
+          title: art.title,
+          originalFilename: check.originalFilename,
+          status: check.status,
+          reason: check.error || 'PDF binary missing',
+        });
+      }
+    }
+
+    return res.json({
+      projectId,
+      requestedCount: selected.length,
+      readyCount: readyFiles.length,
+      failedCount: failedFiles.length,
+      readyFiles,
+      failedFiles,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to inspect bulk PDF readiness' });
+  }
+});
+
+app.post('/api/projects/:id/pdfs/export-zip', async (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const { articleIds = [], archiveName, fetchRemoteIfMissing = false } = req.body || {};
+    if (!Array.isArray(articleIds) || articleIds.length === 0) {
+      return res.status(400).json({ error: 'At least one articleId must be selected for bulk PDF export.' });
+    }
+
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+
+    const articlesFile = path.join(folderPath, 'articles.json');
+    const articles: any[] = safeReadJsonSync<any[]>(articlesFile) || [];
+    const { zipBuffer, summary } = await buildBulkPdfZipExport(folderPath, articles, articleIds, {
+      fetchRemoteIfMissing: Boolean(fetchRemoteIfMissing),
+    });
+
+    if (summary.updatedArticles !== articles) {
+      writeJsonAtomicSync(articlesFile, summary.updatedArticles);
+    }
+
+    const clientSummary = {
+      requestedCount: summary.requestedCount,
+      exportedCount: summary.exportedCount,
+      failedCount: summary.failedCount,
+      exportedFiles: summary.exportedFiles,
+      failedFiles: summary.failedFiles,
+    };
+
+    if (!zipBuffer || summary.exportedCount === 0) {
+      return res.status(422).json({
+        error: 'None of the selected articles had a verified PDF file available to export.',
+        summary: clientSummary,
+      });
+    }
+
+    const rawZipName = archiveName
+      ? sanitizeOriginalBasename(String(archiveName))
+      : `${path.basename(folderPath)}-selected-pdfs.zip`;
+    const finalZipName = rawZipName.toLowerCase().endsWith('.zip') ? rawZipName : `${rawZipName}.zip`;
+    const encodedSummary = Buffer.from(JSON.stringify(clientSummary), 'utf8').toString('base64');
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', buildContentDispositionHeader(finalZipName, false));
+    res.setHeader('Content-Length', String(zipBuffer.length));
+    res.setHeader('X-PDF-Export-Summary', encodedSummary);
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-PDF-Export-Summary');
+    return res.send(zipBuffer);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Bulk PDF ZIP export failed' });
   }
 });
 
@@ -2318,32 +2622,35 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
         if (response.ok) {
           const data = await response.json();
           const item = data.message;
-          const authors = (item.author || []).map((a: any) => {
-            if (a.given && a.family) return `${a.family}, ${a.given}`;
-            return a.family || a.name || 'Unknown Author';
-          });
+          const authors = sanitizeAuthorsList(
+            (item.author || []).map((a: any) => {
+              if (a.given && a.family) return `${a.family}, ${a.given}`;
+              return a.family || a.name || '';
+            })
+          );
           const publishedDate =
             item['published-print']?.['date-parts']?.[0] ||
             item['published-online']?.['date-parts']?.[0] ||
             item['created']?.['date-parts']?.[0] ||
             [];
-          const year = publishedDate[0] || item.issued?.['date-parts']?.[0]?.[0] || new Date().getFullYear();
+          const yearRaw = publishedDate[0] || item.issued?.['date-parts']?.[0]?.[0];
           const cleanAbstract = cleanXmlAbstract(item.abstract);
           const resolvedTitle = Array.isArray(item.title) ? item.title[0] : item.title || queryTitle || 'Untitled';
           if (!queryTitle && resolvedTitle && resolvedTitle !== 'Untitled') {
             queryTitle = resolvedTitle;
           }
+          const containerTitle = Array.isArray(item['container-title'])
+            ? item['container-title'][0] || ''
+            : item['container-title'] || '';
 
           bestPayload = {
             success: true,
             matchedBy: 'doi',
             doi: cleanDoi,
             title: resolvedTitle,
-            authors: authors.length > 0 ? authors : ['Unknown Author'],
-            year: Number(year),
-            journal: Array.isArray(item['container-title'])
-              ? item['container-title'][0]
-              : item['container-title'] || item.publisher || 'Academic Publication',
+            authors,
+            year: yearRaw ? Number(yearRaw) : undefined,
+            journal: isPlaceholderVenue(containerTitle) ? '' : containerTitle,
             abstract: cleanAbstract,
             volume: item.volume || '',
             issue: item.issue || '',
@@ -2391,21 +2698,25 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
             return hits / targetTokens.length >= 0.55;
           });
           if (bestItem) {
-            const authors = (bestItem.author || []).map((a: any) => {
-              if (a.given && a.family) return `${a.family}, ${a.given}`;
-              return a.family || a.name || 'Unknown Author';
-            });
+            const authors = sanitizeAuthorsList(
+              (bestItem.author || []).map((a: any) => {
+                if (a.given && a.family) return `${a.family}, ${a.given}`;
+                return a.family || a.name || '';
+              })
+            );
             const publishedDate =
               bestItem['published-print']?.['date-parts']?.[0] ||
               bestItem['published-online']?.['date-parts']?.[0] ||
               bestItem['created']?.['date-parts']?.[0] ||
               [];
-            const year =
-              publishedDate[0] || bestItem.issued?.['date-parts']?.[0]?.[0] || new Date().getFullYear();
+            const yearRaw = publishedDate[0] || bestItem.issued?.['date-parts']?.[0]?.[0];
             const crAbs = cleanXmlAbstract(bestItem.abstract);
             const resolvedTitle = Array.isArray(bestItem.title)
               ? bestItem.title[0]
               : bestItem.title || queryTitle;
+            const containerTitle = Array.isArray(bestItem['container-title'])
+              ? bestItem['container-title'][0] || ''
+              : bestItem['container-title'] || '';
 
             bestPayload = {
               ...(bestPayload || {}),
@@ -2414,17 +2725,13 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
               doi: bestPayload?.doi || bestItem.DOI || '',
               title: bestPayload?.title || resolvedTitle,
               authors:
-                bestPayload?.authors?.length && bestPayload.authors[0] !== 'Unknown Author'
-                  ? bestPayload.authors
-                  : authors.length > 0
-                  ? authors
-                  : ['Unknown Author'],
-              year: bestPayload?.year || Number(year),
+                bestPayload?.authors && sanitizeAuthorsList(bestPayload.authors).length > 0
+                  ? sanitizeAuthorsList(bestPayload.authors)
+                  : authors,
+              year: bestPayload?.year || (yearRaw ? Number(yearRaw) : undefined),
               journal:
                 bestPayload?.journal ||
-                (Array.isArray(bestItem['container-title'])
-                  ? bestItem['container-title'][0]
-                  : bestItem['container-title'] || bestItem.publisher || 'Academic Publication'),
+                (isPlaceholderVenue(containerTitle) ? '' : containerTitle),
               abstract: crAbs || bestPayload?.abstract || '',
               volume: bestPayload?.volume || bestItem.volume || '',
               issue: bestPayload?.issue || bestItem.issue || '',
@@ -2464,8 +2771,11 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
           const match = cleanDoi ? oaData : (oaData.results || [])[0];
           if (match && (match.id || match.title)) {
             const rawDoi = match.doi ? match.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : cleanDoi;
-            const authors = (match.authorships || []).map((a: any) => a.author?.display_name || 'Unknown');
+            const authors = sanitizeAuthorsList((match.authorships || []).map((a: any) => a.author?.display_name || ''));
             const oaAbstract = cleanXmlAbstract(reconstructAbstract(match.abstract_inverted_index));
+            const oaJournal = match.primary_location?.source?.display_name || match.host_venue?.name || '';
+            const bib = match.biblio || {};
+            const oaPages = bib.first_page && bib.last_page ? `${bib.first_page}-${bib.last_page}` : bib.first_page || '';
 
             bestPayload = {
               ...(bestPayload || {}),
@@ -2474,17 +2784,14 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
               doi: bestPayload?.doi || rawDoi || '',
               title: bestPayload?.title || match.title || queryTitle || 'Untitled Study',
               authors:
-                bestPayload?.authors?.length && bestPayload.authors[0] !== 'Unknown Author'
-                  ? bestPayload.authors
-                  : authors.length > 0
-                  ? authors
-                  : ['Unknown Author'],
-              year: bestPayload?.year || match.publication_year || new Date().getFullYear(),
-              journal:
-                bestPayload?.journal ||
-                match.primary_location?.source?.display_name ||
-                match.host_venue?.name ||
-                'Academic Journal',
+                bestPayload?.authors && sanitizeAuthorsList(bestPayload.authors).length > 0
+                  ? sanitizeAuthorsList(bestPayload.authors)
+                  : authors,
+              year: bestPayload?.year || match.publication_year || undefined,
+              journal: bestPayload?.journal || (isPlaceholderVenue(oaJournal) ? '' : oaJournal),
+              volume: bestPayload?.volume || bib.volume || '',
+              issue: bestPayload?.issue || bib.issue || '',
+              pagesStr: bestPayload?.pagesStr || oaPages,
               abstract: oaAbstract || bestPayload?.abstract || '',
               citationsCount: Math.max(bestPayload?.citationsCount || 0, match.cited_by_count || 0),
               url: bestPayload?.url || match.doi || match.primary_location?.landing_page_url || '',
@@ -2521,6 +2828,7 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
           const hit = epmcData?.resultList?.result?.[0];
           const epmcAbs = cleanXmlAbstract(hit?.abstractText);
           if (hit && epmcAbs.length >= 60) {
+            const epmcAuthors = sanitizeAuthorsList(hit.authorString ? hit.authorString.split(/,\s*/).slice(0, 25) : []);
             return res.json({
               ...(bestPayload || {}),
               success: true,
@@ -2528,13 +2836,14 @@ app.post('/api/metadata/enrich', async (req: Request, res: Response) => {
               doi: bestPayload?.doi || hit.doi || cleanDoi || '',
               title: bestPayload?.title || hit.title || queryTitle || 'Untitled Study',
               authors:
-                bestPayload?.authors?.length && bestPayload.authors[0] !== 'Unknown Author'
-                  ? bestPayload.authors
-                  : hit.authorString
-                  ? hit.authorString.split(/,\s*/).slice(0, 12)
-                  : ['Unknown Author'],
-              year: bestPayload?.year || Number(hit.pubYear) || new Date().getFullYear(),
-              journal: bestPayload?.journal || hit.journalTitle || 'Academic Publication',
+                bestPayload?.authors && sanitizeAuthorsList(bestPayload.authors).length > 0
+                  ? sanitizeAuthorsList(bestPayload.authors)
+                  : epmcAuthors,
+              year: bestPayload?.year || (hit.pubYear ? Number(hit.pubYear) : undefined),
+              journal: bestPayload?.journal || hit.journalTitle || '',
+              volume: bestPayload?.volume || hit.journalVolume || '',
+              issue: bestPayload?.issue || hit.issue || '',
+              pagesStr: bestPayload?.pagesStr || hit.pageInfo || '',
               abstract: epmcAbs,
               citationsCount: bestPayload?.citationsCount || Number(hit.citedByCount) || 0,
               url: bestPayload?.url || (hit.doi ? `https://doi.org/${hit.doi}` : ''),
@@ -3242,8 +3551,9 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
     const perSourceRows = queryAllSources ? Math.min(requestedRows, 250) : requestedRows;
 
     const mapOpenAlexWork = (w: any, forcedSource?: string) => {
-      const authors = (w.authorships || []).map((a: any) => a.author?.display_name || 'Unknown');
-      const journal = w.primary_location?.source?.display_name || 'Academic Venue';
+      const authors = sanitizeAuthorsList((w.authorships || []).map((a: any) => a.author?.display_name || ''));
+      const journalRaw = w.primary_location?.source?.display_name || '';
+      const journal = isPlaceholderVenue(journalRaw) ? '' : journalRaw;
       const publisher = w.primary_location?.source?.host_organization_name || '';
       const workDoi = w.doi ? w.doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
       const sourceDb = forcedSource || 'OpenAlex';
@@ -3256,6 +3566,8 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
       const isOpenAccess = Boolean(w.open_access?.is_oa || pdfUrl);
       const url = w.doi || w.primary_location?.landing_page_url || openAccessUrl || '';
       const abstract = reconstructAbstract(w.abstract_inverted_index) || 'No abstract text available in record.';
+      const bib = w.biblio || {};
+      const pagesStr = bib.first_page && bib.last_page ? `${bib.first_page}-${bib.last_page}` : bib.first_page || '';
       const accessMeta = classifyOnlineAccessStatus({
         pdfUrl,
         openAccessUrl,
@@ -3272,9 +3584,12 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         openAlexId: w.id || '',
         doi: workDoi,
         title: w.title || 'Untitled',
-        authors: authors.slice(0, 6),
-        year: w.publication_year || new Date().getFullYear(),
+        authors: authors.slice(0, 25),
+        year: w.publication_year || undefined,
         journal,
+        volume: bib.volume || '',
+        issue: bib.issue || '',
+        pagesStr,
         publisher,
         abstract,
         sourceDatabase: sourceDb,
@@ -3288,19 +3603,21 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
     };
 
     const mapCrossrefItem = (item: any, forcedSource = 'Crossref') => {
-      const authors = (item.author || []).map((a: any) => {
-        if (a.given && a.family) return `${a.family}, ${a.given}`;
-        return a.family || a.name || 'Unknown';
-      });
+      const authors = sanitizeAuthorsList(
+        (item.author || []).map((a: any) => {
+          if (a.given && a.family) return `${a.family}, ${a.given}`;
+          return a.family || a.name || '';
+        })
+      );
       const published =
         item['published-print']?.['date-parts']?.[0]?.[0] ||
         item['published-online']?.['date-parts']?.[0]?.[0] ||
-        item.issued?.['date-parts']?.[0]?.[0] ||
-        new Date().getFullYear();
+        item.issued?.['date-parts']?.[0]?.[0];
       const itemDoi = item.DOI ? item.DOI.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '') : '';
-      const journal = Array.isArray(item['container-title'])
-        ? item['container-title'][0]
-        : item['container-title'] || item.publisher || 'Academic Venue';
+      const rawJournal = Array.isArray(item['container-title'])
+        ? item['container-title'][0] || ''
+        : item['container-title'] || '';
+      const journal = isPlaceholderVenue(rawJournal) ? '' : rawJournal;
       const pdfLinkObj = (item.link || []).find(
         (l: any) => (l['content-type'] || '').toLowerCase().includes('pdf') && l.URL
       );
@@ -3322,9 +3639,12 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         id: `cr-${(itemDoi || Math.random().toString(36).slice(2, 10)).replace(/[^a-zA-Z0-9._-]/g, '')}-${Math.random().toString(36).slice(2, 6)}`,
         doi: itemDoi,
         title: Array.isArray(item.title) ? item.title[0] : item.title || 'Untitled',
-        authors: authors.slice(0, 6),
-        year: Number(published),
+        authors: authors.slice(0, 25),
+        year: published ? Number(published) : undefined,
         journal,
+        volume: item.volume || '',
+        issue: item.issue || '',
+        pagesStr: item.page || '',
         publisher: item.publisher || '',
         abstract,
         sourceDatabase: forcedSource,
@@ -3417,9 +3737,9 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
               id: `oai-${Math.random().toString(36).slice(2, 10)}`,
               doi: doiVal,
               title: String(titleRaw || 'Untitled'),
-              authors: creators.length > 0 ? creators.slice(0, 6) : ['Author Unknown'],
-              year: yearMatch ? parseInt(yearMatch[0], 10) : new Date().getFullYear(),
-              journal,
+              authors: sanitizeAuthorsList(creators).slice(0, 25),
+              year: yearMatch ? parseInt(yearMatch[0], 10) : undefined,
+              journal: isPlaceholderVenue(journal) ? '' : journal,
               publisher,
               abstract,
               sourceDatabase: forcedSource,
@@ -3773,9 +4093,12 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
             pmid: r.pmid || '',
             pmcid: r.pmcid || '',
             title: (r.title || 'Untitled').replace(/<[^>]+>/g, '').trim(),
-            authors: authors.length > 0 ? authors.slice(0, 6) : ['Author Unknown'],
-            year: Number(r.pubYear) || new Date().getFullYear(),
-            journal: r.journalTitle || r.bookOrReportDetails?.publisher || 'Europe PMC Indexed Journal',
+            authors: sanitizeAuthorsList(authors).slice(0, 25),
+            year: r.pubYear ? Number(r.pubYear) : undefined,
+            journal: r.journalTitle || '',
+            volume: r.journalVolume || '',
+            issue: r.issue || '',
+            pagesStr: r.pageInfo || '',
             abstract,
             sourceDatabase: forcedSource,
             citationsCount: r.citedByCount || 0,
@@ -3843,9 +4166,12 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
                 id: `doaj-${rec.id || Math.random().toString(36).slice(2, 10)}`,
                 doi: doiVal,
                 title: b.title || 'Untitled DOAJ Article',
-                authors: authors.length > 0 ? authors.slice(0, 6) : ['Author Unknown'],
-                year: Number(b.year) || new Date().getFullYear(),
-                journal: b.journal?.title || 'DOAJ Open Access Journal',
+                authors: sanitizeAuthorsList(authors).slice(0, 25),
+                year: b.year ? Number(b.year) : undefined,
+                journal: b.journal?.title || '',
+                volume: b.journal?.volume || '',
+                issue: b.journal?.number || '',
+                pagesStr: b.start_page && b.end_page ? `${b.start_page}-${b.end_page}` : b.start_page || '',
                 publisher: b.journal?.publisher || '',
                 abstract,
                 sourceDatabase: 'DOAJ',
@@ -3973,10 +4299,10 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
             doi: doiVal,
             title: p.title || 'Untitled',
             authors: Array.isArray(p.authors)
-              ? p.authors.slice(0, 6).map((a: any) => a.name || 'Unknown')
-              : ['Unknown Author'],
-            year: Number(p.year) || new Date().getFullYear(),
-            journal: p.venue || 'Semantic Scholar Indexed Venue',
+              ? sanitizeAuthorsList(p.authors.slice(0, 25).map((a: any) => a.name || ''))
+              : [],
+            year: p.year ? Number(p.year) : undefined,
+            journal: isPlaceholderVenue(p.venue) ? '' : p.venue || '',
             abstract: p.abstract || 'Abstract not provided by Semantic Scholar.',
             sourceDatabase: forcedSource,
             citationsCount: p.citationCount || 0,
@@ -4280,7 +4606,7 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
 app.get('/api/online/proxy-pdf', async (req: Request, res: Response) => {
   try {
     const rawUrl = ((req.query.url as string) || '').trim();
-    const rawName = ((req.query.filename as string) || 'research-paper').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const rawNameParam = (req.query.filename as string) || 'research-paper.pdf';
     if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) {
       return res.status(400).json({ error: 'Valid http/https PDF URL is required' });
     }
@@ -4323,10 +4649,12 @@ app.get('/api/online/proxy-pdf', async (req: Request, res: Response) => {
       });
     }
 
-    const finalName = rawName.toLowerCase().endsWith('.pdf') ? rawName : `${rawName}.pdf`;
+    const cleanBasename = sanitizeOriginalBasename(rawNameParam);
+    const finalName = cleanBasename.toLowerCase().endsWith('.pdf') ? cleanBasename : `${cleanBasename}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${finalName}"`);
+    res.setHeader('Content-Disposition', buildContentDispositionHeader(finalName, req.query.inline === '1'));
     res.setHeader('Content-Length', String(buf.length));
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     return res.send(buf);
   } catch (err: any) {
     return res.status(502).json({
@@ -5289,11 +5617,14 @@ Return a JSON object:
     console.warn('Gemini cloud synthesis failed or timed out, returning structured proposal fallback:', err?.message);
   }
 
-  // Fallback structured 9-part proposal generator
+  // Fallback structured 9-part proposal generator using core verified citation engine
   const rawArts = includedArticles || req.body.includedArticles || [];
   const proj = project || req.body.project || {};
-  const arts = rawArts.length > 0 ? rawArts : (proj.articles || []);
-  const referencesSection = arts.map((a: any, idx: number) => `[${idx + 1}] ${a.authors?.join(', ') || 'Unknown'} (${a.year || '2024'}). "${a.title}". ${a.journal || 'Academic Publication'}. DOI: https://doi.org/${a.doi || ''}`).join('\n\n') || '[1] Empirical literature base defined in systematic review protocol.';
+  const arts = deduplicateArticlesForBibliography(rawArts.length > 0 ? rawArts : (proj.articles || []));
+  const referencesSection =
+    arts
+      .map((a: any, idx: number) => `${idx + 1}. ${formatReferenceString(a, 'apa7', idx + 1)}`)
+      .join('\n\n') || '[1] Empirical literature base defined in systematic review protocol.';
 
   const fallbackData = {
     title: proj.title || 'Systematic Literature Review',
@@ -5327,7 +5658,14 @@ Return a JSON object:
       {
         number: 5,
         title: 'Literature review and research gap',
-        markdownContent: arts.map((a: any, idx: number) => `### [${idx + 1}] ${a.title} (${a.year})\n- **Authors:** ${a.authors?.join(', ') || 'Unknown'}\n- **Journal:** *${a.journal || 'Academic Publication'}* (DOI: [${a.doi || 'N/A'}](https://doi.org/${a.doi || ''}))\n- **Extracted Evidence:** ${a.abstract || 'Empirical study data.'}\n\n`).join('')
+        markdownContent: arts.map((a: any, idx: number) => {
+          const v = validateArticleMetadata(a);
+          const s = v.sanitized;
+          const authorsLine = s.authors.length > 0 ? s.authors.join(', ') : 'Not listed in metadata';
+          const sourceLine = s.journalOrSource || s.publisher || 'Source metadata pending verification';
+          const doiFragment = s.doi ? ` · DOI: [https://doi.org/${s.doi}](https://doi.org/${s.doi})` : '';
+          return `### [${idx + 1}] ${s.title} (${s.year || 'n.d.'})\n- **Authors:** ${authorsLine}\n- **Source:** *${sourceLine}*${doiFragment} · *Citation Status: ${v.verificationStatus}*\n- **Extracted Evidence:** ${a.abstract || 'Empirical study data.'}\n\n`;
+        }).join('')
       },
       {
         number: 6,
@@ -5352,8 +5690,8 @@ Return a JSON object:
     ],
     citationIndex: arts.map((a: any, idx: number) => ({
       number: idx + 1,
-      doi: a.doi || '',
-      citation: `${a.authors?.join(', ') || 'Unknown'} (${a.year || '2024'}). ${a.title}. ${a.journal || ''}`,
+      doi: normalizeValidDoi(a.doi) || '',
+      citation: formatReferenceString(a, 'apa7', idx + 1),
       keyFindings: (a.abstract || '').slice(0, 200) + '...'
     }))
   };
@@ -6034,54 +6372,11 @@ function createZipBuffer(entries: Array<{ name: string; data: Buffer }>): Buffer
 }
 
 function serverFormatRef(art: any, style: string, idx1: number): string {
-  const authors: string[] = Array.isArray(art.authors) && art.authors.length > 0 ? art.authors : ['Unknown Author'];
-  const leadRaw = authors[0] || 'Unknown';
-  const leadLast = leadRaw.includes(',') ? leadRaw.split(',')[0].trim() : leadRaw.split(/\s+/).pop() || 'Unknown';
-  const year = art.year || 'n.d.';
-  const title = String(art.title || 'Untitled').replace(/\.+$/, '').trim();
-  const journal = String(art.journal || 'Academic Venue').trim();
-  const cleanDoi = String(art.doi || '').trim().replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
-  const doiUrl = cleanDoi ? `https://doi.org/${cleanDoi}` : String(art.url || '');
-
-  if (style === 'ieee') {
-    return `[${idx1}] ${authors.slice(0, 6).join(', ')}, "${title}," *${journal}*, ${year}.${cleanDoi ? ` doi: ${cleanDoi}.` : ''}`;
-  }
-  if (style === 'vancouver') {
-    return `${idx1}. ${authors.slice(0, 6).join(', ')}. ${title}. ${journal}. ${year}.${cleanDoi ? ` doi:${cleanDoi}` : ''}`;
-  }
-  if (style === 'harvard') {
-    const auth = authors.length > 2 ? `${leadLast} et al.` : authors.join(' & ');
-    return `${auth} (${year}) '${title}', *${journal}*.${doiUrl ? ` Available at: ${doiUrl}` : ''}`;
-  }
-  if (style === 'mla9') {
-    const auth = authors.length > 2 ? `${authors[0]}, et al.` : authors.join(', and ');
-    return `${auth}. "${title}." *${journal}*, ${year}.${doiUrl ? ` ${doiUrl}.` : ''}`;
-  }
-  if (style === 'chicago17') {
-    const auth = authors.length > 3 ? `${authors[0]} et al.` : authors.join(', ');
-    return `${auth}. ${year}. "${title}." *${journal}*.${doiUrl ? ` ${doiUrl}.` : ''}`;
-  }
-  if (style === 'nature') {
-    const auth = authors.length > 4 ? `${leadLast} et al.` : authors.join(', ');
-    return `[${idx1}] ${auth} ${title}. *${journal}* (${year}).${doiUrl ? ` ${doiUrl}` : ''}`;
-  }
-  // APA 7th default
-  const auth = authors.length > 20 ? `${authors.slice(0, 19).join(', ')}, ... ${authors[authors.length - 1]}` : authors.join(', ');
-  return `${auth} (${year}). ${title}. *${journal}*.${doiUrl ? ` ${doiUrl}` : ''}`;
+  return formatReferenceString(art, (style || 'apa7') as CitationStyleId, idx1);
 }
 
 function serverInlineTag(art: any, style: string, idx1: number): string {
-  const authors: string[] = Array.isArray(art.authors) && art.authors.length > 0 ? art.authors : ['Unknown'];
-  const leadRaw = authors[0] || 'Unknown';
-  const lead = leadRaw.includes(',') ? leadRaw.split(',')[0].trim() : leadRaw.split(/\s+/).pop() || 'Unknown';
-  const year = art.year || 'n.d.';
-  if (style === 'ieee' || style === 'nature') return `[${idx1}]`;
-  if (style === 'vancouver') return `(${idx1})`;
-  if (style === 'mla9') return authors.length > 2 ? `(${lead} et al.)` : `(${lead})`;
-  if (style === 'harvard' || style === 'chicago17') {
-    return authors.length > 2 ? `(${lead} et al. ${year})` : `(${lead} ${year})`;
-  }
-  return authors.length > 2 ? `(${lead} et al., ${year})` : `(${lead}, ${year})`;
+  return formatInlineCitation(art, (style || 'apa7') as CitationStyleId, idx1);
 }
 
 app.post('/api/export/notebook-bundle', async (req: Request, res: Response) => {
@@ -6107,20 +6402,32 @@ app.post('/api/export/notebook-bundle', async (req: Request, res: Response) => {
     const zipEntries: Array<{ name: string; data: Buffer }> = [];
     const manifestRows: any[] = [];
     let pdfDownloadedCount = 0;
+    const projectFolderPath = project?.id ? findFolderForProjectId(String(project.id)) : null;
+    const usedZipNames = new Set<string>();
 
-    // Download original PDFs in bounded concurrent batches of 5 (cap 35 PDFs per ZIP so response stays fast & reliable)
+    // Prefer exact original PDFs from local disk vault; fallback to OA remote fetch
     const pdfResults = new Map<number, { ok: boolean; buf?: Buffer; fileName?: string; reason?: string }>();
     if (includePdfs) {
-      const targetList = articles.slice(0, 35);
+      const targetList = articles.slice(0, 50);
       const batchSize = 5;
       for (let i = 0; i < targetList.length; i += batchSize) {
         const chunk = targetList.slice(i, i + batchSize);
         await Promise.all(
           chunk.map(async (art: any, localIdx: number) => {
             const idx0 = i + localIdx;
+            if (projectFolderPath) {
+              const diskCheck = await verifyAndReadPdfForArticle(projectFolderPath, art, {
+                fetchRemoteIfMissing: true,
+              });
+              if (diskCheck.ok && diskCheck.buffer) {
+                const zipName = resolveZipCollisionName(diskCheck.originalFilename, usedZipNames);
+                pdfResults.set(idx0, { ok: true, buf: diskCheck.buffer, fileName: zipName });
+                return;
+              }
+            }
             const candidateUrl = (art.pdfUrl || art.openAccessUrl || '').trim();
             if (!candidateUrl || !/^https?:\/\//i.test(candidateUrl)) {
-              pdfResults.set(idx0, { ok: false, reason: 'No direct PDF URL indexed' });
+              pdfResults.set(idx0, { ok: false, reason: 'Original PDF binary not present locally or indexed via OA URL' });
               return;
             }
             try {
@@ -6145,9 +6452,13 @@ app.post('/api/export/notebook-bundle', async (req: Request, res: Response) => {
                 pdfResults.set(idx0, { ok: false, reason: 'Publisher returned HTML/paywall instead of binary PDF' });
                 return;
               }
-              const lead = (art.authors?.[0] || 'Author').split(',')[0].split(/\s+/).pop() || 'Author';
-              const pdfName = `${String(idx0 + 1).padStart(2, '0')}_${slugSafe(lead, 18)}_${art.year || 'nd'}_${slugSafe(art.title, 36)}.pdf`;
-              pdfResults.set(idx0, { ok: true, buf, fileName: pdfName });
+              const origBase =
+                art.original_filename ||
+                art.pdfStorage?.original_filename ||
+                art.sourceFileName ||
+                `${slugSafe(art.title, 48)}.pdf`;
+              const zipName = resolveZipCollisionName(origBase, usedZipNames);
+              pdfResults.set(idx0, { ok: true, buf, fileName: zipName });
             } catch (e: any) {
               pdfResults.set(idx0, { ok: false, reason: e?.message || 'PDF download timeout' });
             }
@@ -6185,16 +6496,20 @@ app.post('/api/export/notebook-bundle', async (req: Request, res: Response) => {
     ];
 
     const refsList: string[] = [];
-    const bibEntries: string[] = [];
+    const styleId = (citationStyle || 'apa7') as CitationStyleId;
+    const bibTexFull = formatBibTexEntries(articles);
+    const bibEntries: string[] = bibTexFull ? [bibTexFull] : [];
 
     articles.forEach((art: any, idx: number) => {
       const idx1 = idx + 1;
-      const refLine = formattedReferences[idx] || serverFormatRef(art, citationStyle, idx1);
-      const inlineTag = serverInlineTag(art, citationStyle, idx1);
+      const refLine = formattedReferences[idx] || serverFormatRef(art, styleId, idx1);
+      const inlineTag = serverInlineTag(art, styleId, idx1);
       refsList.push(refLine);
 
-      const lead = (art.authors?.[0] || 'Study').split(',')[0].split(/\s+/).pop() || 'Study';
-      const baseSlug = `${String(idx1).padStart(2, '0')}_${slugSafe(lead, 18)}_${art.year || 'nd'}_${slugSafe(art.title, 36)}`;
+      const validation = validateArticleMetadata(art);
+      const s = validation.sanitized;
+      const lead = (s.authors[0] || 'Study').split(',')[0].split(/\s+/).pop() || 'Study';
+      const baseSlug = `${String(idx1).padStart(2, '0')}_${slugSafe(lead, 18)}_${s.year || 'nd'}_${slugSafe(s.title, 36)}`;
 
       const pdfRes = pdfResults.get(idx);
       if (pdfRes?.ok && pdfRes.buf && pdfRes.fileName) {
@@ -6204,6 +6519,12 @@ app.post('/api/export/notebook-bundle', async (req: Request, res: Response) => {
           data: pdfRes.buf,
         });
       }
+
+      const mdText = buildGroundedArticleTextSource(art, styleId, idx1);
+      zipEntries.push({
+        name: `02_Paper_FullText_Sources/${baseSlug}.md`,
+        data: Buffer.from(mdText, 'utf8'),
+      });
 
       const ed = art.extractedData || {};
       const extractedLines = [
@@ -6223,61 +6544,17 @@ app.post('/api/export/notebook-bundle', async (req: Request, res: Response) => {
         .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
         .map(([k, v]) => `- **${k}:** ${v}`);
 
-      const evidenceLines = Array.isArray(art.evidenceCitations)
-        ? art.evidenceCitations.map(
-            (ev: any) => `- **p. ${ev.pageNumber} (${ev.section}):** "${ev.quote}" — *${ev.relevance}*`
-          )
-        : [];
-
-      const pageText =
-        Array.isArray(art.pages) && art.pages.length > 0
-          ? art.pages.map((p: any) => `### Page ${p.pageNumber}\n${p.content || ''}`).join('\n\n')
-          : art.fullText || '';
-
-      const mdLines = [
-        `# [${idx1}] ${inlineTag} ${art.title || 'Untitled'}`,
-        ``,
-        `- **Citation (${citationStyle.toUpperCase()}):** ${refLine}`,
-        `- **Authors:** ${(art.authors || []).join(', ') || 'Unknown'}`,
-        `- **Year:** ${art.year || 'N/A'}`,
-        `- **Journal:** ${art.journal || 'N/A'}`,
-        `- **DOI:** ${art.doi || 'N/A'}`,
-        `- **Source Database / Original File:** ${art.sourceDatabase || 'Library'}${art.sourceFileName ? ` (${art.sourceFileName})` : ''}`,
-        `- **PDF Status:** ${pdfRes?.ok ? `Original PDF exported (${pdfRes.fileName})` : pdfRes?.reason || art.accessNotes || 'Metadata/Full-Text Markdown source'}`,
-        ``,
-        `## Abstract`,
-        art.abstract || 'No abstract provided.',
-      ];
-
-      if (extractedLines.length > 0) {
-        mdLines.push('', '## Extracted Study Parameters', ...extractedLines);
-      }
-      if (evidenceLines.length > 0) {
-        mdLines.push('', '## Pinned Page-Level Evidence Citations', ...evidenceLines);
-      }
-      if (pageText) {
-        mdLines.push('', '## Full-Text Content', pageText);
-      }
-
-      zipEntries.push({
-        name: `02_Paper_FullText_Sources/${baseSlug}.md`,
-        data: Buffer.from(mdLines.join('\n'), 'utf8'),
-      });
-
       masterSections.push(
-        `\n### [${idx1}] ${inlineTag} ${art.title}\n${refLine}\n\n${art.abstract || ''}${extractedLines.length ? '\n' + extractedLines.join('\n') : ''}`
-      );
-
-      bibEntries.push(
-        `@article{${slugSafe(lead, 14)}${art.year || '2024'}_${idx1},\n  title = {${String(art.title || '').replace(/[{}]/g, '')}},\n  author = {${(art.authors || ['Unknown']).join(' and ')}},\n  journal = {${String(art.journal || '').replace(/[{}]/g, '')}},\n  year = {${art.year || ''}},\n  doi = {${art.doi || ''}},\n  url = {${art.url || art.pdfUrl || ''}}\n}`
+        `\n### [${idx1}] ${inlineTag} ${s.title}\n${refLine}\n\n${art.abstract || ''}${extractedLines.length ? '\n' + extractedLines.join('\n') : ''}`
       );
 
       manifestRows.push({
         index: idx1,
         id: art.id,
-        title: art.title,
-        doi: art.doi || '',
-        sourceFileName: art.sourceFileName || '',
+        title: s.title,
+        doi: s.doi || '',
+        original_filename: art.original_filename || art.sourceFileName || '',
+        verificationStatus: validation.verificationStatus,
         pdfUrl: art.pdfUrl || art.openAccessUrl || '',
         originalPdfExported: Boolean(pdfRes?.ok),
         exportedPdfFile: pdfRes?.fileName || null,

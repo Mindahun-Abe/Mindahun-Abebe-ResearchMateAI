@@ -192,7 +192,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     total: number;
     resolved: number;
   }>({ done: 0, total: 0, resolved: 0 });
-  const [visibleLimit, setVisibleLimit] = useState<number>(100);
+  const [visibleLimit, setVisibleLimit] = useState<number>(500);
 
   // Bulk Selection & Per-Folder Permanent Remover States
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());

@@ -337,7 +337,15 @@ export async function parseLocalDataFilesWithOriginals(
       doiHint = hints.doiHint;
       titleHint = hints.titleHint;
       snippetHint = hints.snippet;
-    } else if (lowerName.endsWith('.txt') || lowerName.endsWith('.md')) {
+    } else if (
+      lowerName.endsWith('.txt') ||
+      lowerName.endsWith('.md') ||
+      lowerName.endsWith('.html') ||
+      lowerName.endsWith('.htm') ||
+      lowerName.endsWith('.rtf') ||
+      lowerName.endsWith('.doc') ||
+      lowerName.endsWith('.docx')
+    ) {
       const hints = await extractTextHints(file);
       doiHint = hints.doiHint;
       titleHint = hints.titleHint;

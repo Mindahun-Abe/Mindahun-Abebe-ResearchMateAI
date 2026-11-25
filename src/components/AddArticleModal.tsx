@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Article, ReviewProject, DatabaseProvenance } from '../types';
+import { Article, ReviewProject, DatabaseProvenance, OnlineSearchSession } from '../types';
 import {
   Upload,
   Files,
@@ -30,7 +30,6 @@ import {
 } from '../utils/slrDetectionEngine';
 import { extractReadablePdfHints } from '../utils/abstractDisplay';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
-import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
 import {
   isPlaceholderVenue,
   sanitizeAuthorsList,
@@ -54,15 +53,10 @@ interface AddArticleModalProps {
   ) => void;
   onDeleteArticlesByIds?: (articleIds: string[], targetProjectId?: string) => Promise<void> | void;
   onClearFolderArticles?: (targetProjectId?: string) => Promise<void> | void;
-  onRestoredDeletedArticles?: (
-    targetProjectId: string,
-    res: {
-      restoredCount: number;
-      restoredArticles: Article[];
-      remainingArticles: Article[];
-      remainingDeletedCount: number;
-      databaseFolderPath?: string;
-    }
+  onSyncProjectAfterOnlineImport?: (
+    projectId: string,
+    articles: Article[],
+    sessions: OnlineSearchSession[]
   ) => void;
   project?: ReviewProject;
   allProjects?: ReviewProject[];
@@ -123,14 +117,13 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
   onAddMultipleArticles,
   onDeleteArticlesByIds,
   onClearFolderArticles,
-  onRestoredDeletedArticles,
+  onSyncProjectAfterOnlineImport,
   project,
   allProjects = [],
   onSwitchProject,
   onCreateNewReview,
   initialTab = 'manual',
 }) => {
-  const [showDeletedOnlineArchive, setShowDeletedOnlineArchive] = useState(false);
   // Support manual insertion with empty placeholders as well as bulk
   const [activeTab, setActiveTab] = useState<'manual' | 'bulk_local' | 'online'>(initialTab);
   const [selectedTargetId, setSelectedTargetId] = useState<string>(project?.id || '');
@@ -349,6 +342,8 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
         projectId: lockedProjectId,
         sourceFileName: file.name,
         original_filename: file.name,
+        intakeSource: 'bulk_importer' as const,
+        importedAt: new Date().toISOString(),
       };
 
       // 1. Direct bibliography / structured text files (.bib, .ris, .csv, .tsv, .txt, .json, .enw, .nbib, .ciw)
@@ -952,8 +947,14 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
   const handleImportResolvedBulk = () => {
     if (resolvedArticles.length === 0) return;
     const lockedProjectId = targetProject?.id;
+    const nowIso = new Date().toISOString();
+    const stampedResolved = resolvedArticles.map((a) => ({
+      ...a,
+      intakeSource: a.intakeSource || ('bulk_importer' as const),
+      importedAt: a.importedAt || nowIso,
+    }));
     const bulkPdfMap = new Map<string, File>();
-    for (const a of resolvedArticles) {
+    for (const a of stampedResolved) {
       const f = pendingPdfFilesRef.current.get(a.id);
       if (f) {
         bulkPdfMap.set(a.id, f);
@@ -962,12 +963,12 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
     }
 
     if (onAddMultipleArticles) {
-      onAddMultipleArticles(resolvedArticles, {
+      onAddMultipleArticles(stampedResolved, {
         targetProjectId: lockedProjectId,
         ...(bulkPdfMap.size > 0 ? { pdfFilesByArticleId: bulkPdfMap } : {}),
       });
     } else {
-      resolvedArticles.forEach((a) => onAddArticle(a, lockedProjectId, bulkPdfMap.get(a.id)));
+      stampedResolved.forEach((a) => onAddArticle(a, lockedProjectId, bulkPdfMap.get(a.id)));
     }
     setResolvedArticles([]);
     onClose();
@@ -1012,9 +1013,12 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
     const parsedYear = parseInt(manualYear.trim(), 10);
     const cleanJournal = isPlaceholderVenue(manualJournal.trim()) ? '' : manualJournal.trim();
 
+    const nowIso = new Date().toISOString();
     const baseArt: Article = {
       id: makeUniqueId('art-manual'),
       projectId: lockedProjectId,
+      intakeSource: 'manual_blank',
+      importedAt: nowIso,
       ...(manualPdfFile
         ? {
             sourceFileName: manualPdfFile.name,
@@ -1679,25 +1683,11 @@ export const AddArticleModal: React.FC<AddArticleModalProps> = ({
                   articles.forEach((a) => onAddArticle(a, lockedProjectId));
                 }
               }}
-              onOpenDeletedArchive={() => setShowDeletedOnlineArchive(true)}
+              onSyncProjectAfterImport={onSyncProjectAfterOnlineImport}
               onClose={onClose}
               compact
             />
           </div>
-        )}
-
-        {targetProject && (
-          <DeletedOnlineArchiveModal
-            isOpen={showDeletedOnlineArchive}
-            onClose={() => setShowDeletedOnlineArchive(false)}
-            projectId={targetProject.id}
-            projectTitle={targetProject.title || 'Untitled Review'}
-            onRestoredArticles={(res) => {
-              if (onRestoredDeletedArticles) {
-                onRestoredDeletedArticles(targetProject.id, res);
-              }
-            }}
-          />
         )}
 
         {/* TAB: MANUAL PAPER INSERTION (CLEAN PLACEHOLDERS, NOT AUTO-FILLED) */}

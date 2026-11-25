@@ -185,7 +185,7 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
 
   // Compute numbers from actual project articles with Original Research vs Review, Database Provenance, and 8 PRISMA Diagnostic checks
   const liveCounts = useMemo(() => {
-    const totalIdentified = project.articles.length;
+    let totalIdentified = project.articles.length;
     const dbCounts: Record<string, number> = {};
     const includedDbCounts: Record<string, number> = {};
     let duplicates = 0;
@@ -253,6 +253,18 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
             : `${sourceDb} (Duplicate)`;
         duplicateOverlapPairs[matchedDbs] = (duplicateOverlapPairs[matchedDbs] || 0) + 1;
       } else {
+        // Account for Stage A consolidated multi-database duplicate events without creating duplicate library rows
+        if (Array.isArray(art.databaseSourceRecords) && art.databaseSourceRecords.length > 1) {
+          for (const extraSrc of art.databaseSourceRecords.slice(1)) {
+            const extraDbName = extraSrc.databaseName || 'Other';
+            totalIdentified++;
+            duplicates++;
+            dbCounts[extraDbName] = (dbCounts[extraDbName] || 0) + 1;
+            const pairLabel = [sourceDb, extraDbName].sort().join(' ↔ ');
+            duplicateOverlapPairs[pairLabel] = (duplicateOverlapPairs[pairLabel] || 0) + 1;
+          }
+        }
+
         if (paperType === 'Review') screenedReviews++;
         else screenedOriginal++;
 
@@ -359,6 +371,94 @@ export const PrismaDiagram: React.FC<PrismaDiagramProps> = ({
     };
   }, [project.articles, analysisMap]);
 
+  const databaseAnalysisSummary = useMemo(() => {
+    const entries = Object.entries(liveCounts.dbCounts)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([database, identifiedCount]) => {
+        const includedCount = liveCounts.includedDbCounts[database] || 0;
+        const sharePct =
+          liveCounts.totalIdentified > 0
+            ? Number(((identifiedCount / liveCounts.totalIdentified) * 100).toFixed(1))
+            : 0;
+        return {
+          database,
+          identifiedCount,
+          includedCount,
+          sharePct,
+        };
+      });
+
+    const sumIdentifiedByDatabases = entries.reduce((sum, r) => sum + r.identifiedCount, 0);
+    const sumIncludedByDatabases = entries.reduce((sum, r) => sum + r.includedCount, 0);
+    const identificationEquation =
+      entries.length > 0
+        ? `${entries.map((r) => `${r.database} (${r.identifiedCount})`).join(' + ')} = ${sumIdentifiedByDatabases}`
+        : 'No database records yet';
+
+    const searchDbMap = new Map<
+      string,
+      {
+        database: string;
+        sessionsCount: number;
+        externalReported: number;
+        actuallyRetrieved: number;
+      }
+    >();
+    let sumSearchSaved = 0;
+    for (const s of project.onlineSearchSessions || []) {
+      sumSearchSaved += Number(s.successfullySavedCount || 0);
+      const sourceEntries =
+        s.database === 'all' && s.sourceStats && Object.keys(s.sourceStats).length > 0
+          ? Object.entries(s.sourceStats).filter(([, cnt]) => Number(cnt) > 0)
+          : null;
+
+      if (sourceEntries && sourceEntries.length > 0) {
+        for (const [src, cnt] of sourceEntries) {
+          const existing = searchDbMap.get(src) || {
+            database: src,
+            sessionsCount: 0,
+            externalReported: 0,
+            actuallyRetrieved: 0,
+          };
+          existing.sessionsCount += 1;
+          existing.externalReported += Number(s.totalHitsBySource?.[src] || 0);
+          existing.actuallyRetrieved += Number(cnt || 0);
+          searchDbMap.set(src, existing);
+        }
+      } else {
+        const dbName = (s.databaseLabel || s.database || 'Other').trim() || 'Other';
+        const existing = searchDbMap.get(dbName) || {
+          database: dbName,
+          sessionsCount: 0,
+          externalReported: 0,
+          actuallyRetrieved: 0,
+        };
+        existing.sessionsCount += 1;
+        existing.externalReported += Number(s.externalReportedCount || 0);
+        existing.actuallyRetrieved += Number(s.actuallyRetrievedCount || 0);
+        searchDbMap.set(dbName, existing);
+      }
+    }
+
+    const searchedDatabases = Array.from(searchDbMap.values()).sort(
+      (a, b) => b.actuallyRetrieved - a.actuallyRetrieved || a.database.localeCompare(b.database)
+    );
+    const sumSearchExternalReported = searchedDatabases.reduce((sum, d) => sum + d.externalReported, 0);
+    const sumSearchRetrieved = searchedDatabases.reduce((sum, d) => sum + d.actuallyRetrieved, 0);
+
+    return {
+      entries,
+      databaseCount: entries.length,
+      sumIdentifiedByDatabases,
+      sumIncludedByDatabases,
+      identificationEquation,
+      searchedDatabases,
+      sumSearchExternalReported,
+      sumSearchRetrieved,
+      sumSearchSaved,
+    };
+  }, [liveCounts.dbCounts, liveCounts.includedDbCounts, liveCounts.totalIdentified, project.onlineSearchSessions]);
+
   const filteredAuditArticles = useMemo(() => {
     return project.articles.filter((art) => {
       if (selectedDiagnosticFilter === 'duplicates') {
@@ -464,9 +564,22 @@ Eligible Years: ${project.publicationYears} | Geography: ${project.geographicEli
 1. IDENTIFICATION
 Records identified from databases (n = ${liveCounts.totalIdentified}):
   - Paper Types Identified: Original Research (n = ${liveCounts.identifiedOriginal}) | Review Papers (n = ${liveCounts.identifiedReviews})
-${Object.entries(liveCounts.dbCounts)
-  .map(([db, count]) => `  - ${db}: n = ${count}`)
-  .join('\n')}
+${databaseAnalysisSummary.entries
+  .map(
+    (r) =>
+      `  - ${r.database}: n = ${r.identifiedCount} (${r.sharePct}% of total; Included: ${r.includedCount})`
+  )
+  .join('\n') || '  - None recorded'}
+  - Sum of All Databases (${databaseAnalysisSummary.databaseCount} source(s)): n = ${databaseAnalysisSummary.sumIdentifiedByDatabases} (${databaseAnalysisSummary.identificationEquation})${
+      databaseAnalysisSummary.searchedDatabases.length > 0
+        ? `\n  - Online Search Retrieval by Database (Individual & Sum):\n${databaseAnalysisSummary.searchedDatabases
+            .map(
+              (d) =>
+                `    * ${d.database}: Retrieved = ${d.actuallyRetrieved} | Ext. Available = ${d.externalReported}`
+            )
+            .join('\n')}\n    * Sum Across Searched Databases: Retrieved = ${databaseAnalysisSummary.sumSearchRetrieved} | Ext. Available = ${databaseAnalysisSummary.sumSearchExternalReported} | Saved = ${databaseAnalysisSummary.sumSearchSaved}`
+        : ''
+    }
 
 2. DUPLICATE REMOVAL (CROSS-DATABASE OVERLAP)
 Duplicates removed prior to screening: n = ${liveCounts.duplicates}
@@ -804,18 +917,106 @@ Total included studies: n = ${liveCounts.includedCount}
                 </span>
               </div>
 
-              <div>
-                <p className="text-slate-300 font-medium mb-1">
-                  Records identified by source database:
-                </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 text-[11px]">
-                  {Object.entries(liveCounts.dbCounts).map(([db, count]) => (
-                    <div key={db} className="bg-slate-950 p-2 rounded-lg border border-slate-800">
-                      <span className="text-slate-400 block">{db}</span>
-                      <span className="font-bold text-white font-mono">n = {count}</span>
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-slate-300 font-medium">
+                    Individual Database Counts &amp; Sum for Analysis ({databaseAnalysisSummary.databaseCount} database{databaseAnalysisSummary.databaseCount === 1 ? '' : 's'}):
+                  </p>
+                  <span className="px-2.5 py-0.5 rounded-lg bg-indigo-500/20 border border-indigo-400/40 text-indigo-200 font-mono text-[11px] font-bold">
+                    Σ Sum of Databases = {databaseAnalysisSummary.sumIdentifiedByDatabases.toLocaleString()}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5 text-[11px]">
+                  {databaseAnalysisSummary.entries.map((row) => (
+                    <div
+                      key={row.database}
+                      className="bg-slate-950 p-2.5 rounded-lg border border-slate-800 space-y-0.5"
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-slate-300 font-semibold truncate">{row.database}</span>
+                        <span className="text-[10px] font-mono text-indigo-300 shrink-0">
+                          {row.sharePct}%
+                        </span>
+                      </div>
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="font-bold text-white font-mono">
+                          n = {row.identifiedCount.toLocaleString()}
+                        </span>
+                        <span className="text-[10px] text-emerald-300 font-mono">
+                          Incl: {row.includedCount}
+                        </span>
+                      </div>
                     </div>
                   ))}
+                  <div className="bg-indigo-950/50 p-2.5 rounded-lg border border-indigo-500/60 space-y-0.5">
+                    <span className="text-indigo-200 font-bold block">
+                      Sum of Databases ({databaseAnalysisSummary.databaseCount})
+                    </span>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="font-bold text-white font-mono">
+                        Σ n = {databaseAnalysisSummary.sumIdentifiedByDatabases.toLocaleString()}
+                      </span>
+                      <span className="text-[10px] text-emerald-300 font-mono">
+                        Incl: {databaseAnalysisSummary.sumIncludedByDatabases}
+                      </span>
+                    </div>
+                  </div>
                 </div>
+
+                {databaseAnalysisSummary.entries.length > 0 && (
+                  <div className="px-2.5 py-1.5 rounded-lg bg-slate-950/90 border border-slate-800/80 text-[11px] text-slate-300 font-mono overflow-x-auto">
+                    <span className="text-slate-400">Database Sum: </span>
+                    <span className="text-indigo-200">{databaseAnalysisSummary.identificationEquation}</span>
+                  </div>
+                )}
+
+                {databaseAnalysisSummary.searchedDatabases.length > 0 && (
+                  <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                      <span className="text-slate-300 font-semibold">
+                        Online Database Search Results (Individual &amp; Sum):
+                      </span>
+                      <span className="text-teal-300 font-mono font-bold">
+                        Sum Retrieved = {databaseAnalysisSummary.sumSearchRetrieved.toLocaleString()} / Ext.{' '}
+                        {databaseAnalysisSummary.sumSearchExternalReported.toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+                      {databaseAnalysisSummary.searchedDatabases.map((d) => (
+                        <div
+                          key={d.database}
+                          className="bg-slate-950/80 p-2 rounded-lg border border-slate-800/90 space-y-0.5"
+                        >
+                          <span className="text-slate-300 font-semibold block truncate">
+                            {d.database}
+                          </span>
+                          <div className="text-[10px] font-mono text-slate-400">
+                            Retrieved:{' '}
+                            <strong className="text-teal-300">
+                              {d.actuallyRetrieved.toLocaleString()}
+                            </strong>
+                            {d.externalReported > 0 && (
+                              <> · Ext: {d.externalReported.toLocaleString()}</>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                      <div className="bg-teal-950/35 p-2 rounded-lg border border-teal-600/50 space-y-0.5">
+                        <span className="text-teal-200 font-bold block">
+                          Sum of Searched DBs ({databaseAnalysisSummary.searchedDatabases.length})
+                        </span>
+                        <div className="text-[10px] font-mono text-teal-100">
+                          Retrieved:{' '}
+                          <strong>{databaseAnalysisSummary.sumSearchRetrieved.toLocaleString()}</strong>
+                          {databaseAnalysisSummary.sumSearchExternalReported > 0 && (
+                            <> · Ext: {databaseAnalysisSummary.sumSearchExternalReported.toLocaleString()}</>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

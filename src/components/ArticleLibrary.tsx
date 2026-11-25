@@ -3,6 +3,7 @@ import {
   Article,
   BatchScreenerRunRecord,
   ModuleQaRescanRecord,
+  OnlineSearchSession,
   ProposedReevaluationItem,
   ReviewIterationEntry,
   ReviewProject,
@@ -51,7 +52,6 @@ import {
   Lock,
   BookOpenText,
   Maximize2,
-  ArchiveRestore,
   FileArchive,
   ShieldCheck,
   ShieldAlert,
@@ -59,7 +59,6 @@ import {
 import { apiService, mergeScreeningInsightsIntoExtractedData } from '../services/apiService';
 import { FastOnlineSearchPanel } from './FastOnlineSearchPanel';
 import { NotebookStudioModal } from './NotebookStudioModal';
-import { DeletedOnlineArchiveModal } from './DeletedOnlineArchiveModal';
 import { AutoSaveStatusInfo, ModuleWorkbenchControls } from './ModuleWorkbenchControls';
 import { ScreeningConsistencyPanel } from './ScreeningConsistencyPanel';
 import {
@@ -99,15 +98,10 @@ interface ArticleLibraryProps {
     savedAt?: string;
     databaseFolderPath?: string;
   }>;
-  onRestoredDeletedArticles?: (
+  onSyncProjectAfterOnlineImport?: (
     projectId: string,
-    res: {
-      restoredCount: number;
-      restoredArticles: Article[];
-      remainingArticles: Article[];
-      remainingDeletedCount: number;
-      databaseFolderPath?: string;
-    }
+    articles: Article[],
+    sessions: OnlineSearchSession[]
   ) => void;
   onSaveFolderChanges?: (projectId: string) => Promise<{
     totalInSubLibrary: number;
@@ -156,7 +150,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   onCreateNewReview,
   onUpdateArticles,
   onBulkRemoveFromFolder,
-  onRestoredDeletedArticles,
+  onSyncProjectAfterOnlineImport,
   onSaveFolderChanges,
   onDeleteProjectFolder,
   onSelectArticleForScreening,
@@ -182,8 +176,6 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
   const [showDuplicateModal, setShowDuplicateModal] = useState(false);
   const [showOnlineSearchPanel, setShowOnlineSearchPanel] = useState(false);
   const [showNotebookStudio, setShowNotebookStudio] = useState(false);
-  const [showDeletedOnlineArchive, setShowDeletedOnlineArchive] = useState(false);
-  const [deletedOnlineCount, setDeletedOnlineCount] = useState<number>(0);
   const [syncingArticleId, setSyncingArticleId] = useState<string | null>(null);
   const [showFullAbstracts, setShowFullAbstracts] = useState<boolean>(true);
   const [isBatchEnrichingAbstracts, setIsBatchEnrichingAbstracts] = useState<boolean>(false);
@@ -239,20 +231,47 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
     [project.articles, project.id]
   );
 
+  // Active Library Total Count breakdown across the 4 intake channels (sum === subLibraryArticles.length)
+  const intakeBreakdown = useMemo(() => {
+    let manualBlank = 0;
+    let bulkImporter = 0;
+    let onlineDb = 0;
+    let doiOther = 0;
+    for (const art of subLibraryArticles) {
+      if (art.intakeSource === 'manual_blank' || art.id?.startsWith('art-manual')) {
+        manualBlank++;
+      } else if (
+        art.intakeSource === 'online_db' ||
+        art.id?.startsWith('art-online') ||
+        Boolean(art.searchBatchId)
+      ) {
+        onlineDb++;
+      } else if (
+        art.intakeSource === 'bulk_importer' ||
+        Boolean(art.sourceFileName)
+      ) {
+        bulkImporter++;
+      } else {
+        doiOther++;
+      }
+    }
+    return {
+      manualBlank,
+      bulkImporter,
+      onlineDb,
+      doiOther,
+      total: subLibraryArticles.length,
+    };
+  }, [subLibraryArticles]);
+
   useEffect(() => {
-    setVisibleLimit(100);
+    setVisibleLimit(500);
   }, [project.id, stageFilter, sourceFilter, searchQuery]);
 
   // Clear selection when switching folders and prune IDs that no longer exist
   useEffect(() => {
     setSelectedIds(new Set());
     setBulkRemoveTargetProjectId(project.id);
-    if (project.id) {
-      apiService
-        .fetchDeletedOnlineArticles(project.id)
-        .then((res) => setDeletedOnlineCount(res.count || 0))
-        .catch(() => {});
-    }
   }, [project.id]);
 
   useEffect(() => {
@@ -1358,16 +1377,10 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         });
         if (targetBulkProject.id === project.id) {
           setSelectedIds(new Set());
-          apiService
-            .fetchDeletedOnlineArticles(project.id)
-            .then((d) => setDeletedOnlineCount(d.count || 0))
-            .catch(() => {});
         }
         setFolderActionStatus({
           type: 'success',
-          message: `Removed ${res.removedCount} article(s) from "${targetBulkProject.title || targetBulkProject.id}" (${res.remainingCount} remaining)${
-            res.deletedOnlineCount ? ` · ${res.deletedOnlineCount} online DB file(s) moved to separate Deleted Online Archive` : ''
-          }`,
+          message: `Permanently removed ${res.removedCount} article(s) from "${targetBulkProject.title || targetBulkProject.id}" (${res.remainingCount} remaining)`,
           path: res.databaseFolderPath || targetBulkProject.databaseFolderPath,
           timestamp: new Date(res.savedAt || Date.now()).toLocaleTimeString(),
         });
@@ -1411,15 +1424,9 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
           articleIds: [id],
           mode: 'ids',
         });
-        apiService
-          .fetchDeletedOnlineArticles(project.id)
-          .then((d) => setDeletedOnlineCount(d.count || 0))
-          .catch(() => {});
         setFolderActionStatus({
           type: 'success',
-          message: `Removed 1 article (${res.remainingCount} left)${
-            res.deletedOnlineCount ? ' · Online DB file placed in separate Deleted Online Archive (no auto-recovery)' : ''
-          }`,
+          message: `Permanently removed 1 article (${res.remainingCount} remaining)`,
           path: res.databaseFolderPath || project.databaseFolderPath,
           timestamp: new Date(res.savedAt || Date.now()).toLocaleTimeString(),
         });
@@ -1933,20 +1940,10 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
             <button
               onClick={() => setShowBatchModal(true)}
               className="px-3 py-2 bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white text-xs font-semibold rounded-xl shadow-sm transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              title="Fast Batch Screener: screens active Article Library records only (deleted online DB files stay excluded)"
+              title="Fast Batch Screener: screens active Article Library records cleanly without touching search"
             >
               <Zap className="w-3.5 h-3.5" />
               <span>⚡ Fast Batch Screener</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowDeletedOnlineArchive(true)}
-              className="px-3 py-2 bg-amber-950/60 hover:bg-amber-900/70 text-amber-200 border border-amber-700/60 text-xs font-semibold rounded-xl shadow-sm transition inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              title="View deleted online database files separately from Article Library & Fast Batch Screener; mark reviewer interest or selectively build back"
-            >
-              <ArchiveRestore className="w-3.5 h-3.5 text-amber-400" />
-              <span>Deleted Online DBs ({deletedOnlineCount})</span>
             </button>
 
             <button
@@ -2147,6 +2144,34 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
               ))}
             </select>
           </div>
+        </div>
+
+        {/* Active Library Total Count Formula Bar (Zero Auto-Recovery / Zero PRISMA Interference) */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80 text-[11px] text-slate-400">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="font-semibold text-slate-200">
+              Active Library Total: <span className="font-mono text-emerald-300 tabular-nums">{intakeBreakdown.total}</span>
+            </span>
+            <span className="text-slate-600">=</span>
+            <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-slate-300 tabular-nums">
+              Manual Blank <strong className="text-indigo-300 font-mono">{intakeBreakdown.manualBlank}</strong>
+            </span>
+            <span className="text-slate-600">+</span>
+            <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-slate-300 tabular-nums">
+              Bulk Importer <strong className="text-violet-300 font-mono">{intakeBreakdown.bulkImporter}</strong>
+            </span>
+            <span className="text-slate-600">+</span>
+            <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-slate-300 tabular-nums">
+              Online DBs <strong className="text-teal-300 font-mono">{intakeBreakdown.onlineDb}</strong>
+            </span>
+            <span className="text-slate-600">+</span>
+            <span className="px-2 py-0.5 rounded-md bg-slate-950 border border-slate-800 text-slate-300 tabular-nums">
+              DOI / Other <strong className="text-amber-300 font-mono">{intakeBreakdown.doiOther}</strong>
+            </span>
+          </div>
+          <span className="text-[10px] text-slate-500">
+            Deletions are permanent · PRISMA reporting runs downstream without restricting intake
+          </span>
         </div>
       </div>
 
@@ -2431,8 +2456,7 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
             }
           }}
           onRecordSearchHistory={(q, count) => recordSearchQuery(q, count)}
-          onOpenDeletedArchive={() => setShowDeletedOnlineArchive(true)}
-          deletedOnlineCount={deletedOnlineCount}
+          onSyncProjectAfterImport={onSyncProjectAfterOnlineImport}
           onClose={() => setShowOnlineSearchPanel(false)}
         />
       )}
@@ -3463,29 +3487,6 @@ export const ArticleLibrary: React.FC<ArticleLibraryProps> = ({
         articles={subLibraryArticles}
         preselectedIds={selectedIds}
         onUpdateArticles={onUpdateArticles}
-      />
-
-      {/* Separate Deleted Online Database Files Archive (Reviewer Interest & Selective Restore) */}
-      <DeletedOnlineArchiveModal
-        isOpen={showDeletedOnlineArchive}
-        onClose={() => setShowDeletedOnlineArchive(false)}
-        projectId={project.id}
-        projectTitle={project.title || 'Untitled Review'}
-        onCountChange={setDeletedOnlineCount}
-        onRestoredArticles={(res) => {
-          setDeletedOnlineCount(res.remainingDeletedCount);
-          if (onRestoredDeletedArticles) {
-            onRestoredDeletedArticles(project.id, res);
-          } else {
-            onUpdateArticles(res.remainingArticles);
-          }
-          setFolderActionStatus({
-            type: 'success',
-            message: `Rebuilt ${res.restoredCount} deleted online database file(s) back into Article Library & Fast Batch Screener (${res.remainingDeletedCount} still archived)`,
-            path: res.databaseFolderPath || project.databaseFolderPath,
-            timestamp: new Date().toLocaleTimeString(),
-          });
-        }}
       />
     </div>
   );

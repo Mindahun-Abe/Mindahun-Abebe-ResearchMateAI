@@ -30,6 +30,110 @@ const QUEUE_KEY = 'researchmate_offline_sync_queue_v1';
 const VERSIONS_KEY = 'researchmate_project_versions_v1';
 const CACHE_KEY = 'researchmate_offline_projects_v1';
 const WORKSPACE_UI_KEY = 'researchmate_workspace_ui_v1';
+const DELETED_TOMBSTONES_KEY = 'researchmate_deleted_article_ids_v1';
+
+interface ProjectDeletionTombstones {
+  deletedIds: Record<string, string>;
+  clearedAllAt?: string;
+}
+
+function loadAllDeletionTombstones(): Record<string, ProjectDeletionTombstones> {
+  try {
+    const raw = localStorage.getItem(DELETED_TOMBSTONES_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAllDeletionTombstones(map: Record<string, ProjectDeletionTombstones>) {
+  try {
+    localStorage.setItem(DELETED_TOMBSTONES_KEY, JSON.stringify(map));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function recordDeletedArticleIds(
+  projectId: string,
+  options: {
+    articleIds?: string[];
+    clearAll?: boolean;
+    deletedAt?: string;
+  }
+) {
+  if (!projectId) return;
+  const nowIso = options.deletedAt || new Date().toISOString();
+  const map = loadAllDeletionTombstones();
+  const current: ProjectDeletionTombstones = map[projectId] || { deletedIds: {} };
+
+  if (options.clearAll) {
+    current.clearedAllAt = nowIso;
+  }
+  for (const id of options.articleIds || []) {
+    if (id) current.deletedIds[id] = nowIso;
+  }
+
+  // Cap per-project tombstones to latest 5,000 entries to prevent storage bloat
+  const entries = Object.entries(current.deletedIds);
+  if (entries.length > 5000) {
+    entries.sort((a, b) => new Date(a[1]).getTime() - new Date(b[1]).getTime());
+    current.deletedIds = Object.fromEntries(entries.slice(-5000));
+  }
+
+  map[projectId] = current;
+  saveAllDeletionTombstones(map);
+}
+
+export function clearProjectDeletionTombstones(projectId: string) {
+  if (!projectId) return;
+  const map = loadAllDeletionTombstones();
+  if (map[projectId]) {
+    delete map[projectId];
+    saveAllDeletionTombstones(map);
+  }
+}
+
+export function filterOutDeletedArticles(
+  projectId: string,
+  articles: Article[],
+  snapshotUpdatedAt?: string
+): Article[] {
+  const list = Array.isArray(articles) ? articles : [];
+  const map = loadAllDeletionTombstones();
+  const tomb = map[projectId];
+  if (!tomb) return list;
+
+  const clearedMs = tomb.clearedAllAt ? new Date(tomb.clearedAllAt).getTime() : 0;
+  const snapshotMs = snapshotUpdatedAt ? new Date(snapshotUpdatedAt).getTime() : 0;
+  // If entire snapshot predates clearAll, no legacy article from it may survive
+  if (clearedMs > 0 && snapshotMs > 0 && snapshotMs <= clearedMs) {
+    return list.filter((art) => {
+      const impMs = art?.importedAt
+        ? new Date(art.importedAt).getTime()
+        : art?.retrievedAt
+        ? new Date(art.retrievedAt).getTime()
+        : 0;
+      return impMs > clearedMs && !tomb.deletedIds[art.id];
+    });
+  }
+
+  return list.filter((art) => {
+    if (!art?.id) return false;
+    if (tomb.deletedIds[art.id]) return false;
+    if (clearedMs > 0) {
+      const impMs = art.importedAt
+        ? new Date(art.importedAt).getTime()
+        : art.retrievedAt
+        ? new Date(art.retrievedAt).getTime()
+        : 0;
+      if (impMs > 0 && impMs <= clearedMs) return false;
+    }
+    return true;
+  });
+}
 
 export function loadWorkspaceUiState(): WorkspaceUiState {
   try {
@@ -123,7 +227,21 @@ export function cacheProjectsOffline(projects: ReviewProject[]) {
         articles: (p.articles || []).map(({ fullText: _ft, pages: _pg, ...rest }) => rest),
       }));
       localStorage.setItem(CACHE_KEY, JSON.stringify(compact));
-    } catch {}
+    } catch {
+      // Never leave an outdated stale 256+ article snapshot sitting in localStorage after deletions/updates
+      try {
+        localStorage.removeItem(CACHE_KEY);
+        const shells = projects.map((p) => ({
+          ...p,
+          articles: [],
+        }));
+        localStorage.setItem(CACHE_KEY, JSON.stringify(shells));
+      } catch {
+        try {
+          localStorage.removeItem(CACHE_KEY);
+        } catch {}
+      }
+    }
   }
 }
 
@@ -245,9 +363,9 @@ function mergeWorkbenchState(a?: WorkbenchState, b?: WorkbenchState): WorkbenchS
 }
 
 /**
- * Merges projects across local server disk, browser localStorage cache, and signed-in cloud DB
- * so code updates, server restarts, page refreshes, and logins never discard imported articles,
- * screening decisions, extractions, or protocol settings.
+ * Merges projects across local server disk, browser localStorage cache, and signed-in cloud DB.
+ * CRITICAL: Server disk article membership is ALWAYS authoritative for existing projects so
+ * deleted articles are NEVER resurrected from stale localStorage or cloud snapshots upon refresh.
  */
 export function mergeProjectsPreservingData(
   serverProjects: ReviewProject[],
@@ -255,27 +373,48 @@ export function mergeProjectsPreservingData(
   cloudProjects: ReviewProject[] = []
 ): ReviewProject[] {
   const byId = new Map<string, ReviewProject>();
+  const serverIds = new Set((serverProjects || []).filter((p) => p?.id).map((p) => p.id));
 
-  const mergeTwoProjects = (existing: ReviewProject, incoming: ReviewProject): ReviewProject => {
+  const mergeTwoProjects = (
+    existing: ReviewProject,
+    incoming: ReviewProject,
+    existingFromServer: boolean
+  ): ReviewProject => {
     const existingUpdated = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
     const incomingUpdated = incoming.updatedAt ? new Date(incoming.updatedAt).getTime() : 0;
     const newer = incomingUpdated > existingUpdated ? incoming : existing;
     const older = incomingUpdated > existingUpdated ? existing : incoming;
 
-    const articleMap = new Map<string, Article>();
-    for (const art of older.articles || []) {
-      if (!art?.id) continue;
-      articleMap.set(art.id, { ...art, projectId: existing.id });
-    }
-    for (const art of newer.articles || []) {
-      if (!art?.id) continue;
-      const prev = articleMap.get(art.id);
-      articleMap.set(
-        art.id,
-        prev
-          ? mergeArticleRecordsPreservingData({ ...art, projectId: existing.id }, prev)
-          : { ...art, projectId: existing.id }
+    // Never resurrect deleted articles from localCachedProjects or cloudProjects into an existing server project.
+    // Only enrich screening/extraction state on articles that STILL exist in the authoritative pool.
+    let finalArticles: Article[];
+    if (existingFromServer) {
+      const incomingById = new Map<string, Article>(
+        filterOutDeletedArticles(existing.id, incoming.articles || [], incoming.updatedAt)
+          .filter((a) => a?.id)
+          .map((a) => [a.id, { ...a, projectId: existing.id }])
       );
+      finalArticles = (existing.articles || []).map((serverArt) => {
+        const secondary = incomingById.get(serverArt.id);
+        return secondary
+          ? mergeArticleRecordsPreservingData({ ...serverArt, projectId: existing.id }, secondary)
+          : { ...serverArt, projectId: existing.id };
+      });
+    } else {
+      // Both sources are offline/cloud (server absent): honor strictly the newer snapshot's membership, filtered by tombstones
+      const olderFiltered = filterOutDeletedArticles(existing.id, older.articles || [], older.updatedAt);
+      const newerFiltered = filterOutDeletedArticles(existing.id, newer.articles || [], newer.updatedAt);
+      const olderMap = new Map<string, Article>(
+        olderFiltered.filter((a) => a?.id).map((a) => [a.id, { ...a, projectId: existing.id }])
+      );
+      finalArticles = newerFiltered
+        .filter((a) => a?.id)
+        .map((art) => {
+          const prev = olderMap.get(art.id);
+          return prev
+            ? mergeArticleRecordsPreservingData({ ...art, projectId: existing.id }, prev)
+            : { ...art, projectId: existing.id };
+        });
     }
 
     const mergedProtocol = mergeProtocolSnapshotsPreservingData(newer, older);
@@ -292,22 +431,43 @@ export function mergeProjectsPreservingData(
           : older.geographicSelections),
       studyAreaBoundary: mergedProtocol.studyAreaBoundary || newer.studyAreaBoundary || older.studyAreaBoundary,
       workbenchState: mergeWorkbenchState(older.workbenchState, newer.workbenchState),
-      articles: Array.from(articleMap.values()),
+      onlineSearchSessions: existingFromServer
+        ? existing.onlineSearchSessions ?? incoming.onlineSearchSessions
+        : newer.onlineSearchSessions ?? older.onlineSearchSessions,
+      articles: finalArticles,
     };
   };
 
-  // Priority ingest: server first, then local cache, then cloud
-  for (const sourceList of [serverProjects, localCachedProjects, cloudProjects]) {
+  // Ingest server projects first (authoritative disk article membership)
+  for (const proj of serverProjects || []) {
+    if (!proj || !proj.id) continue;
+    const isolated = (proj.articles || [])
+      .filter((a) => !a.projectId || a.projectId === proj.id)
+      .map((a) => ({ ...a, projectId: proj.id }));
+    byId.set(proj.id, { ...proj, articles: isolated });
+  }
+
+  // Reconcile local cache & cloud snapshots without resurrecting deleted articles
+  for (const sourceList of [localCachedProjects, cloudProjects]) {
     for (const proj of sourceList || []) {
       if (!proj || !proj.id) continue;
-      const normalizedProj: ReviewProject = {
-        ...proj,
-        articles: (proj.articles || [])
+      const filteredArts = filterOutDeletedArticles(
+        proj.id,
+        (proj.articles || [])
           .filter((a) => !a.projectId || a.projectId === proj.id)
           .map((a) => ({ ...a, projectId: proj.id })),
+        proj.updatedAt
+      );
+      const normalizedProj: ReviewProject = {
+        ...proj,
+        articles: filteredArts,
       };
       const existing = byId.get(proj.id);
-      byId.set(proj.id, existing ? mergeTwoProjects(existing, normalizedProj) : normalizedProj);
+      if (existing) {
+        byId.set(proj.id, mergeTwoProjects(existing, normalizedProj, serverIds.has(proj.id)));
+      } else {
+        byId.set(proj.id, normalizedProj);
+      }
     }
   }
 

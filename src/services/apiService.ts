@@ -6,7 +6,9 @@ import {
   NotebookProposal,
   AppraisalItem,
   ScreeningDecision,
-  DeletedOnlineArticleRecord,
+  OnlineSearchSession,
+  OnlineRetrievalImportEvent,
+  SixSearchCounters,
   WorkbenchModuleId,
   WorkbenchState,
   ModuleQaRescanRecord,
@@ -848,82 +850,113 @@ export const apiService = {
     return res.json();
   },
 
-  async fetchDeletedOnlineArticles(
+  async fetchOnlineSearchSessions(
     projectId: string
-  ): Promise<{ projectId: string; items: DeletedOnlineArticleRecord[]; count: number }> {
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles`);
+  ): Promise<{ projectId: string; sessions: OnlineSearchSession[] }> {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/online-search-sessions`
+    );
     if (!res.ok) {
-      return { projectId, items: [], count: 0 };
+      return { projectId, sessions: [] };
     }
     return res.json();
   },
 
-  async updateDeletedOnlineInterest(
+  async saveOnlineSearchSession(
     projectId: string,
-    params: {
-      archiveIds: string[];
-      reviewerInterestSelected?: boolean;
-      reviewerInterestNote?: string;
-    }
-  ): Promise<{ success: boolean; items: DeletedOnlineArticleRecord[]; count: number }> {
+    session: OnlineSearchSession
+  ): Promise<{
+    success: boolean;
+    projectId: string;
+    session: OnlineSearchSession;
+    sessions: OnlineSearchSession[];
+  }> {
     const res = await fetch(
-      `/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles/interest`,
+      `/api/projects/${encodeURIComponent(projectId)}/online-search-sessions`,
       {
-        method: 'PATCH',
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify({ session }),
       }
     );
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Failed to update reviewer interest (${res.status})`);
+      throw new Error(err?.error || `Failed to persist search session (${res.status})`);
     }
     return res.json();
   },
 
-  async restoreDeletedOnlineArticles(
+  async deleteOnlineSearchSession(
     projectId: string,
-    params: {
-      archiveIds: string[];
-      restoreMode?: 'unscreened' | 'starred' | 'include';
+    sessionId: string
+  ): Promise<{
+    success: boolean;
+    projectId: string;
+    removedSessionId: string;
+    removedCount: number;
+    sessions: OnlineSearchSession[];
+  }> {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/online-search-sessions/${encodeURIComponent(sessionId)}`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to delete search session (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async clearOnlineSearchSessions(
+    projectId: string
+  ): Promise<{
+    success: boolean;
+    projectId: string;
+    removedCount: number;
+    sessions: OnlineSearchSession[];
+  }> {
+    const res = await fetch(
+      `/api/projects/${encodeURIComponent(projectId)}/online-search-sessions`,
+      { method: 'DELETE' }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error || `Failed to clear search sessions (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async importRetrievedArticles(
+    projectId: string,
+    payload: {
+      sessionId?: string;
+      mode?: 'metadata' | 'verify_pdf' | 'single';
+      items: Partial<Article>[];
+      batchId?: string;
+      queryUsed?: string;
+      databaseLabel?: string;
     }
   ): Promise<{
     success: boolean;
     projectId: string;
-    restoredCount: number;
-    restoredArticles: Article[];
-    remainingArticles: Article[];
-    remainingDeletedCount: number;
-    savedAt?: string;
-    databaseFolderPath?: string;
+    savedAt: string;
+    databaseFolderPath: string;
+    articles: Article[];
+    onlineSearchSessions: OnlineSearchSession[];
+    importSummary: OnlineRetrievalImportEvent;
+    counters: SixSearchCounters;
   }> {
     const res = await fetch(
-      `/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles/restore`,
+      `/api/projects/${encodeURIComponent(projectId)}/articles/import-retrieved`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify(payload),
       }
     );
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Failed to restore deleted online articles (${res.status})`);
-    }
-    return res.json();
-  },
-
-  async purgeDeletedOnlineArticles(
-    projectId: string,
-    params: { archiveIds?: string[]; clearAll?: boolean }
-  ): Promise<{ success: boolean; purgedCount: number; remainingDeletedCount: number }> {
-    const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/deleted-online-articles`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Failed to purge deleted online articles (${res.status})`);
+      throw new Error(err?.error || `Failed to import retrieved articles (${res.status})`);
     }
     return res.json();
   },

@@ -895,10 +895,14 @@ export function computeAuthoritativePrismaCounts(
   const articles = sortArticlesDeterministically(project?.articles || []);
   const modelConfig = buildModelConfigSnapshot(project);
 
-  const totalRecords = articles.length;
   const duplicateRecords = articles.filter((a) => Boolean(a.isDuplicate));
-  const duplicatesExcluded = duplicateRecords.length;
   const uniqueArticles = articles.filter((a) => !a.isDuplicate);
+  const consolidatedDupEvents = uniqueArticles.reduce((sum, a) => {
+    const srcCount = Array.isArray(a.databaseSourceRecords) ? a.databaseSourceRecords.length : 0;
+    return sum + (srcCount > 1 ? srcCount - 1 : 0);
+  }, 0);
+  const totalRecords = articles.length + consolidatedDupEvents;
+  const duplicatesExcluded = duplicateRecords.length + consolidatedDupEvents;
   const uniqueRecords = uniqueArticles.length;
 
   let pendingRecords = 0;

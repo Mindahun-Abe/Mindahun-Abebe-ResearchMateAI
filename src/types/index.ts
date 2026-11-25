@@ -270,6 +270,8 @@ export interface Article {
   duplicateNote?: string;
   searchBatchId?: string;
   searchQueryUsed?: string;
+  intakeSource?: 'manual_blank' | 'bulk_importer' | 'online_db' | 'doi_lookup' | 'other';
+  importedAt?: string;
   isStarred?: boolean;
   priority?: 'low' | 'medium' | 'high';
   screeningStage: 'title_abstract' | 'full_text' | 'final_included' | 'excluded';
@@ -477,7 +479,52 @@ export interface ReviewProject {
   booleanQuery: string;
   booleanDatabaseQueries?: Record<string, string>;
   articles: Article[];
+  onlineSearchSessions?: OnlineSearchSession[];
   workbenchState?: WorkbenchState;
+}
+
+export interface OnlineRetrievalImportEvent {
+  importId: string;
+  importedAt: string;
+  mode: 'metadata' | 'verify_pdf' | 'single';
+  selectedCount: number;
+  successfullySavedCount: number;
+  uniqueInsertedCount: number;
+  existingMatchedCount: number;
+  duplicateEventsRemovedCount: number;
+  byDatabase: Record<string, number>;
+}
+
+export interface OnlineSearchSession {
+  id: string;
+  database: string;
+  databaseLabel: string;
+  query: string;
+  searchBy: string;
+  externalReportedCount: number;
+  actuallyRetrievedCount: number;
+  withinSessionUniqueCount: number;
+  withinSessionDuplicateCount: number;
+  successfullySavedCount: number;
+  existingLibraryMatchedCount: number;
+  duplicateEventsRemovedCount: number;
+  hasMore?: boolean;
+  nextOffset?: number;
+  sourceStats?: Record<string, number>;
+  totalHitsBySource?: Record<string, number>;
+  sourceWarnings?: string[];
+  retrievedAt: string;
+  updatedAt?: string;
+  importEvents?: OnlineRetrievalImportEvent[];
+}
+
+export interface SixSearchCounters {
+  externalReportedCount: number;
+  actuallyRetrievedCount: number;
+  successfullySavedCount: number;
+  uniqueLibraryCount: number;
+  existingLibraryMatchedCount: number;
+  duplicateEventsCount: number;
 }
 
 export type WorkbenchModuleId =

@@ -3,6 +3,24 @@
   "reviewTitle": "Gully Erosion Susceptibility Mapping Using Machine Learning: A Systematic Review of Conditioning Factors, Modeling Approaches, Validation Strategies, and Research Gaps",
   "folderName": "Systematic-ReviewGully-Erosion-Susceptibility",
   "importedFiles": [
+    "remotesensing-14-02580 (1).pdf",
+    "Robustness analysis of machine learning classifiers in predicting spatial gully erosion susceptibility with altered training samples.pdf",
+    "remotesensing-16-04742 (1).pdf",
+    "water-13-00216 (1).pdf",
+    "s11069-026-08102-z.pdf",
+    "1-s2.0-S2666544122000235-main.pdf",
+    "1-s2.0-S0273117723008712-main.pdf",
+    "1-s2.0-S0301479725014549-main.pdf",
+    "1-s2.0-S0169555X23000910-main.pdf",
+    "A_data_driven_gully_head_susceptibility_map_of_Africa_at_30_m_resolution.pdf",
+    "Garos2019.pdf",
+    "Gully erosion susceptibility mapping  GESM  using machine learning methods optimized by the multi collinearity analysis and K-fold cross-validation.pdf",
+    "Assessing gully erosion susceptibility using topographic derived attributes  multi-criteria decision-making  and machine learning classifiers.pdf",
+    "Gully erosion susceptibility mapping using artificial intelligence and statistical models.pdf",
+    "Head-cut gully erosion susceptibility modelling based on ensemble Random Forest with oblique decision trees in Fareghan watershed  Iran.pdf",
+    "JEMA-D-18-04956R1.pdf",
+    "1-s2.0-S2666592124000362-main.pdf",
+    "Prediction of gully erosion susceptibility mapping using novel ensemble machine learning algorithms.pdf",
     "water-11-02076-v2.pdf",
     "water-12-01995-v3.pdf",
     "water-13-02632-v3.pdf",
@@ -58,7 +76,6 @@
     "remotesensing-14-06229-v2.pdf",
     "remotesensing-15-00152-v2.pdf",
     "remotesensing-15-00760-v2.pdf",
-    "Robustness analysis of machine learning classifiers in predicting spatial gully erosion susceptibility with altered training samples.pdf",
     "remotesensing-15-04703.pdf",
     "s11069-024-07086-y.pdf",
     "s00477-023-02403-6.pdf",
@@ -185,7 +202,6 @@
     "applsci-09-02824-v2.pdf",
     "remotesensing-12-00475.pdf",
     "remotesensing-15-00760-v2-4.pdf",
-    "Prediction of gully erosion susceptibility mapping using novel ensemble machine learning algorithms.pdf",
     "Robustness_of_Optimized_Decision_Tree-Based_Machin.pdf",
     "sensors-19-02444.pdf",
     "Robustness_analysis_of_machine_learning_classifier.pdf",
@@ -242,5 +258,5 @@
     "geosciences-11-00025-v2-2.pdf",
     "GullyErosionSusceptibilityMappingusingMachineLearningTechniquesinIhiomaCommunityImoStateNigeria.pdf"
   ],
-  "totalArticles": 238
+  "totalArticles": 256
 }

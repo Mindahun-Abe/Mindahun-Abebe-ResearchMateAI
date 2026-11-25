@@ -1,5 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import { ReviewProject, Article, WorkbenchModuleId, WorkbenchState, SystematicReviewProtocol } from './types';
+import {
+  ReviewProject,
+  Article,
+  OnlineSearchSession,
+  WorkbenchModuleId,
+  WorkbenchState,
+  SystematicReviewProtocol,
+} from './types';
 import { Navbar } from './components/Navbar';
 import { ProjectInfoBanner } from './components/ProjectInfoBanner';
 import { DashboardOverview } from './components/DashboardOverview';
@@ -41,6 +48,7 @@ import {
   loadOfflineQueue,
   loadWorkspaceUiState,
   mergeProjectsPreservingData,
+  recordDeletedArticleIds,
   saveWorkspaceUiState,
   syncProjectToCloudBackend,
 } from './utils/syncEngine';
@@ -350,7 +358,8 @@ export default function App() {
         const localCached = loadCachedOfflineProjects();
         const merged = mergeProjectsPreservingData(list, localCached);
 
-        // If local cache or protocol vault recovered projects, richer protocol fields, or articles absent from server disk after an update/restart, persist back to disk
+        // If local cache or protocol vault recovered missing projects or richer protocol fields, persist metadata only.
+        // NEVER overwrite server disk articles.json with cached articles (prevents resurrecting deleted files on refresh).
         const serverById = new Map(list.map((p) => [p.id, p]));
         for (const mProj of merged) {
           const sProj = serverById.get(mProj.id);
@@ -360,7 +369,7 @@ export default function App() {
               computeProtocolFingerprint(extractProtocolSnapshot(sProj));
           if (!sProj) {
             apiService.createProjectFolder(mProj).catch(() => {});
-          } else if (protocolChanged || (mProj.articles?.length || 0) > (sProj.articles?.length || 0)) {
+          } else if (protocolChanged) {
             apiService.updateProjectFolder(mProj).catch(() => {});
             apiService
               .saveProtocolVault(mProj.id, {
@@ -370,9 +379,6 @@ export default function App() {
                 allowReplace: true,
               })
               .catch(() => {});
-            if ((mProj.articles?.length || 0) > (sProj.articles?.length || 0)) {
-              apiService.syncProjectArticles(mProj.id, mProj.articles || []).catch(() => {});
-            }
           }
         }
 
@@ -441,8 +447,9 @@ export default function App() {
         const baseProjects = projectsRef.current;
         const merged = mergeProjectsPreservingData(baseProjects, localCached, cloudList);
 
-        // Persist any cloud-recovered projects or richer/newer protocol edits onto local disk partition
+        // Persist cloud-recovered projects absent from local disk, or protocol edits, WITHOUT resurrecting deleted articles
         const localById = new Map(baseProjects.map((p) => [p.id, p]));
+        const cloudById = new Map(cloudList.map((c) => [c.id, c]));
         for (const mProj of merged) {
           const lProj = localById.get(mProj.id);
           const protocolChanged =
@@ -451,7 +458,7 @@ export default function App() {
               computeProtocolFingerprint(extractProtocolSnapshot(lProj));
           if (!lProj) {
             apiService.createProjectFolder(mProj).catch(() => {});
-          } else if (protocolChanged || (mProj.articles?.length || 0) > (lProj.articles?.length || 0)) {
+          } else if (protocolChanged) {
             apiService.updateProjectFolder(mProj).catch(() => {});
             apiService
               .saveProtocolVault(mProj.id, {
@@ -461,9 +468,6 @@ export default function App() {
                 allowReplace: true,
               })
               .catch(() => {});
-            if ((mProj.articles?.length || 0) > (lProj.articles?.length || 0)) {
-              apiService.syncProjectArticles(mProj.id, mProj.articles || []).catch(() => {});
-            }
           }
         }
 
@@ -476,7 +480,7 @@ export default function App() {
           });
         }
 
-        // Flush pending offline ops & push any local-only projects up to user's cloud store
+        // Flush pending offline ops & push local authoritative deletions/projects up to cloud store
         const cloudIds = new Set(cloudList.map((c) => c.id));
         const flushed = await flushOfflineSyncQueue({
           token: idToken,
@@ -487,7 +491,11 @@ export default function App() {
         setPendingOps(flushed.remaining);
 
         for (const proj of merged) {
-          if (!cloudIds.has(proj.id)) {
+          const cloudCounterpart = cloudById.get(proj.id);
+          const localHasFewerArticlesThanCloud =
+            Boolean(cloudCounterpart) &&
+            (proj.articles?.length || 0) < (cloudCounterpart?.articles?.length || 0);
+          if (!cloudIds.has(proj.id) || localHasFewerArticlesThanCloud) {
             await syncProjectToCloudBackend({
               token: idToken,
               uid: user.uid,
@@ -582,6 +590,7 @@ export default function App() {
     setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Protocol & Framework Vault' }));
     setProjects((prev) => {
       const next = prev.map((p) => (p.id === updated.id ? isolatedUpdated : p));
+      projectsRef.current = next;
       cacheProjectsOffline(next);
       return next;
     });
@@ -678,6 +687,7 @@ export default function App() {
       setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: `${isolated.length} Articles` }));
       setProjects((prev) => {
         const next = prev.map((p) => (p.id === targetId ? { ...p, articles: isolated } : p));
+        projectsRef.current = next;
         cacheProjectsOffline(next);
         return next;
       });
@@ -703,6 +713,43 @@ export default function App() {
           { ...baseProj, articles: isolated },
           'screen_decision',
           `Updated ${isolated.length} articles`
+        );
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [idToken, user?.uid, user?.emailVerified]
+  );
+
+  const handleSyncProjectAfterOnlineImport = useCallback(
+    (targetId: string, nextArticles: Article[], nextSessions: OnlineSearchSession[]) => {
+      const isolated = (nextArticles || []).map((a) => ({ ...a, projectId: targetId }));
+      const nowIso = new Date().toISOString();
+      let updatedProj: ReviewProject | null = null;
+      setProjects((prev) => {
+        const next = prev.map((p) => {
+          if (p.id !== targetId) return p;
+          updatedProj = {
+            ...p,
+            updatedAt: nowIso,
+            articles: isolated,
+            onlineSearchSessions: nextSessions,
+          };
+          return updatedProj;
+        });
+        projectsRef.current = next;
+        cacheProjectsOffline(next);
+        return next;
+      });
+      setAutoSaveStatus({
+        state: 'saved',
+        lastSavedAt: nowIso,
+        label: `${isolated.length} Articles`,
+      });
+      if (updatedProj && idToken) {
+        void triggerCloudBackgroundSync(
+          updatedProj,
+          'update_project',
+          `Imported online retrieval (${isolated.length} unique)`
         );
       }
     },
@@ -818,25 +865,54 @@ export default function App() {
         workbenchDebounceRef.current.delete(targetProjectId);
       }
       pendingWorkbenchPayloadsRef.current.delete(targetProjectId);
+      const existingProjTimer = projectDebounceRef.current.get(targetProjectId);
+      if (existingProjTimer) {
+        clearTimeout(existingProjTimer);
+        projectDebounceRef.current.delete(targetProjectId);
+      }
+      pendingProjectPayloadsRef.current.delete(targetProjectId);
 
+      const prevArticles = projectsRef.current.find((p) => p.id === targetProjectId)?.articles || [];
       setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: `Resetting ${params.target}` }));
       const res = await apiService.resetWorkbenchModule(targetProjectId, params);
       const nextArticles = (res.articles || []).map((a) => ({ ...a, projectId: targetProjectId }));
+      const nextIdSet = new Set(nextArticles.map((a) => a.id));
+      const removedIds = prevArticles.filter((a) => !nextIdSet.has(a.id)).map((a) => a.id);
+      const savedAt = res.savedAt || new Date().toISOString();
 
+      if (removedIds.length > 0 || params.deleteArticlesMode === 'all') {
+        recordDeletedArticleIds(targetProjectId, {
+          articleIds: removedIds,
+          clearAll: params.deleteArticlesMode === 'all',
+          deletedAt: savedAt,
+        });
+      }
+
+      let updatedProjForSync: ReviewProject | null = null;
       setProjects((prev) => {
-        const next = prev.map((p) =>
-          p.id === targetProjectId
-            ? {
-                ...p,
-                databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
-                workbenchState: res.workbenchState,
-                articles: nextArticles,
-              }
-            : p
-        );
+        const next = prev.map((p) => {
+          if (p.id !== targetProjectId) return p;
+          updatedProjForSync = {
+            ...p,
+            updatedAt: savedAt,
+            databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
+            workbenchState: res.workbenchState,
+            articles: nextArticles,
+          };
+          return updatedProjForSync;
+        });
+        projectsRef.current = next;
         cacheProjectsOffline(next);
         return next;
       });
+
+      if (updatedProjForSync && idToken) {
+        void triggerCloudBackgroundSync(
+          updatedProjForSync,
+          'update_project',
+          `Reset ${params.target} (${removedIds.length} removed)`
+        );
+      }
 
       if (targetProjectId === currentProjectId) {
         setSelectedArticleId((prevSel) => {
@@ -847,12 +923,12 @@ export default function App() {
 
       setAutoSaveStatus({
         state: 'saved',
-        lastSavedAt: res.savedAt || new Date().toISOString(),
+        lastSavedAt: savedAt,
         label: `Reset ${params.target}`,
       });
       return res;
     },
-    [currentProjectId]
+    [currentProjectId, idToken]
   );
 
   // Query Q&A Rescan across active non-duplicate articles (auto-saved into workbench_state.json)
@@ -955,7 +1031,7 @@ export default function App() {
     [handleUpdateWorkbenchState]
   );
 
-  // Permanently remove articles in bulk from a specific review sub-library folder & persist to disk
+  // Permanently remove articles in bulk from a specific review sub-library folder & persist to disk (no auto-recovery)
   const handleBulkRemoveFromFolder = async (
     targetProjectId: string,
     params: {
@@ -963,25 +1039,64 @@ export default function App() {
       mode?: 'ids' | 'all' | 'excluded' | 'duplicates' | 'uncertain' | 'unscreened';
     }
   ) => {
+    const existingProjTimer = projectDebounceRef.current.get(targetProjectId);
+    if (existingProjTimer) {
+      clearTimeout(existingProjTimer);
+      projectDebounceRef.current.delete(targetProjectId);
+    }
+    pendingProjectPayloadsRef.current.delete(targetProjectId);
+    const existingWbTimer = workbenchDebounceRef.current.get(targetProjectId);
+    if (existingWbTimer) {
+      clearTimeout(existingWbTimer);
+      workbenchDebounceRef.current.delete(targetProjectId);
+    }
+    pendingWorkbenchPayloadsRef.current.delete(targetProjectId);
+
+    const prevArticles = projectsRef.current.find((p) => p.id === targetProjectId)?.articles || [];
     const res = await apiService.bulkRemoveArticlesFromFolder(targetProjectId, params);
     const nextArticles = (res.remainingArticles || []).map((a) => ({
       ...a,
       projectId: targetProjectId,
     }));
+    const nextIdSet = new Set(nextArticles.map((a) => a.id));
+    const removedIds = Array.from(
+      new Set([
+        ...(params.articleIds || []),
+        ...prevArticles.filter((a) => !nextIdSet.has(a.id)).map((a) => a.id),
+      ])
+    );
+    const savedAt = res.savedAt || new Date().toISOString();
 
+    recordDeletedArticleIds(targetProjectId, {
+      articleIds: removedIds,
+      clearAll: params.mode === 'all',
+      deletedAt: savedAt,
+    });
+
+    let updatedProjForSync: ReviewProject | null = null;
     setProjects((prev) => {
-      const next = prev.map((p) =>
-        p.id === targetProjectId
-          ? {
-              ...p,
-              databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
-              articles: nextArticles,
-            }
-          : p
-      );
+      const next = prev.map((p) => {
+        if (p.id !== targetProjectId) return p;
+        updatedProjForSync = {
+          ...p,
+          updatedAt: savedAt,
+          databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
+          articles: nextArticles,
+        };
+        return updatedProjForSync;
+      });
+      projectsRef.current = next;
       cacheProjectsOffline(next);
       return next;
     });
+
+    if (updatedProjForSync && idToken) {
+      void triggerCloudBackgroundSync(
+        updatedProjForSync,
+        'update_project',
+        `Permanently deleted ${res.removedCount} article(s)`
+      );
+    }
 
     if (targetProjectId === currentProjectId) {
       setSelectedArticleId((prevSel) => {
@@ -991,39 +1106,6 @@ export default function App() {
     }
 
     return res;
-  };
-
-  // Rebuild selectively restored deleted online-database articles back into active library state
-  const handleRestoredDeletedOnlineArticles = (
-    targetProjectId: string,
-    res: {
-      restoredCount: number;
-      restoredArticles: Article[];
-      remainingArticles: Article[];
-      remainingDeletedCount: number;
-      databaseFolderPath?: string;
-    }
-  ) => {
-    const nextArticles = (res.remainingArticles || []).map((a) => ({
-      ...a,
-      projectId: targetProjectId,
-    }));
-    setProjects((prev) => {
-      const next = prev.map((p) =>
-        p.id === targetProjectId
-          ? {
-              ...p,
-              databaseFolderPath: res.databaseFolderPath || p.databaseFolderPath,
-              articles: nextArticles,
-            }
-          : p
-      );
-      cacheProjectsOffline(next);
-      return next;
-    });
-    if (targetProjectId === currentProjectId && res.restoredArticles?.length > 0) {
-      setSelectedArticleId(res.restoredArticles[0].id);
-    }
   };
 
   // Explicitly save all changes (metadata + articles + manifest) for a review folder to disk
@@ -1222,12 +1304,32 @@ export default function App() {
   const handleAddArticle = (newArt: Article, targetProjectId?: string, pdfFile?: File) => {
     const targetId = targetProjectId || newArt.projectId || isolatedCurrentProject?.id;
     if (!targetId) return;
-    const isolatedArt: Article = { ...newArt, projectId: targetId };
+    const nowIso = new Date().toISOString();
+    const inferredIntake: Article['intakeSource'] =
+      newArt.intakeSource ||
+      (newArt.id?.startsWith('art-manual')
+        ? 'manual_blank'
+        : newArt.id?.startsWith('art-online')
+        ? 'online_db'
+        : newArt.sourceDatabase === 'Crossref' && !newArt.sourceFileName
+        ? 'doi_lookup'
+        : newArt.sourceFileName
+        ? 'bulk_importer'
+        : 'other');
+    const isolatedArt: Article = {
+      ...newArt,
+      projectId: targetId,
+      intakeSource: inferredIntake,
+      importedAt: newArt.importedAt || nowIso,
+    };
     setAutoSaveStatus((prev) => ({ ...prev, state: 'saving', label: 'Add Paper' }));
     setProjects((prev) => {
       const next = prev.map((p) =>
-        p.id === targetId ? { ...p, articles: [isolatedArt, ...p.articles] } : p
+        p.id === targetId
+          ? { ...p, updatedAt: nowIso, articles: [isolatedArt, ...p.articles] }
+          : p
       );
+      projectsRef.current = next;
       cacheProjectsOffline(next);
       return next;
     });
@@ -1251,8 +1353,9 @@ export default function App() {
       .catch((err) => console.warn('Article save warning:', err?.message));
   };
 
-  // Supports continuous streaming chunks during large bulk imports locked to a specific review partition
-  // Automatically detects & records cross-database duplicates for PRISMA 2020 reporting
+  // Supports continuous streaming chunks during large bulk imports locked to a specific review partition.
+  // Stage A canonical deduplication: keeps 1 canonical master Article per scholarly work while merging
+  // multi-database provenance into databaseSourceRecords & duplicateMatchedDatabases.
   const handleAddMultipleArticles = (
     newArts: Article[],
     options?: { keepOpen?: boolean; targetProjectId?: string; pdfFilesByArticleId?: Map<string, File> }
@@ -1261,9 +1364,27 @@ export default function App() {
     const targetId =
       options?.targetProjectId || newArts[0]?.projectId || isolatedCurrentProject?.id;
     if (!targetId) return;
-    const isolatedBatch = newArts.map((a) => ({ ...a, projectId: targetId }));
+    const nowIso = new Date().toISOString();
+    const isolatedBatch = newArts.map((a) => {
+      const inferredIntake: Article['intakeSource'] =
+        a.intakeSource ||
+        (a.id?.startsWith('art-manual')
+          ? 'manual_blank'
+          : a.id?.startsWith('art-online')
+          ? 'online_db'
+          : a.sourceFileName
+          ? 'bulk_importer'
+          : 'other');
+      return {
+        ...a,
+        projectId: targetId,
+        intakeSource: inferredIntake,
+        importedAt: a.importedAt || nowIso,
+      };
+    });
 
-    const targetProj = projects.find((p) => p.id === targetId);
+    // Use projectsRef.current (not stale closure `projects`) so multi-chunk streaming sees earlier chunks
+    const targetProj = projectsRef.current.find((p) => p.id === targetId);
     const existingArticles = [...(targetProj?.articles || [])];
 
     const normDoi = (d?: string) => (d ? d.toLowerCase().trim() : '');
@@ -1292,12 +1413,13 @@ export default function App() {
 
     for (const art of isolatedBatch) {
       if (existingIds.has(art.id)) continue;
+      existingIds.add(art.id);
       const dk = normDoi(art.doi);
       const tk = normTitle(art.title);
       const incomingDb = (art.sourceDatabase || 'Other').trim();
       const incomingDbLower = incomingDb.toLowerCase();
 
-      // Prevent accidental double-click re-import of the exact same paper from the exact same database
+      // Prevent duplicate re-import of the exact same paper from the exact same database
       if (
         (dk && seenSameDb.has(`${incomingDbLower}::doi:${dk}`)) ||
         (tk.length > 12 && seenSameDb.has(`${incomingDbLower}::title:${tk}`))
@@ -1310,17 +1432,54 @@ export default function App() {
 
       const canonical = (dk && canonByDoi.get(dk)) || (tk.length > 12 ? canonByTitle.get(tk) : undefined);
 
-      if (canonical && (canonical.sourceDatabase || 'Other').toLowerCase().trim() !== incomingDbLower) {
-        // Cross-database duplicate: KEEP the identified database record AND flag as duplicate for PRISMA!
+      const toIdentificationRecord = (srcArt: Article, dbName: string) => ({
+        id: `${srcArt.id}::${dbName.toLowerCase()}`,
+        databaseName: dbName,
+        databaseVerified: Boolean(dbName && dbName !== 'Manual' && dbName !== 'Other'),
+        searchBatchId: srcArt.searchBatchId || 'direct-import',
+        exportFilename: srcArt.sourceFileName || `${dbName}-intake`,
+        exportFormat: 'json' as const,
+        recordIdentifier: srcArt.id,
+        doi: srcArt.doi,
+        title: srcArt.title,
+        authors: srcArt.authors || [],
+        year: srcArt.year,
+        journal: srcArt.journal || '',
+        volume: srcArt.volume,
+        issue: srcArt.issue,
+        pagesStr: srcArt.pagesStr,
+        publisher: srcArt.publisher,
+        abstract: srcArt.abstract || '',
+        url: srcArt.url,
+        importedAt: srcArt.importedAt || nowIso,
+      });
+
+      if (canonical) {
+        // Stage A Canonical Merge: update the 1 canonical master Article with cross-database provenance
+        // instead of creating redundant duplicate clutter rows in Article Library.
+        const currentPatch = canonicalUpdates.get(canonical.id) || {};
         const prevMatched =
-          canonicalUpdates.get(canonical.id)?.duplicateMatchedDatabases ||
+          currentPatch.duplicateMatchedDatabases ||
           canonical.duplicateMatchedDatabases ||
           [canonical.sourceDatabase];
         const mergedDatabases = Array.from(new Set([...prevMatched, canonical.sourceDatabase, incomingDb]));
+        const prevSources =
+          currentPatch.databaseSourceRecords ||
+          canonical.databaseSourceRecords || [
+            toIdentificationRecord(canonical, canonical.sourceDatabase),
+          ];
+        const nextSources = prevSources.some(
+          (s) =>
+            s.databaseName.toLowerCase() === incomingDbLower &&
+            (s.recordIdentifier === art.id || s.id === `${art.id}::${incomingDbLower}`)
+        )
+          ? prevSources
+          : [...prevSources, toIdentificationRecord(art, incomingDb)];
 
         const canonicalPatch: Partial<Article> = {
-          ...(canonicalUpdates.get(canonical.id) || {}),
+          ...currentPatch,
           duplicateMatchedDatabases: mergedDatabases,
+          databaseSourceRecords: nextSources,
         };
         if (!canonical.pdfUrl && art.pdfUrl) {
           canonicalPatch.pdfUrl = art.pdfUrl;
@@ -1328,21 +1487,17 @@ export default function App() {
           canonicalPatch.accessStatus = 'downloadable';
         }
         canonicalUpdates.set(canonical.id, canonicalPatch);
-
-        newRecordsToInsert.push({
-          ...art,
-          isDuplicate: true,
-          duplicateOfId: canonical.id,
-          duplicateMatchedDatabases: mergedDatabases,
-          duplicateNote: `Published in multiple databases (${mergedDatabases.join(' & ')})`,
-          screeningStage: 'excluded',
-          decision: 'exclude',
-          decisionReason: `Cross-database duplicate (also indexed in ${canonical.sourceDatabase})`,
-        });
       } else {
-        if (dk && !canonByDoi.has(dk)) canonByDoi.set(dk, art);
-        if (tk.length > 12 && !canonByTitle.has(tk)) canonByTitle.set(tk, art);
-        newRecordsToInsert.push(art);
+        const enrichedNew: Article = {
+          ...art,
+          databaseSourceRecords:
+            art.databaseSourceRecords && art.databaseSourceRecords.length > 0
+              ? art.databaseSourceRecords
+              : [toIdentificationRecord(art, incomingDb)],
+        };
+        if (dk && !canonByDoi.has(dk)) canonByDoi.set(dk, enrichedNew);
+        if (tk.length > 12 && !canonByTitle.has(tk)) canonByTitle.set(tk, enrichedNew);
+        newRecordsToInsert.push(enrichedNew);
       }
     }
 
@@ -1355,8 +1510,9 @@ export default function App() {
           const patch = canonicalUpdates.get(ex.id);
           return patch ? { ...ex, ...patch } : ex;
         });
-        return { ...p, articles: [...uniqueNew, ...updatedExisting] };
+        return { ...p, updatedAt: nowIso, articles: [...uniqueNew, ...updatedExisting] };
       });
+      projectsRef.current = next;
       cacheProjectsOffline(next);
       return next;
     });
@@ -1365,19 +1521,29 @@ export default function App() {
       setSelectedArticleId(newRecordsToInsert[0].id);
     }
 
-    if (newRecordsToInsert.length > 0) {
+    if (newRecordsToInsert.length > 0 || canonicalUpdates.size > 0) {
       setAutoSaveStatus((prev) => ({
         ...prev,
         state: 'saving',
         label: `Saving ${newRecordsToInsert.length} Added Files`,
       }));
-      apiService
-        .uploadArticlesChunk(
-          targetId,
-          newRecordsToInsert,
-          newRecordsToInsert.map((a) => a.sourceFileName).filter(Boolean) as string[]
-        )
+      const savePromise =
+        newRecordsToInsert.length > 0
+          ? apiService.uploadArticlesChunk(
+              targetId,
+              newRecordsToInsert,
+              newRecordsToInsert.map((a) => a.sourceFileName).filter(Boolean) as string[]
+            )
+          : Promise.resolve(null);
+
+      savePromise
         .then(async (res) => {
+          if (canonicalUpdates.size > 0) {
+            const latestProj = projectsRef.current.find((p) => p.id === targetId);
+            if (latestProj) {
+              await apiService.syncProjectArticles(targetId, latestProj.articles).catch(() => {});
+            }
+          }
           if (options?.pdfFilesByArticleId && options.pdfFilesByArticleId.size > 0) {
             await persistOriginalPdfFiles(targetId, options.pdfFilesByArticleId);
           }
@@ -1387,11 +1553,13 @@ export default function App() {
             label: `${newRecordsToInsert.length} Files Saved`,
           });
           if (res?.databaseFolderPath) {
-            setProjects((prev) =>
-              prev.map((p) =>
+            setProjects((prev) => {
+              const next = prev.map((p) =>
                 p.id === targetId ? { ...p, databaseFolderPath: res.databaseFolderPath } : p
-              )
-            );
+              );
+              projectsRef.current = next;
+              return next;
+            });
           }
         })
         .catch((err) => console.warn('Chunk persistence warning:', err?.message));
@@ -1900,7 +2068,6 @@ export default function App() {
                       initialStageFilter="starred"
                       onUpdateArticles={handleUpdateArticles}
                       onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
-                      onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
                       onSaveFolderChanges={handleSaveFolderChanges}
                       onDeleteProjectFolder={handleDeleteProjectFolder}
                       onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -1958,7 +2125,6 @@ export default function App() {
                       onCreateNewReview={() => setIsCreateReviewOpen(true)}
                       onUpdateArticles={handleUpdateArticles}
                       onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
-                      onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
                       onSaveFolderChanges={handleSaveFolderChanges}
                       onDeleteProjectFolder={handleDeleteProjectFolder}
                       onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -2391,7 +2557,7 @@ export default function App() {
                   initialStageFilter="starred"
                   onUpdateArticles={handleUpdateArticles}
                   onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
-                  onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
+                  onSyncProjectAfterOnlineImport={handleSyncProjectAfterOnlineImport}
                   onSaveFolderChanges={handleSaveFolderChanges}
                   onDeleteProjectFolder={handleDeleteProjectFolder}
                   onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -2451,7 +2617,7 @@ export default function App() {
                   onCreateNewReview={() => setIsCreateReviewOpen(true)}
                   onUpdateArticles={handleUpdateArticles}
                   onBulkRemoveFromFolder={handleBulkRemoveFromFolder}
-                  onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
+                  onSyncProjectAfterOnlineImport={handleSyncProjectAfterOnlineImport}
                   onSaveFolderChanges={handleSaveFolderChanges}
                   onDeleteProjectFolder={handleDeleteProjectFolder}
                   onSelectArticleForScreening={handleSelectArticleForScreening}
@@ -2860,7 +3026,7 @@ export default function App() {
               mode: 'all',
             });
           }}
-          onRestoredDeletedArticles={handleRestoredDeletedOnlineArticles}
+          onSyncProjectAfterOnlineImport={handleSyncProjectAfterOnlineImport}
           project={isolatedCurrentProject}
           allProjects={projects}
           onSwitchProject={handleSwitchProject}

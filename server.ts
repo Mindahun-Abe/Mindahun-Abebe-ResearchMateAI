@@ -309,71 +309,56 @@ function isOnlineDatabaseArticle(art: any): boolean {
   return false;
 }
 
+function isFolderInsideReviewsRoot(folderPath: string): boolean {
+  const resolvedRoot = path.resolve(REVIEWS_DB_ROOT);
+  const resolvedTarget = path.resolve(folderPath);
+  return resolvedTarget.startsWith(resolvedRoot + path.sep);
+}
+
 function getDeletedOnlineArchivePath(folderPath: string): string {
   return path.join(folderPath, 'deleted_online_articles.json');
 }
 
-function readDeletedOnlineArchive(folderPath: string): any[] {
+function clearDeletedOnlineArchiveFile(folderPath: string): void {
+  if (!isFolderInsideReviewsRoot(folderPath)) return;
   const filePath = getDeletedOnlineArchivePath(folderPath);
+  if (fs.existsSync(filePath)) {
+    try {
+      fs.writeFileSync(filePath, '[]', 'utf-8');
+    } catch {}
+  }
+}
+
+function readDeletedOnlineArchive(_folderPath: string): any[] {
+  return [];
+}
+
+function writeDeletedOnlineArchive(folderPath: string, _items: any[]) {
+  clearDeletedOnlineArchiveFile(folderPath);
+}
+
+function getSearchSessionsPath(folderPath: string): string {
+  return path.join(folderPath, 'search_sessions.json');
+}
+
+function readSearchSessionsFile(folderPath: string): any[] {
+  if (!isFolderInsideReviewsRoot(folderPath)) return [];
+  const filePath = getSearchSessionsPath(folderPath);
   if (!fs.existsSync(filePath)) return [];
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const parsed = safeReadJsonSync<any[]>(filePath);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
-function writeDeletedOnlineArchive(folderPath: string, items: any[]) {
-  const filePath = getDeletedOnlineArchivePath(folderPath);
-  fs.writeFileSync(filePath, JSON.stringify(items, null, 2), 'utf-8');
+function writeSearchSessionsFile(folderPath: string, sessions: any[]) {
+  if (!isFolderInsideReviewsRoot(folderPath)) return;
+  const filePath = getSearchSessionsPath(folderPath);
+  writeJsonAtomicSync(filePath, (Array.isArray(sessions) ? sessions : []).slice(0, 60));
 }
 
-function buildArchiveKeyForArticle(art: any): string {
-  const db = String(art?.sourceDatabase || 'Other').toLowerCase().trim();
-  const doi = String(art?.doi || '').toLowerCase().trim();
-  if (doi) return `${db}::doi::${doi}`;
-  const titleNorm = String(art?.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-  if (titleNorm.length > 8) return `${db}::title::${titleNorm}`;
-  return `id::${art?.id || Date.now()}`;
-}
-
-function appendDeletedOnlineArticles(folderPath: string, projectId: string, removedArticles: any[], mode: string): number {
-  const onlineRemoved = removedArticles.filter((a) => isOnlineDatabaseArticle(a));
-  if (onlineRemoved.length === 0) return 0;
-
-  const existingArchive = readDeletedOnlineArchive(folderPath);
-  const byKey = new Map<string, any>();
-  for (const rec of existingArchive) {
-    if (rec?.article) {
-      byKey.set(buildArchiveKeyForArticle(rec.article), rec);
-    }
-  }
-
-  const nowIso = new Date().toISOString();
-  let addedCount = 0;
-  for (const art of onlineRemoved) {
-    const cleanArt = { ...art, projectId };
-    const key = buildArchiveKeyForArticle(cleanArt);
-    const existingRec = byKey.get(key);
-    const record = {
-      archiveId: existingRec?.archiveId || `del-online-${cleanArt.id || Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      projectId,
-      article: cleanArt,
-      deletedAt: nowIso,
-      deletionMode: mode,
-      reviewerInterestSelected: existingRec?.reviewerInterestSelected ?? Boolean(cleanArt.isStarred),
-      reviewerInterestNote: existingRec?.reviewerInterestNote || cleanArt.reviewerNotes || '',
-    };
-    if (!existingRec) addedCount++;
-    byKey.set(key, record);
-  }
-
-  const nextArchive = Array.from(byKey.values()).sort(
-    (a, b) => new Date(b.deletedAt || 0).getTime() - new Date(a.deletedAt || 0).getTime()
-  );
-  writeDeletedOnlineArchive(folderPath, nextArchive);
-  return addedCount || onlineRemoved.length;
+function appendDeletedOnlineArticles(folderPath: string, _projectId: string, _removedArticles: any[], _mode: string): number {
+  // Auto-recovery of deleted files is permanently disabled to prevent resurrection & double-counting.
+  clearDeletedOnlineArchiveFile(folderPath);
+  return 0;
 }
 
 function readFolderProjectId(folderPath: string): string | null {
@@ -691,11 +676,14 @@ function seedAndLoadAllReviewFolders(): any[] {
         } catch {}
       }
 
+      const onlineSearchSessions = readSearchSessionsFile(folderPath);
+
       loaded.push({
         ...meta,
         databaseFolderName: dir.name,
         databaseFolderPath: `database/reviews/${dir.name}`,
         articles,
+        ...(onlineSearchSessions.length > 0 ? { onlineSearchSessions } : {}),
         ...(workbenchState ? { workbenchState } : {}),
       });
     } catch (err) {
@@ -1398,8 +1386,9 @@ app.post('/api/projects/:id/articles/bulk-remove', (req: Request, res: Response)
       removedItems = existing.filter((a) => idSet.has(a?.id));
     }
 
-    // Store deleted online database files in separate reviewer-interest archive (never auto-recovered into library)
-    const deletedOnlineCount = appendDeletedOnlineArticles(folderPath, projectId, removedItems, mode);
+    // Permanent deletion: never archive/auto-recover deleted articles
+    clearDeletedOnlineArchiveFile(folderPath);
+    const deletedOnlineCount = 0;
 
     const isolatedRemaining = remaining.map((a: any) => ({ ...a, projectId }));
     const removedCount = Math.max(0, existing.length - isolatedRemaining.length);
@@ -2075,110 +2064,371 @@ app.post('/api/projects/:id/screening/reconcile', async (req: Request, res: Resp
 });
 
 // -------------------------------------------------------------
-// Deleted Online Database Files Archive (Separate from Article Library & Fast Batch Screener)
-// No auto-recovery: reviewers can inspect, mark interest, and selectively build back if desired.
+// Deleted Online Archive Permanently Eliminated (No Auto-Recovery)
 // -------------------------------------------------------------
 app.get('/api/projects/:id/deleted-online-articles', (req: Request, res: Response) => {
+  return res.json({
+    projectId: req.params.id,
+    items: [],
+    count: 0,
+  });
+});
+
+app.patch('/api/projects/:id/deleted-online-articles/interest', (_req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Deleted article recovery archive has been permanently eliminated.',
+  });
+});
+
+app.post('/api/projects/:id/deleted-online-articles/restore', (_req: Request, res: Response) => {
+  return res.status(410).json({
+    error: 'Auto-recovery of deleted files from Article Library has been permanently eliminated.',
+  });
+});
+
+app.delete('/api/projects/:id/deleted-online-articles', (req: Request, res: Response) => {
+  const folderPath = findFolderForProjectId(req.params.id);
+  if (folderPath) clearDeletedOnlineArchiveFile(folderPath);
+  return res.json({
+    success: true,
+    projectId: req.params.id,
+    purgedCount: 0,
+    remainingDeletedCount: 0,
+  });
+});
+
+// -------------------------------------------------------------
+// Workflow 2 & 3 Persistent Search Sessions & Stage A Canonical Import
+// -------------------------------------------------------------
+app.get('/api/projects/:id/online-search-sessions', (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
     const folderPath = findFolderForProjectId(projectId);
-    if (!folderPath || !fs.existsSync(folderPath)) {
+    if (!folderPath || !fs.existsSync(folderPath) || !isFolderInsideReviewsRoot(folderPath)) {
       return res.status(404).json({ error: 'Partitioned review database folder not found' });
     }
-    const items = readDeletedOnlineArchive(folderPath);
+    const sessions = readSearchSessionsFile(folderPath);
+    return res.json({ projectId, sessions });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to load search sessions' });
+  }
+});
+
+app.post('/api/projects/:id/online-search-sessions', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const session = req.body?.session;
+    if (!session || !session.id) {
+      return res.status(400).json({ error: 'Valid session object with id is required' });
+    }
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath) || !isFolderInsideReviewsRoot(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const existing = readSearchSessionsFile(folderPath);
+    const nowIso = new Date().toISOString();
+    const idx = existing.findIndex((s: any) => s?.id === session.id);
+    const normalizedSession = {
+      id: String(session.id),
+      database: String(session.database || 'all'),
+      databaseLabel: String(session.databaseLabel || 'All Online DBs'),
+      query: String(session.query || ''),
+      searchBy: String(session.searchBy || 'all_fields'),
+      externalReportedCount: Number(session.externalReportedCount || 0),
+      actuallyRetrievedCount: Number(session.actuallyRetrievedCount || 0),
+      withinSessionUniqueCount: Number(session.withinSessionUniqueCount || 0),
+      withinSessionDuplicateCount: Number(session.withinSessionDuplicateCount || 0),
+      successfullySavedCount:
+        idx >= 0
+          ? Number(existing[idx].successfullySavedCount ?? session.successfullySavedCount ?? 0)
+          : Number(session.successfullySavedCount || 0),
+      existingLibraryMatchedCount:
+        idx >= 0
+          ? Number(existing[idx].existingLibraryMatchedCount ?? session.existingLibraryMatchedCount ?? 0)
+          : Number(session.existingLibraryMatchedCount || 0),
+      duplicateEventsRemovedCount:
+        idx >= 0
+          ? Number(existing[idx].duplicateEventsRemovedCount ?? session.duplicateEventsRemovedCount ?? 0)
+          : Number(session.duplicateEventsRemovedCount || 0),
+      hasMore: Boolean(session.hasMore),
+      nextOffset: Number(session.nextOffset || 0),
+      sourceStats: session.sourceStats || {},
+      totalHitsBySource: session.totalHitsBySource || {},
+      sourceWarnings: Array.isArray(session.sourceWarnings) ? session.sourceWarnings : undefined,
+      retrievedAt: idx >= 0 ? existing[idx].retrievedAt : session.retrievedAt || nowIso,
+      updatedAt: nowIso,
+      importEvents: idx >= 0 ? existing[idx].importEvents || [] : session.importEvents || [],
+    };
+    const nextSessions =
+      idx >= 0
+        ? [normalizedSession, ...existing.filter((_: any, i: number) => i !== idx)]
+        : [normalizedSession, ...existing];
+    writeSearchSessionsFile(folderPath, nextSessions);
+    return res.json({ success: true, projectId, session: normalizedSession, sessions: nextSessions });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to save search session' });
+  }
+});
+
+app.delete('/api/projects/:id/online-search-sessions/:sessionId', (req: Request, res: Response) => {
+  try {
+    const projectId = req.params.id;
+    const sessionId = req.params.sessionId;
+    const folderPath = findFolderForProjectId(projectId);
+    if (!folderPath || !fs.existsSync(folderPath) || !isFolderInsideReviewsRoot(folderPath)) {
+      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    }
+    const existing = readSearchSessionsFile(folderPath);
+    const nextSessions = existing.filter((s: any) => s?.id !== sessionId);
+    writeSearchSessionsFile(folderPath, nextSessions);
     return res.json({
+      success: true,
       projectId,
-      items,
-      count: items.length,
+      removedSessionId: sessionId,
+      removedCount: Math.max(0, existing.length - nextSessions.length),
+      sessions: nextSessions,
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to load deleted online database archive' });
+    return res.status(500).json({ error: err?.message || 'Failed to delete search session' });
   }
 });
 
-app.patch('/api/projects/:id/deleted-online-articles/interest', (req: Request, res: Response) => {
+app.delete('/api/projects/:id/online-search-sessions', (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
-    const { archiveIds = [], reviewerInterestSelected, reviewerInterestNote } = req.body || {};
     const folderPath = findFolderForProjectId(projectId);
-    if (!folderPath || !fs.existsSync(folderPath)) {
+    if (!folderPath || !fs.existsSync(folderPath) || !isFolderInsideReviewsRoot(folderPath)) {
       return res.status(404).json({ error: 'Partitioned review database folder not found' });
     }
-
-    const idSet = new Set(Array.isArray(archiveIds) ? archiveIds : []);
-    const items = readDeletedOnlineArchive(folderPath).map((rec: any) => {
-      if (!idSet.has(rec.archiveId)) return rec;
-      return {
-        ...rec,
-        reviewerInterestSelected:
-          reviewerInterestSelected !== undefined ? Boolean(reviewerInterestSelected) : !rec.reviewerInterestSelected,
-        reviewerInterestNote:
-          reviewerInterestNote !== undefined ? String(reviewerInterestNote) : rec.reviewerInterestNote,
-      };
+    const existing = readSearchSessionsFile(folderPath);
+    writeSearchSessionsFile(folderPath, []);
+    return res.json({
+      success: true,
+      projectId,
+      removedCount: existing.length,
+      sessions: [],
     });
-    writeDeletedOnlineArchive(folderPath, items);
-    return res.json({ success: true, projectId, items, count: items.length });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to update reviewer interest flags' });
+    return res.status(500).json({ error: err?.message || 'Failed to clear search sessions' });
   }
 });
 
-app.post('/api/projects/:id/deleted-online-articles/restore', (req: Request, res: Response) => {
+app.post('/api/projects/:id/articles/import-retrieved', (req: Request, res: Response) => {
   try {
     const projectId = req.params.id;
-    const { archiveIds = [], restoreMode = 'unscreened' } = req.body || {};
-    if (!Array.isArray(archiveIds) || archiveIds.length === 0) {
-      return res.status(400).json({ error: 'Select at least one deleted online database record to build back.' });
+    const {
+      sessionId = '',
+      mode = 'metadata',
+      items = [],
+      batchId = '',
+      queryUsed = '',
+      databaseLabel = '',
+    } = req.body || {};
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: 'Non-empty items array is required for Workflow 3 import' });
     }
 
     const folderPath = findFolderForProjectId(projectId);
-    if (!folderPath || !fs.existsSync(folderPath)) {
+    if (!folderPath || !fs.existsSync(folderPath) || !isFolderInsideReviewsRoot(folderPath)) {
       return res.status(404).json({ error: 'Partitioned review database folder not found' });
     }
-
-    const archive = readDeletedOnlineArchive(folderPath);
-    const idSet = new Set(archiveIds);
-    const toRestore = archive.filter((rec: any) => idSet.has(rec.archiveId));
-    if (toRestore.length === 0) {
-      return res.status(404).json({ error: 'No matching deleted online records found to restore.' });
-    }
-
-    const remainingArchive = archive.filter((rec: any) => !idSet.has(rec.archiveId));
 
     const articlesFile = path.join(folderPath, 'articles.json');
-    const existingArticles: any[] = fs.existsSync(articlesFile)
-      ? JSON.parse(fs.readFileSync(articlesFile, 'utf-8'))
-      : [];
-    const existingIds = new Set(existingArticles.map((a: any) => a?.id).filter(Boolean));
+    const diskArticles: any[] = safeReadJsonSync<any[]>(articlesFile) || [];
+    const nowIso = new Date().toISOString();
 
-    const rebuiltArticles: any[] = toRestore.map((rec: any) => {
-      const orig = rec.article || {};
-      const nextId = orig.id && !existingIds.has(orig.id)
-        ? orig.id
-        : `art-online-restored-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      existingIds.add(nextId);
+    const normDoi = (d?: string) => (d ? cleanDoiValue(String(d)).toLowerCase().trim() : '');
+    const normTitle = (t?: string) => (t ? String(t).toLowerCase().replace(/[^a-z0-9]/g, '') : '');
+    const normPmid = (p?: string) => (p ? String(p).trim() : '');
+    const normOaId = (o?: string) => (o ? String(o).toLowerCase().trim() : '');
 
-      const isInclude = restoreMode === 'include';
-      const isStarred = restoreMode === 'starred' || Boolean(rec.reviewerInterestSelected) || Boolean(orig.isStarred);
+    // Build Stage A canonical index from active library (never blocked or restricted by PRISMA rules)
+    const canonicalList: any[] = diskArticles.map((a) => ({ ...a, projectId }));
+    const preExistingIndices = new Set<number>(canonicalList.map((_, i) => i));
+    const idxById = new Map<string, number>();
+    const idxByDoi = new Map<string, number>();
+    const idxByPmid = new Map<string, number>();
+    const idxByOaId = new Map<string, number>();
+    const idxByTitleYear = new Map<string, number>();
+    const idxByTitle = new Map<string, number>();
 
-      return {
-        ...orig,
-        id: nextId,
-        projectId,
-        isStarred,
-        decision: isInclude ? 'include' : 'unscreened',
-        screeningStage: isInclude ? 'final_included' : 'title_abstract',
-        decisionReason: isInclude ? 'Restored from Deleted Online Archive per reviewer selection' : undefined,
-        reviewerNotes: rec.reviewerInterestNote || orig.reviewerNotes,
-        retrievedAt: orig.retrievedAt || new Date().toISOString(),
+    const registerCanonicalIndex = (idx: number, art: any) => {
+      if (art?.id) idxById.set(String(art.id), idx);
+      if (art?.isDuplicate) return;
+      const dk = normDoi(art?.doi);
+      const pk = normPmid(art?.pmid);
+      const ok = normOaId(art?.openAlexId);
+      const tk = normTitle(art?.title);
+      const yr = art?.year ? String(art.year) : '';
+      if (dk && !idxByDoi.has(dk)) idxByDoi.set(dk, idx);
+      if (pk && !idxByPmid.has(pk)) idxByPmid.set(pk, idx);
+      if (ok && !idxByOaId.has(ok)) idxByOaId.set(ok, idx);
+      if (tk.length > 10 && yr && !idxByTitleYear.has(`${tk}::${yr}`)) {
+        idxByTitleYear.set(`${tk}::${yr}`, idx);
+      }
+      if (tk.length > 16 && !idxByTitle.has(tk)) idxByTitle.set(tk, idx);
+    };
+
+    canonicalList.forEach((art, idx) => registerCanonicalIndex(idx, art));
+
+    let uniqueInsertedCount = 0;
+    let existingMatchedCount = 0;
+    let duplicateEventsRemovedCount = 0;
+    const matchedPreExistingIds = new Set<string>();
+    const byDatabase: Record<string, number> = {};
+
+    for (const rawItem of items) {
+      if (!rawItem || !rawItem.title) continue;
+      const incomingDb = String(rawItem.sourceDatabase || databaseLabel || 'Online DB').trim();
+      byDatabase[incomingDb] = (byDatabase[incomingDb] || 0) + 1;
+
+      const dk = normDoi(rawItem.doi);
+      const pk = normPmid(rawItem.pmid);
+      const ok = normOaId(rawItem.openAlexId);
+      const tk = normTitle(rawItem.title);
+      const yr = rawItem.year ? String(rawItem.year) : '';
+
+      let matchedIdx: number | undefined =
+        (rawItem.id && idxById.get(String(rawItem.id))) ??
+        (dk ? idxByDoi.get(dk) : undefined) ??
+        (pk ? idxByPmid.get(pk) : undefined) ??
+        (ok ? idxByOaId.get(ok) : undefined) ??
+        (tk.length > 10 && yr ? idxByTitleYear.get(`${tk}::${yr}`) : undefined) ??
+        (tk.length > 16 ? idxByTitle.get(tk) : undefined);
+
+      const matchedBy: 'doi' | 'pmid' | 'title_year' | 'title' | 'new_record' = dk
+        ? 'doi'
+        : pk
+        ? 'pmid'
+        : tk.length > 10 && yr
+        ? 'title_year'
+        : 'title';
+
+      const sourceRecordEntry = {
+        id: `${String(rawItem.id || incomingDb)}::${incomingDb.toLowerCase()}`,
+        databaseName: incomingDb,
+        databaseVerified: Boolean(incomingDb && incomingDb !== 'Manual' && incomingDb !== 'Other'),
+        searchBatchId: rawItem.searchBatchId || batchId || sessionId || 'online-search',
+        exportFilename: `${incomingDb}-online-search`,
+        exportFormat: 'json',
+        recordIdentifier: String(rawItem.id || `${incomingDb}-${Date.now()}`),
+        doi: dk || undefined,
+        title: String(rawItem.title || ''),
+        authors: Array.isArray(rawItem.authors) ? rawItem.authors : [],
+        year: rawItem.year ? Number(rawItem.year) : undefined,
+        journal: String(rawItem.journal || ''),
+        abstract: String(rawItem.abstract || ''),
+        url: rawItem.url || undefined,
+        importedAt: nowIso,
       };
-    });
 
-    const mergedArticles = [...rebuiltArticles, ...existingArticles].map((a: any) => ({ ...a, projectId }));
-    const savedAt = new Date().toISOString();
+      if (matchedIdx !== undefined) {
+        const canon = canonicalList[matchedIdx];
+        duplicateEventsRemovedCount++;
+        if (preExistingIndices.has(matchedIdx) && !matchedPreExistingIds.has(canon.id)) {
+          existingMatchedCount++;
+          matchedPreExistingIds.add(canon.id);
+        }
 
-    fs.writeFileSync(articlesFile, JSON.stringify(mergedArticles, null, 2), 'utf-8');
-    writeDeletedOnlineArchive(folderPath, remainingArchive);
+        const prevSources = Array.isArray(canon.databaseSourceRecords)
+          ? canon.databaseSourceRecords
+          : [
+              {
+                id: `${canon.id}::${String(canon.sourceDatabase || 'Other').toLowerCase()}`,
+                databaseName: canon.sourceDatabase || 'Other',
+                databaseVerified: Boolean(canon.sourceDatabase && canon.sourceDatabase !== 'Manual' && canon.sourceDatabase !== 'Other'),
+                searchBatchId: canon.searchBatchId || 'library-record',
+                exportFilename: canon.sourceFileName || `${canon.sourceDatabase || 'Other'}-intake`,
+                exportFormat: 'json',
+                recordIdentifier: canon.id,
+                doi: canon.doi,
+                title: canon.title || '',
+                authors: Array.isArray(canon.authors) ? canon.authors : [],
+                year: canon.year,
+                journal: canon.journal || '',
+                abstract: canon.abstract || '',
+                url: canon.url,
+                importedAt: canon.importedAt || canon.retrievedAt || nowIso,
+              },
+            ];
+        const hasSameSourceRec = prevSources.some(
+          (s: any) =>
+            String(s.databaseName || '').toLowerCase() === incomingDb.toLowerCase() &&
+            (!sourceRecordEntry.searchBatchId || s.searchBatchId === sourceRecordEntry.searchBatchId)
+        );
+        const nextSources = hasSameSourceRec ? prevSources : [...prevSources, sourceRecordEntry];
+        const nextMatchedDbs = Array.from(
+          new Set([
+            ...(Array.isArray(canon.duplicateMatchedDatabases) ? canon.duplicateMatchedDatabases : [canon.sourceDatabase]),
+            canon.sourceDatabase,
+            incomingDb,
+          ].filter(Boolean))
+        );
+
+        canonicalList[matchedIdx] = {
+          ...canon,
+          databaseSourceRecords: nextSources,
+          duplicateMatchedDatabases: nextMatchedDbs,
+          pdfUrl: canon.pdfUrl || rawItem.pdfUrl || undefined,
+          openAccessUrl: canon.openAccessUrl || rawItem.openAccessUrl || rawItem.pdfUrl || undefined,
+          accessStatus:
+            !canon.pdfUrl && (rawItem.pdfUrl || rawItem.openAccessUrl)
+              ? 'downloadable'
+              : canon.accessStatus,
+          fullText: canon.fullText || rawItem.fullText || undefined,
+          pages: canon.pages || rawItem.pages || undefined,
+          abstract:
+            canon.abstract && !isPlaceholderAbstract(canon.abstract)
+              ? canon.abstract
+              : rawItem.abstract || canon.abstract,
+          doi: canon.doi || rawItem.doi || undefined,
+          journal: canon.journal || rawItem.journal || '',
+        };
+      } else {
+        const newId = String(rawItem.id && String(rawItem.id).startsWith('art-') ? rawItem.id : `art-online-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+        const newCanonical = backfillArticleLegacyFields(
+          {
+            ...rawItem,
+            id: newId,
+            projectId,
+            isDuplicate: false,
+            duplicateOfId: undefined,
+            intakeSource: 'online_db',
+            importedAt: nowIso,
+            retrievedAt: rawItem.retrievedAt || nowIso,
+            searchBatchId: rawItem.searchBatchId || batchId || sessionId || undefined,
+            searchQueryUsed: rawItem.searchQueryUsed || queryUsed || undefined,
+            screeningStage: rawItem.screeningStage === 'excluded' ? 'title_abstract' : rawItem.screeningStage || 'title_abstract',
+            decision: rawItem.decision === 'exclude' ? 'unscreened' : rawItem.decision || 'unscreened',
+            duplicateMatchedDatabases: Array.from(
+              new Set([...(Array.isArray(rawItem.duplicateMatchedDatabases) ? rawItem.duplicateMatchedDatabases : []), incomingDb].filter(Boolean))
+            ),
+            databaseSourceRecords: [sourceRecordEntry],
+            evidenceCitations: Array.isArray(rawItem.evidenceCitations) ? rawItem.evidenceCitations : [],
+          },
+          folderPath
+        );
+        const newIdx = canonicalList.length;
+        canonicalList.unshift(newCanonical);
+        // Re-index existing maps shifted by unshift
+        idxById.clear();
+        idxByDoi.clear();
+        idxByPmid.clear();
+        idxByOaId.clear();
+        idxByTitleYear.clear();
+        idxByTitle.clear();
+        const shiftedPreExisting = new Set<number>();
+        preExistingIndices.forEach((oldIdx) => shiftedPreExisting.add(oldIdx + 1));
+        preExistingIndices.clear();
+        shiftedPreExisting.forEach((nIdx) => preExistingIndices.add(nIdx));
+        canonicalList.forEach((art, idx) => registerCanonicalIndex(idx, art));
+        void newIdx;
+        uniqueInsertedCount++;
+      }
+    }
+
+    writeJsonAtomicSync(articlesFile, canonicalList);
 
     let reviewTitle = projectId;
     const metaPath = path.join(folderPath, 'project.json');
@@ -2186,68 +2436,79 @@ app.post('/api/projects/:id/deleted-online-articles/restore', (req: Request, res
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
         reviewTitle = meta?.title || projectId;
-        meta.updatedAt = savedAt;
-        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+        meta.updatedAt = nowIso;
+        writeJsonAtomicSync(metaPath, meta);
       } catch {}
     }
 
     const manifestPath = path.join(folderPath, 'sources_manifest.json');
-    fs.writeFileSync(
-      manifestPath,
-      JSON.stringify(
-        {
-          reviewId: projectId,
-          reviewTitle,
-          folderName: path.basename(folderPath),
-          importedFiles: Array.from(
-            new Set(mergedArticles.map((a: any) => a.sourceFileName || a.title).filter(Boolean))
-          ),
-          totalArticles: mergedArticles.length,
-          lastSavedAt: savedAt,
-        },
-        null,
-        2
+    writeJsonAtomicSync(manifestPath, {
+      reviewId: projectId,
+      reviewTitle,
+      folderName: path.basename(folderPath),
+      importedFiles: Array.from(
+        new Set(canonicalList.map((a: any) => a.sourceFileName || a.title).filter(Boolean))
       ),
-      'utf-8'
-    );
-    updatePartitionMetaFile(folderPath, projectId, reviewTitle, mergedArticles.length);
-
-    const relFolder = path.relative(__dirname, folderPath).replace(/\\/g, '/');
-    return res.json({
-      success: true,
-      projectId,
-      restoredCount: rebuiltArticles.length,
-      restoredArticles: rebuiltArticles,
-      remainingArticles: mergedArticles,
-      remainingDeletedCount: remainingArchive.length,
-      savedAt,
-      databaseFolderPath: relFolder,
+      totalArticles: canonicalList.length,
+      lastSavedAt: nowIso,
     });
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to rebuild deleted online files back to library' });
-  }
-});
+    updatePartitionMetaFile(folderPath, projectId, reviewTitle, canonicalList.length);
 
-app.delete('/api/projects/:id/deleted-online-articles', (req: Request, res: Response) => {
-  try {
-    const projectId = req.params.id;
-    const { archiveIds = [], clearAll = false } = req.body || {};
-    const folderPath = findFolderForProjectId(projectId);
-    if (!folderPath || !fs.existsSync(folderPath)) {
-      return res.status(404).json({ error: 'Partitioned review database folder not found' });
+    const successfullySavedCount = uniqueInsertedCount + duplicateEventsRemovedCount;
+    const importEvent = {
+      importId: `imp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      importedAt: nowIso,
+      mode: mode === 'verify_pdf' || mode === 'single' ? mode : 'metadata',
+      selectedCount: items.length,
+      successfullySavedCount,
+      uniqueInsertedCount,
+      existingMatchedCount,
+      duplicateEventsRemovedCount,
+      byDatabase,
+    };
+
+    const sessions = readSearchSessionsFile(folderPath);
+    const targetSessionId = sessionId || batchId;
+    let updatedSessions = sessions;
+    if (targetSessionId) {
+      const idx = sessions.findIndex((s: any) => s?.id === targetSessionId);
+      if (idx >= 0) {
+        const prev = sessions[idx];
+        const nextSess = {
+          ...prev,
+          successfullySavedCount: Number(prev.successfullySavedCount || 0) + successfullySavedCount,
+          existingLibraryMatchedCount: Number(prev.existingLibraryMatchedCount || 0) + existingMatchedCount,
+          duplicateEventsRemovedCount: Number(prev.duplicateEventsRemovedCount || 0) + duplicateEventsRemovedCount,
+          updatedAt: nowIso,
+          importEvents: [importEvent, ...(Array.isArray(prev.importEvents) ? prev.importEvents : [])].slice(0, 25),
+        };
+        updatedSessions = sessions.map((s: any, i: number) => (i === idx ? nextSess : s));
+        writeSearchSessionsFile(folderPath, updatedSessions);
+      }
     }
-    const archive = readDeletedOnlineArchive(folderPath);
-    const idSet = new Set(Array.isArray(archiveIds) ? archiveIds : []);
-    const nextArchive = clearAll ? [] : archive.filter((rec: any) => !idSet.has(rec.archiveId));
-    writeDeletedOnlineArchive(folderPath, nextArchive);
+
+    const activeSess = updatedSessions.find((s: any) => s?.id === targetSessionId) || updatedSessions[0];
+    const relFolder = path.relative(__dirname, folderPath).replace(/\\/g, '/');
+
     return res.json({
       success: true,
       projectId,
-      purgedCount: Math.max(0, archive.length - nextArchive.length),
-      remainingDeletedCount: nextArchive.length,
+      savedAt: nowIso,
+      databaseFolderPath: relFolder,
+      articles: canonicalList,
+      onlineSearchSessions: updatedSessions,
+      importSummary: importEvent,
+      counters: {
+        externalReportedCount: activeSess?.externalReportedCount || 0,
+        actuallyRetrievedCount: activeSess?.actuallyRetrievedCount || 0,
+        successfullySavedCount: activeSess?.successfullySavedCount || successfullySavedCount,
+        uniqueLibraryCount: canonicalList.length,
+        existingLibraryMatchedCount: activeSess?.existingLibraryMatchedCount || existingMatchedCount,
+        duplicateEventsCount: activeSess?.duplicateEventsRemovedCount || duplicateEventsRemovedCount,
+      },
     });
   } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to purge deleted online records' });
+    return res.status(500).json({ error: err?.message || 'Failed to import retrieved articles' });
   }
 });
 
@@ -2459,7 +2720,7 @@ app.post('/api/projects/:id/workbench-reset', (req: Request, res: Response) => {
         removedItems = articles.filter((a) => idSet.has(a?.id));
       }
       if (removedItems.length > 0) {
-        appendDeletedOnlineArticles(folderPath, projectId, removedItems, `workbench_reset_${target || 'module'}`);
+        clearDeletedOnlineArchiveFile(folderPath);
         removedCount = removedItems.length;
         articles = remaining.map((a) => ({ ...a, projectId }));
         articlesChanged = true;
@@ -3804,7 +4065,8 @@ function collectPositiveLeaves(node: QueryAstNode | null): Array<{ value: string
 function filterAndRankFocusedItems(
   items: any[],
   rawQuery: string,
-  searchBy: string
+  searchBy: string,
+  options: { preserveProviderBooleanHits?: boolean } = {}
 ): { items: any[]; filteredOutCount: number } {
   if (!items || items.length === 0 || searchBy === 'doi' || searchBy === 'related') {
     return { items: items || [], filteredOutCount: 0 };
@@ -3815,6 +4077,20 @@ function filterAndRankFocusedItems(
   const matcherCache = new Map<string, RegExp>();
   const { positive: posBranches, negative: negBranches } = collectTopLevelAndBranches(ast);
   const posLeaves = collectPositiveLeaves(ast);
+
+  const countLeafMatches = (text: string): number => {
+    let count = 0;
+    for (const lf of posLeaves) {
+      const k = `${lf.isPhrase ? 'PHRASE' : 'TERM'}:${lf.value.toLowerCase()}`;
+      let re = matcherCache.get(k);
+      if (!re) {
+        re = buildLeafMatcher(lf.value, lf.isPhrase);
+        matcherCache.set(k, re);
+      }
+      if (re.test(text)) count++;
+    }
+    return count;
+  };
 
   const scored: Array<{ item: any; score: number; idx: number }> = [];
 
@@ -3829,35 +4105,60 @@ function filterAndRankFocusedItems(
     let matched = false;
     let score = 0;
 
-    if (searchBy === 'title') {
-      matched = evaluateAstOnText(ast, title, matcherCache);
-    } else if (searchBy === 'author') {
-      matched = evaluateAstOnText(ast, authorsText, matcherCache);
-    } else if (searchBy === 'abstract') {
-      matched = hasRealAbs ? evaluateAstOnText(ast, abstractText, matcherCache) : false;
-    } else {
-      const titlePlusJournal = `${title} ${journal}`.trim();
+    // Preserve API hits whenever scholarly providers returned them unless explicit NOT constraints exclude them,
+    // while filtering out off-topic bag-of-words noise when abstracts/titles lack core subject matches.
+    if (searchBy === 'boolean') {
       const fullText = `${title} ${abstractText} ${journal}`.trim();
-      if (hasRealAbs) {
-        matched = evaluateAstOnText(ast, fullText, matcherCache);
-      } else {
-        // When metadata source (e.g., Crossref) has no abstract indexed:
-        // First check strict AST on title+journal; else require zero NOT hits and strong multi-branch title coverage (>=70%, min 2 for multi-term queries)
-        if (evaluateAstOnText(ast, titlePlusJournal, matcherCache)) {
+      const hitNeg = negBranches.some((nb) => evaluateAstOnText(nb, fullText, matcherCache));
+      if (hitNeg) {
+        matched = false;
+      } else if (hasRealAbs) {
+        const exactAstMatch = evaluateAstOnText(ast, fullText, matcherCache);
+        if (exactAstMatch) {
           matched = true;
-        } else if (posBranches.length >= 2) {
-          const hitNeg = negBranches.some((nb) => evaluateAstOnText(nb, titlePlusJournal, matcherCache));
-          if (!hitNeg) {
-            const branchHits = posBranches.filter((pb) =>
-              evaluateAstOnText(pb, titlePlusJournal, matcherCache)
-            ).length;
-            const minRequired = Math.max(2, Math.ceil(posBranches.length * 0.7));
-            if (branchHits >= minRequired) {
-              matched = true;
-              score -= 10; // rank full-AST matches ahead of partial-metadata matches
-            }
+          score += 90;
+        } else {
+          const branchMatches = posBranches.filter((pb) =>
+            evaluateAstOnText(pb, fullText, matcherCache)
+          ).length;
+          const primaryOk =
+            posBranches.length > 0 ? evaluateAstOnText(posBranches[0], fullText, matcherCache) : true;
+          if (options.preserveProviderBooleanHits) {
+            matched =
+              posBranches.length <= 1
+                ? primaryOk || countLeafMatches(fullText) >= 1
+                : primaryOk &&
+                  (branchMatches >= Math.min(2, posBranches.length) || countLeafMatches(fullText) >= 2);
+          } else {
+            matched =
+              posBranches.length <= 1
+                ? primaryOk
+                : primaryOk && branchMatches >= Math.max(2, Math.ceil(posBranches.length * 0.6));
           }
         }
+      } else {
+        const metaText = `${title} ${journal}`.trim();
+        const branchMatches = posBranches.filter((pb) =>
+          evaluateAstOnText(pb, metaText, matcherCache)
+        ).length;
+        const primaryOk =
+          posBranches.length > 0 ? evaluateAstOnText(posBranches[0], metaText, matcherCache) : false;
+        matched =
+          posBranches.length <= 1
+            ? primaryOk || countLeafMatches(metaText) >= 1
+            : primaryOk && (branchMatches >= Math.min(2, posBranches.length) || countLeafMatches(metaText) >= 2);
+      }
+    } else if (searchBy === 'author') {
+      matched = evaluateAstOnText(ast, authorsText, matcherCache) || authorsText.length > 0;
+    } else {
+      const hitNeg = negBranches.some((nb) => evaluateAstOnText(nb, `${title} ${abstractText} ${journal}`, matcherCache));
+      matched = !hitNeg;
+      if (searchBy === 'title' && evaluateAstOnText(ast, title, matcherCache)) {
+        score += 50;
+      } else if (searchBy === 'abstract' && hasRealAbs && evaluateAstOnText(ast, abstractText, matcherCache)) {
+        score += 45;
+      } else if (evaluateAstOnText(ast, `${title} ${abstractText} ${journal}`.trim(), matcherCache)) {
+        score += 30;
       }
     }
 
@@ -3876,6 +4177,10 @@ function filterAndRankFocusedItems(
       }
       if (re.test(title)) titleHits++;
       if (re.test(fullCheck)) bodyHits++;
+    }
+    if (posBranches.length > 0) {
+      const branchHits = posBranches.filter((pb) => evaluateAstOnText(pb, fullCheck, matcherCache)).length;
+      score += branchHits * 10;
     }
     score += titleHits * 15 + bodyHits * 5 + Math.min(10, Math.log10((item.citationsCount || 0) + 1) * 2);
     scored.push({ item, score, idx });
@@ -3904,17 +4209,27 @@ async function fetchWithRetry(url: string, options: RequestInit = {}, timeoutMs 
       ...(options.headers || {}),
     },
   };
-  try {
-    let resp = await fetchWithTimeout(url, mergedOptions, timeoutMs);
-    if (resp.status === 429 || resp.status === 503) {
-      await new Promise((r) => setTimeout(r, 550));
-      resp = await fetchWithTimeout(url, mergedOptions, timeoutMs);
+  let lastErr: any;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const resp = await fetchWithTimeout(url, mergedOptions, timeoutMs);
+      if (resp.status !== 429 && resp.status !== 503) {
+        return resp;
+      }
+      if (attempt === 2) return resp;
+      const retryAfterSec = Number(resp.headers.get('retry-after') || 0);
+      const waitMs =
+        retryAfterSec > 0 && retryAfterSec <= 4
+          ? retryAfterSec * 1000
+          : 900 * (attempt + 1) + Math.floor(Math.random() * 250);
+      await new Promise((r) => setTimeout(r, waitMs));
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 2) throw err;
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
     }
-    return resp;
-  } catch (err) {
-    await new Promise((r) => setTimeout(r, 350));
-    return fetchWithTimeout(url, mergedOptions, timeoutMs);
   }
+  throw lastErr;
 }
 
 const CUSTOM_PUBLISHER_MEMBERS: Record<string, { label: string; crossrefMember?: string; mode?: string }> = {
@@ -3959,8 +4274,8 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
     const offset = Math.max(0, Number(req.query.offset) || 0);
     let searchBy = ((req.query.searchBy as string) || 'all_fields').trim().toLowerCase();
 
-    // Remove arbitrary small cap: support up to 1000+ per call (and multi-page pagination for larger)
-    const requestedRows = fetchAll ? 1000 : Math.min(2000, Math.max(5, Number(req.query.rows) || 200));
+    // Support up to 2,500 per page batch with full multi-page cursor/offset pagination
+    const requestedRows = fetchAll ? 1500 : Math.min(2500, Math.max(5, Number(req.query.rows) || 250));
 
     if (!rawQuery) {
       return res.status(400).json({ error: 'Query parameter is required' });
@@ -3989,7 +4304,7 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
 
     // STRICT routing: only hit multiple databases if user explicitly chose 'all' or broadWebSearch===true
     const queryAllSources = db === 'all' || broadWebSearch;
-    const perSourceRows = queryAllSources ? Math.min(requestedRows, 250) : requestedRows;
+    const perSourceRows = queryAllSources ? Math.min(requestedRows, 500) : requestedRows;
 
     const mapOpenAlexWork = (w: any, forcedSource?: string) => {
       const authors = sanitizeAuthorsList((w.authorships || []).map((a: any) => a.author?.display_name || ''));
@@ -4243,11 +4558,11 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
           }
         }
 
-        // Crossref `query.bibliographic` performs OR matching; pull a focused top-relevance candidate window and run strict AST evaluation
+        // Crossref pagination without premature exhaustive termination
         const crQuery = astToKeywordString(parseQueryAst(queryStr, searchBy)) || queryStr;
         const candidateGoal = searchBy === 'related' ? limitCount : Math.max(limitCount, 500);
         const chunkSize = Math.min(500, Math.max(50, candidateGoal));
-        const numChunks = Math.min(3, Math.ceil(candidateGoal / chunkSize));
+        const numChunks = Math.min(6, Math.ceil(candidateGoal / chunkSize));
         let rawTotalAvailable = 0;
 
         const chunks = await Promise.all(
@@ -4262,7 +4577,7 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
             if (searchBy === 'title') qParam = `query.title=${encodeURIComponent(crQuery)}`;
             else if (searchBy === 'author') qParam = `query.author=${encodeURIComponent(crQuery)}`;
             const u = `https://api.crossref.org/works?${qParam}${filterPart}${sortPart}&rows=${curRows}&offset=${curOffset}&mailto=${POLITE_MAILTO}${extraPart}`;
-            const resp = await fetchWithRetry(u, {}, 7500);
+            const resp = await fetchWithRetry(u, {}, 8500);
             if (!resp.ok) return [];
             const data = await resp.json();
             const tr = Number(data?.message?.['total-results'] || 0);
@@ -4275,11 +4590,11 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         const astFilterStr = options.astFilterQuery || rawQuery;
         const { items: filtered } = filterAndRankFocusedItems(rawFlat, astFilterStr, searchBy);
         const finalSlice = filtered.slice(0, limitCount);
-        const exhaustive = rawFlat.length < candidateGoal || filtered.length < Math.min(25, rawFlat.length * 0.25);
+        const exhaustive = rawFlat.length === 0 || rawFlat.length < candidateGoal || startOffset + rawFlat.length >= rawTotalAvailable;
 
         return {
           source: label,
-          totalAvailable: exhaustive ? startOffset + finalSlice.length : Math.max(startOffset + filtered.length, finalSlice.length),
+          totalAvailable: rawTotalAvailable || startOffset + finalSlice.length,
           items: finalSlice,
           rawFetched: rawFlat.length,
           exhaustive,
@@ -4312,7 +4627,7 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         const oaQuery = booleanExprQuery || queryStr;
         const perPage = Math.min(200, Math.max(50, limitCount));
         const startPage = Math.floor(startOffset / perPage) + 1;
-        const maxPages = Math.min(4, Math.ceil(Math.max(limitCount, 200) / perPage));
+        const maxPages = Math.min(8, Math.ceil(Math.max(limitCount, 200) / perPage));
         let totalAvailable = 0;
         let anyOk = false;
 
@@ -4322,32 +4637,58 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         else if (searchBy === 'author') filterParts.push(`raw_author_name.search:${cleanKeywordQuery}`);
         if (extraFilter) filterParts.push(extraFilter);
 
-        const pages = await Promise.all(
-          Array.from({ length: maxPages }, async (_, idx) => {
-            const pageNum = startPage + idx;
-            const searchParam =
-              searchBy === 'title' || searchBy === 'abstract' || searchBy === 'author'
-                ? ''
-                : `search=${encodeURIComponent(oaQuery)}&`;
-            const filterParam = filterParts.length > 0 ? `filter=${encodeURIComponent(filterParts.join(','))}&` : '';
-            const u = `https://api.openalex.org/works?${searchParam}${filterParam}per-page=${perPage}&page=${pageNum}&mailto=${POLITE_MAILTO}${keySuffix}`;
-            const resp = await fetchWithRetry(u, {}, 5000);
-            if (!resp.ok) return [];
-            anyOk = true;
-            const data = await resp.json();
-            const cnt = Number(data?.meta?.count || 0);
-            if (cnt > totalAvailable) totalAvailable = cnt;
-            return (data.results || []).map((w: any) => mapOpenAlexWork(w, forcedSource));
-          })
-        );
+        const buildPageUrl = (pageNum: number) => {
+          const searchParam =
+            searchBy === 'title' || searchBy === 'abstract' || searchBy === 'author'
+              ? ''
+              : `search=${encodeURIComponent(oaQuery)}&`;
+          const filterParam = filterParts.length > 0 ? `filter=${encodeURIComponent(filterParts.join(','))}&` : '';
+          return `https://api.openalex.org/works?${searchParam}${filterParam}per-page=${perPage}&page=${pageNum}&mailto=${POLITE_MAILTO}${keySuffix}`;
+        };
 
-        const rawFlat = pages.flat();
-        const { items: filtered } = filterAndRankFocusedItems(rawFlat, rawQuery, searchBy);
+        // Fetch first page before fanning out so small/medium totals don't trigger unnecessary 429 bursts
+        const rawFlat: any[] = [];
+        const firstResp = await fetchWithRetry(buildPageUrl(startPage), {}, 7500);
+        if (firstResp.ok) {
+          anyOk = true;
+          const firstData = await firstResp.json();
+          totalAvailable = Number(firstData?.meta?.count || 0);
+          const firstBatch = (firstData.results || []).map((w: any) => mapOpenAlexWork(w, forcedSource));
+          rawFlat.push(...firstBatch);
+
+          const remainingTarget = Math.min(
+            limitCount - rawFlat.length,
+            Math.max(0, totalAvailable - startOffset - rawFlat.length)
+          );
+          if (firstBatch.length >= perPage && remainingTarget > 0 && maxPages > 1) {
+            const extraPagesNeeded = Math.min(maxPages - 1, Math.ceil(remainingTarget / perPage));
+            for (let pIdx = 1; pIdx <= extraPagesNeeded; pIdx += 2) {
+              const pair = [startPage + pIdx];
+              if (pIdx + 1 <= extraPagesNeeded) pair.push(startPage + pIdx + 1);
+              const pairResults = await Promise.all(
+                pair.map(async (pageNum) => {
+                  const resp = await fetchWithRetry(buildPageUrl(pageNum), {}, 7500);
+                  if (!resp.ok) return [];
+                  const data = await resp.json();
+                  return (data.results || []).map((w: any) => mapOpenAlexWork(w, forcedSource));
+                })
+              );
+              const added = pairResults.flat();
+              rawFlat.push(...added);
+              if (added.length < pair.length * perPage) break;
+              await new Promise((r) => setTimeout(r, 150));
+            }
+          }
+        }
+
+        const { items: filtered } = filterAndRankFocusedItems(rawFlat, rawQuery, searchBy, {
+          preserveProviderBooleanHits: true,
+        });
         const items = filtered.slice(0, limitCount);
-        const exhaustive = !anyOk || rawFlat.length < perPage * maxPages || filtered.length === 0;
+        const exhaustive = !anyOk || rawFlat.length === 0 || startOffset + rawFlat.length >= totalAvailable;
         return {
           source: forcedSource,
-          totalAvailable: exhaustive ? startOffset + filtered.length : Math.max(filtered.length, totalAvailable),
+          totalAvailable: totalAvailable || startOffset + items.length,
           items,
           ok: anyOk,
           rawFetched: rawFlat.length,
@@ -4468,11 +4809,12 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
       queryStr: string,
       limitCount: number,
       startOffset: number,
-      forcedSource = 'Europe PMC'
+      forcedSource = 'Europe PMC',
+      options: { searchFullText?: boolean } = {}
     ): Promise<{ source: string; totalAvailable: number; items: any[]; exhaustive?: boolean; rawFetched?: number }> => {
       try {
         const epmcExpr = astToBooleanString(parseQueryAst(queryStr, searchBy)) || queryStr;
-        let epmcQuery = `TITLE_ABS:(${epmcExpr})`;
+        let epmcQuery = options.searchFullText ? epmcExpr : `TITLE_ABS:(${epmcExpr})`;
         if (searchBy === 'doi') epmcQuery = `DOI:"${cleanDoi}"`;
         else if (searchBy === 'title') epmcQuery = `TITLE:(${epmcExpr})`;
         else if (searchBy === 'author') epmcQuery = `AUTH:(${epmcExpr})`;
@@ -4485,7 +4827,7 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         let totalAvailable = 0;
 
         const targetTotalToRead = startOffset + limitCount;
-        const maxLoops = Math.min(3, Math.ceil(targetTotalToRead / pageSize));
+        const maxLoops = Math.min(5, Math.ceil(targetTotalToRead / pageSize));
 
         for (let i = 0; i < maxLoops; i++) {
           const epmcUrl = `https://www.ebi.ac.uk/europepmc/webservices/rest/search?query=${encodeURIComponent(
@@ -4692,18 +5034,30 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
           totalAvailable = papers.length;
         } else {
           const s2Query = astToKeywordString(parseQueryAst(queryStr, searchBy)) || queryStr;
-          const firstLimit = Math.min(100, Math.max(50, limitCount));
-          const r = await fetchWithRetry(
-            `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
-              s2Query
-            )}&offset=${startOffset}&limit=${firstLimit}&fields=${fields}`,
-            { headers: s2Headers },
-            4800
-          );
-          if (!r.ok) return { source: forcedSource, totalAvailable: 0, items: [], ok: false, exhaustive: true };
-          const data = await r.json();
-          totalAvailable = Number(data?.total || 0);
-          papers = Array.isArray(data?.data) ? data.data : [];
+          const batchLimit = Math.min(100, Math.max(50, limitCount));
+          const maxLoops = Math.min(5, Math.ceil(limitCount / batchLimit));
+          let curOffset = startOffset;
+          for (let loop = 0; loop < maxLoops; loop++) {
+            const r = await fetchWithRetry(
+              `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(
+                s2Query
+              )}&offset=${curOffset}&limit=${batchLimit}&fields=${fields}`,
+              { headers: s2Headers },
+              5500
+            );
+            if (!r.ok) {
+              if (loop === 0) return { source: forcedSource, totalAvailable: 0, items: [], ok: false, exhaustive: true };
+              break;
+            }
+            const data = await r.json();
+            if (data?.total !== undefined && Number(data.total) > totalAvailable) {
+              totalAvailable = Number(data.total);
+            }
+            const batch = Array.isArray(data?.data) ? data.data : [];
+            papers.push(...batch);
+            if (batch.length < batchLimit || papers.length >= limitCount) break;
+            curOffset += batch.length;
+          }
 
           if (searchBy === 'related' && papers[0]?.paperId) {
             const recResp = await fetchWithRetry(
@@ -4755,13 +5109,14 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
           };
         });
 
-        const { items: filtered } = filterAndRankFocusedItems(rawItems, rawQuery, searchBy);
+        const { items: filtered } = filterAndRankFocusedItems(rawItems, rawQuery, searchBy, {
+          preserveProviderBooleanHits: true,
+        });
         const items = filtered.slice(0, limitCount);
-        const matchRatio = rawItems.length > 0 ? filtered.length / rawItems.length : 0;
-        const exhaustive = rawItems.length < 100 || matchRatio < 0.5;
+        const exhaustive = rawItems.length === 0 || startOffset + rawItems.length >= totalAvailable;
         return {
           source: forcedSource,
-          totalAvailable: exhaustive ? startOffset + filtered.length : Math.max(filtered.length, Math.round(totalAvailable * matchRatio)),
+          totalAvailable: totalAvailable || startOffset + items.length,
           items,
           ok: true,
           rawFetched: rawItems.length,
@@ -4805,7 +5160,12 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         (async () => {
           const oa = await fetchOpenAlexBatched(rawQuery, perSourceRows, offset, 'OpenAlex');
           if (oa.ok && oa.items.length > 0) return oa;
-          return fetchOpenAire(rawQuery, perSourceRows, offset, 'OpenAlex');
+          const openaireFallback = await fetchOpenAire(rawQuery, perSourceRows, offset, 'OpenAlex');
+          if (openaireFallback.items.length > 0) return openaireFallback;
+          return fetchCrossrefBatched(rawQuery, perSourceRows, offset, {
+            forcedSource: 'OpenAlex',
+            sort: 'relevance',
+          });
         })()
       );
     } else if (db === 'semantic_scholar') {
@@ -4817,38 +5177,54 @@ app.get('/api/online/search', async (req: Request, res: Response) => {
         })()
       );
     } else if (isGoogleScholar) {
-      // Google Scholar: Scholarly multi-type citation blend (Semantic Scholar + OpenAlex + OpenAIRE), aligned to focused web query
+      // Google Scholar: Scholarly full-text + metadata index blend (OpenAlex + Crossref + Europe PMC + Semantic Scholar + DOAJ)
       tasks.push(
         (async () => {
-          const [s2, oa, openaire] = await Promise.all([
-            fetchSemanticScholarBatched(rawQuery, Math.min(perSourceRows, 100), offset, 'Google Scholar'),
-            fetchOpenAlexBatched(rawQuery, Math.min(perSourceRows, 200), offset, 'Google Scholar'),
-            fetchOpenAire(rawQuery, perSourceRows, offset, 'Google Scholar'),
-          ]);
-          let combined = [...s2.items, ...oa.items, ...openaire.items];
-          let exhaustive = Boolean(s2.exhaustive && oa.exhaustive && openaire.exhaustive);
-          let totalEst = Math.max(s2.totalAvailable, oa.totalAvailable, openaire.totalAvailable);
-          if (combined.length === 0) {
-            const crScholar = await fetchCrossrefBatched(rawQuery, perSourceRows, offset, {
+          const [oa, crScholar, epmc, s2] = await Promise.all([
+            fetchOpenAlexBatched(rawQuery, Math.min(perSourceRows, 600), offset, 'Google Scholar'),
+            fetchCrossrefBatched(rawQuery, Math.min(perSourceRows, 500), offset, {
               forcedSource: 'Google Scholar',
               filter: 'type:proceedings-article,type:book-chapter,type:posted-content,type:journal-article',
               sort: 'relevance',
-            });
-            combined = crScholar.items;
-            totalEst = crScholar.totalAvailable;
-            exhaustive = Boolean(crScholar.exhaustive);
+            }),
+            fetchEuropePmcBatched(rawQuery, Math.min(perSourceRows, 300), offset, 'Google Scholar', {
+              searchFullText: true,
+            }),
+            fetchSemanticScholarBatched(rawQuery, Math.min(perSourceRows, 100), offset, 'Google Scholar'),
+          ]);
+
+          let combined = [...oa.items, ...epmc.items, ...s2.items, ...crScholar.items];
+          if (combined.length < 40) {
+            const openaire = await fetchOpenAire(rawQuery, Math.min(perSourceRows, 250), offset, 'Google Scholar');
+            combined = [...combined, ...openaire.items];
           }
-          // Deduplicate within Google Scholar itself
+
+          // Deduplicate within Google Scholar itself preserving highest-ranked match first
           const seen = new Set<string>();
           const deduped = combined.filter((it) => {
-            const k = (it.doi || it.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const doiK = (it.doi || '').toLowerCase().trim();
+            const titleK = (it.title || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+            const k = doiK || titleK;
             if (!k || seen.has(k)) return false;
+            if (doiK && titleK) seen.add(titleK);
             seen.add(k);
             return true;
           });
+
+          const exhaustive = Boolean(oa.exhaustive && epmc.exhaustive && crScholar.exhaustive);
+          // Do not let raw bag-of-words Crossref total-results (800k+) distort Google Scholar boolean count
+          const booleanReportedMax = Math.max(
+            oa.totalAvailable || 0,
+            epmc.totalAvailable || 0,
+            s2.totalAvailable || 0
+          );
+          const totalEst = exhaustive
+            ? deduped.length
+            : Math.max(deduped.length, booleanReportedMax || deduped.length);
+
           return {
             source: 'Google Scholar',
-            totalAvailable: exhaustive ? deduped.length : Math.max(totalEst, deduped.length),
+            totalAvailable: totalEst,
             items: deduped,
             exhaustive,
           };
